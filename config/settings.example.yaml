@@ -1,0 +1,23 @@
+application:
+  test_mode: true
+  log_level: INFO
+
+storage:
+  data_dir: "C:\\CatDoorData"
+  retention_days: 30
+  minimum_free_space_gb: 80
+
+cameras:
+  face:
+    enabled: true
+    rtsp_main: ""
+    rtsp_sub: ""
+  side:
+    enabled: true
+    rtsp_main: ""
+    rtsp_sub: ""
+
+inference:
+  detector_fps: 5
+  face_weight: 0.65
+  body_weight: 0.35

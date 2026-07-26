@@ -1,0 +1,58 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+secrets/
+*.key
+*.pem
+
+# IDE
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Runtime data
+CatDoorData/
+data/
+events/
+recordings/
+dataset/
+exports/
+logs/
+backups/
+*.db
+*.sqlite
+*.sqlite3
+
+# Models and archives
+*.onnx
+*.pt
+*.pth
+*.engine
+*.zip
+*.tar
+*.tar.gz
+
+# Media
+*.mp4
+*.mkv
+*.avi
+*.mov
+*.jpg
+*.jpeg
+*.png
+*.webp
+
+# Keep explicitly approved tiny test fixtures
+!tests/fixtures/
+!tests/fixtures/**
