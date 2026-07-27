@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CatDoor AI</title>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, sans-serif; }
+    body { margin: 0; background: #111827; color: #e5e7eb; }
+    header, main { width: min(1100px, calc(100% - 32px)); margin: 24px auto; }
+    header { display: flex; justify-content: space-between; align-items: center; }
+    .badge { padding: 6px 10px; border-radius: 999px; background: #064e3b; color: #a7f3d0; }
+    .panel { background: #1f2937; border: 1px solid #374151; border-radius: 14px; padding: 18px; margin-bottom: 20px; }
+    .stream { width: 100%; aspect-ratio: 16/9; object-fit: contain; background: #030712; border-radius: 9px; }
+    .rotate-180 { transform: rotate(180deg); }
+    .controls { display: flex; gap: 12px; align-items: center; margin-top: 14px; flex-wrap: wrap; }
+    button, select, input { font: inherit; border-radius: 8px; border: 1px solid #4b5563; padding: 9px 12px; }
+    button { background: #2563eb; color: white; cursor: pointer; }
+    button.danger { background: #991b1b; }
+    button:disabled { opacity: .55; cursor: wait; }
+    select, input { background: #111827; color: #e5e7eb; }
+    .events { display: grid; gap: 14px; }
+    .event { display: grid; grid-template-columns: minmax(220px, 360px) 1fr; gap: 16px; border-top: 1px solid #374151; padding-top: 14px; }
+    video { width: 100%; border-radius: 8px; background: #030712; }
+    .muted { color: #9ca3af; }
+    .error { color: #fca5a5; }
+    @media (max-width: 720px) { .event { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+<header>
+  <h1>CatDoor AI</h1>
+  <span class="badge">Тестовый режим — дверь не управляется</span>
+</header>
+<main>
+  <section class="panel">
+    <h2>Камеры</h2>
+    <div class="event">
+      <div>
+        <h3>Центральная камера — Cute 2</h3>
+        {% if face_configured %}
+          <img class="stream rotate-180" src="/stream/face.mjpeg" alt="Поток центральной камеры">
+        {% else %}<p class="error">Центральная камера не настроена.</p>{% endif %}
+      </div>
+      <div>
+        <h3>Дополнительная камера — Ursa Minor</h3>
+        {% if side_configured %}
+          <img class="stream" src="/stream/side.mjpeg" alt="Поток боковой камеры">
+        {% else %}<p class="muted">Дополнительная камера не настроена.</p>{% endif %}
+      </div>
+    </div>
+    {% if face_configured %}
+      <div class="controls">
+        <label>Длительность
+          <input id="duration" type="number" min="3" max="30" value="{{ default_duration }}"> сек.
+        </label>
+        <button id="capture">Сохранить проход сейчас</button>
+        <span id="capture-status" class="muted"></span>
+      </div>
+    {% else %}
+      <p class="error">Камера face не настроена. Задайте CATDOOR_CAMERA_FACE_RTSP.</p>
+    {% endif %}
+  </section>
+
+  <section class="panel">
+    <h2>Сохранённые события</h2>
+    <div class="events">
+    {% for event in events %}
+      <article class="event" data-event="{{ event.id }}">
+        <div>
+          {% if event.status in ["ready", "partial"] and event.media_path %}
+            <strong>Центральная камера</strong>
+            <video class="rotate-180" controls preload="metadata" src="/media/{{ event.id }}/face"></video>
+            {% if event.side_media_path %}
+              <strong>Дополнительная камера</strong>
+              <video controls preload="metadata" src="/media/{{ event.id }}/side"></video>
+            {% endif %}
+          {% else %}
+            <p class="error">Запись не готова: {{ event.error_code or event.status }}</p>
+          {% endif %}
+        </div>
+        <div>
+          <strong>Событие #{{ event.id }}</strong>
+          <p class="muted">{{ event.created_at }} · {{ event.duration_seconds }} сек.</p>
+          <div class="controls">
+            <select class="label">
+              <option value="pending" {{ "selected" if event.label == "pending" }}>Не размечено</option>
+              <option value="known_cat" {{ "selected" if event.label == "known_cat" }}>Домашний кот</option>
+              <option value="foreign_cat" {{ "selected" if event.label == "foreign_cat" }}>Чужой кот</option>
+              <option value="not_visible" {{ "selected" if event.label == "not_visible" }}>Кота не видно</option>
+              <option value="multiple_cats" {{ "selected" if event.label == "multiple_cats" }}>Несколько котов</option>
+            </select>
+            <input class="cat-name" placeholder="Имя домашнего кота" value="{{ event.cat_name or '' }}">
+            <button class="save-label">Сохранить разметку</button>
+            <button class="delete-event danger">Удалить проход</button>
+            <span class="label-status muted"></span>
+          </div>
+        </div>
+      </article>
+    {% else %}
+      <p class="muted">Событий пока нет.</p>
+    {% endfor %}
+    </div>
+  </section>
+</main>
+<script>
+  const captureButton = document.querySelector("#capture");
+  captureButton?.addEventListener("click", async () => {
+    const status = document.querySelector("#capture-status");
+    captureButton.disabled = true;
+    status.textContent = "Идёт запись…";
+    try {
+      const response = await fetch("/api/events", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({duration_seconds: Number(document.querySelector("#duration").value)})
+      });
+      const result = await response.json();
+      if (!response.ok || result.status !== "ready") throw new Error(result.detail || result.status);
+      status.textContent = "Событие сохранено";
+      location.reload();
+    } catch (error) {
+      status.textContent = `Ошибка: ${error.message}`;
+    } finally {
+      captureButton.disabled = false;
+    }
+  });
+
+  document.querySelectorAll(".save-label").forEach(button => {
+    button.addEventListener("click", async () => {
+      const event = button.closest(".event");
+      const status = event.querySelector(".label-status");
+      const payload = {
+        label: event.querySelector(".label").value,
+        cat_name: event.querySelector(".cat-name").value || null
+      };
+      const response = await fetch(`/api/events/${event.dataset.event}/label`, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(payload)
+      });
+      const result = await response.json();
+      status.textContent = response.ok ? "Сохранено" : `Ошибка: ${result.detail}`;
+    });
+  });
+
+  document.querySelectorAll(".delete-event").forEach(button => {
+    button.addEventListener("click", async () => {
+      const event = button.closest(".event");
+      if (!confirm(`Удалить событие #${event.dataset.event} и его видео без возможности восстановления?`)) {
+        return;
+      }
+      button.disabled = true;
+      const response = await fetch(`/api/events/${event.dataset.event}`, {method: "DELETE"});
+      if (response.ok) {
+        event.remove();
+        return;
+      }
+      const result = await response.json();
+      alert(`Не удалось удалить событие: ${result.detail}`);
+      button.disabled = false;
+    });
+  });
+</script>
+</body>
+</html>

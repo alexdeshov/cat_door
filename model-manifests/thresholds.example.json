@@ -1,0 +1,6 @@
+{
+  "accept_score": 0.9,
+  "max_false_accept_rate": 0.01,
+  "max_false_reject_rate": 0.2,
+  "max_mean_inference_ms": 200.0
+}

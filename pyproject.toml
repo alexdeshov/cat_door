@@ -11,12 +11,28 @@ dependencies = [
     "pydantic-settings>=2.7",
 ]
 
+[project.scripts]
+catdoor-web = "src.web.app:run"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8.3",
     "ruff>=0.9",
     "mypy>=1.14",
     "httpx>=0.28",
+]
+training = [
+    "torch>=2.6",
+    "torchvision>=0.21",
+    "onnx>=1.17",
+    "onnxscript>=0.2",
+    "numpy>=2.0",
+    "pillow>=11.0",
+]
+acceptance = [
+    "onnxruntime>=1.20",
+    "numpy>=2.0",
+    "pillow>=11.0",
 ]
 
 [tool.pytest.ini_options]

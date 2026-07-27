@@ -17,3 +17,6 @@
 - около 500 кадров сбоку.
 
 Кадры одного события не должны одновременно попадать в train, validation и test.
+
+Реализованный конвейер, формат JSONL, команды экспорта ONNX и приёмки на Windows
+описаны в `docs/model-training-and-acceptance.md` и `training/README.md`.
