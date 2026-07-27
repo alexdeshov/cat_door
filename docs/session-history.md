@@ -95,3 +95,17 @@
 - Следующий шаг: оформить документационные изменения через pull request, затем
   продолжить работу в `feature/local-event-admin` и подготовить MacBook к
   обучению.
+
+## 2026-07-27 — Публикация единого журнала
+
+- Цель: опубликовать документационную ветку и открыть pull request в `main`.
+- Сделано: ветка `docs/session-history` отправлена в `origin`, открыт draft pull
+  request `#2` с правилами ведения и единым журналом сессий.
+- Решения: PR ограничен файлами `AGENTS.md` и `docs/session-history.md`; runtime
+  и feature-ветка не изменяются.
+- Изменённые файлы: `docs/session-history.md`.
+- Проверки: авторизация GitHub CLI подтверждена, `git diff --check` выполнен
+  успешно, состав diff и направление `docs/session-history → main` проверены.
+- Статус: завершено.
+- Следующий шаг: проверить и влить pull request `#2`, затем обновить
+  `feature/local-event-admin` изменениями из `main`.
