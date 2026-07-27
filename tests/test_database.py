@@ -23,5 +23,9 @@ def test_initial_migration_is_applied_once() -> None:
                 "SELECT name FROM sqlite_master WHERE type = 'table'"
             )
         }
-    assert versions == [("001_initial",), ("002_side_media",)]
+    assert versions == [
+        ("001_initial",),
+        ("002_side_media",),
+        ("003_training_target",),
+    ]
     assert "events" in tables

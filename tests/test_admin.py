@@ -39,10 +39,15 @@ def test_capture_and_label_known_cat(runtime_path: Path, monkeypatch) -> None:
 
     label = client.post(
         "/api/events/1/label",
-        json={"label": "known_cat", "cat_name": "Барсик"},
+        json={
+            "label": "known_cat",
+            "cat_name": "Барсик",
+            "training_target": "local",
+        },
     )
     assert label.status_code == 200
     assert label.json()["cat_name"] == "Барсик"
+    assert label.json()["training_target"] == "local"
 
     page = client.get("/")
     assert page.status_code == 200
@@ -70,6 +75,73 @@ def test_rejects_unknown_label(runtime_path: Path, monkeypatch) -> None:
         json={"label": "not-a-label", "cat_name": None},
     )
     assert response.status_code == 422
+
+
+def test_training_target_requires_usable_label(runtime_path: Path, monkeypatch) -> None:
+    client = make_client(runtime_path, monkeypatch)
+    client.post("/api/events", json={"duration_seconds": 5})
+
+    response = client.post(
+        "/api/events/1/label",
+        json={
+            "label": "not_visible",
+            "cat_name": None,
+            "training_target": "macbook",
+        },
+    )
+
+    assert response.status_code == 422
+
+
+def test_rejects_unknown_training_target(runtime_path: Path, monkeypatch) -> None:
+    client = make_client(runtime_path, monkeypatch)
+    client.post("/api/events", json={"duration_seconds": 5})
+
+    response = client.post(
+        "/api/events/1/label",
+        json={
+            "label": "foreign_cat",
+            "cat_name": None,
+            "training_target": "cloud",
+        },
+    )
+
+    assert response.status_code == 422
+
+
+def test_macbook_export_download(runtime_path: Path, monkeypatch) -> None:
+    client = make_client(runtime_path, monkeypatch)
+    archive = runtime_path / "exports" / "dataset.zip"
+    archive.parent.mkdir(parents=True)
+    archive.write_bytes(b"zip")
+    monkeypatch.setattr(
+        "src.web.app.create_macbook_export",
+        lambda database_path, data_dir, ffmpeg_path: archive,
+    )
+
+    response = client.get("/api/training/macbook/export")
+
+    assert response.status_code == 200
+    assert response.content == b"zip"
+
+
+def test_start_local_training_is_detached(runtime_path: Path, monkeypatch) -> None:
+    client = make_client(runtime_path, monkeypatch)
+
+    class FakeProcess:
+        pid = 4321
+
+    monkeypatch.setattr(
+        "src.web.app.subprocess.Popen",
+        lambda *args, **kwargs: FakeProcess(),
+    )
+
+    response = client.post("/api/training/local/start")
+
+    assert response.status_code == 202
+    assert response.json()["pid"] == 4321
+    status = client.get("/api/training/local/status")
+    assert status.json()["state"] == "starting"
 
 
 def test_media_path_cannot_escape_data_root(runtime_path: Path, monkeypatch) -> None:

@@ -63,6 +63,28 @@
   </section>
 
   <section class="panel">
+    <h2>Подготовка обучения</h2>
+    <p class="muted">
+      Для MacBook выбрано событий: {{ target_counts.macbook }}.
+      Для этого компьютера: {{ target_counts.local }}.
+    </p>
+    <div class="controls">
+      <a href="/api/training/macbook/export"><button>Скачать набор для MacBook</button></a>
+      <button id="start-local-training"
+        {{ "disabled" if local_status and local_status.state in ["starting", "preparing", "training"] }}>
+        Начать локальный эксперимент
+      </button>
+      <span id="training-status" class="muted">
+        {% if local_status %}{{ local_status.message }}{% else %}Обучение ещё не запускалось{% endif %}
+      </span>
+    </div>
+    <p class="muted">
+      Локальный запуск использует CPU и отделён от веб-интерфейса. По умолчанию
+      выполняются {{ local_training_epochs }} короткие эпохи.
+    </p>
+  </section>
+
+  <section class="panel">
     <h2>Сохранённые события</h2>
     <div class="events">
     {% for event in events %}
@@ -91,6 +113,11 @@
               <option value="multiple_cats" {{ "selected" if event.label == "multiple_cats" }}>Несколько котов</option>
             </select>
             <input class="cat-name" placeholder="Имя домашнего кота" value="{{ event.cat_name or '' }}">
+            <select class="training-target" aria-label="Назначение для обучения">
+              <option value="excluded" {{ "selected" if event.training_target == "excluded" }}>Не использовать для обучения</option>
+              <option value="macbook" {{ "selected" if event.training_target == "macbook" }}>Отправить на MacBook</option>
+              <option value="local" {{ "selected" if event.training_target == "local" }}>Обучать на этом компьютере</option>
+            </select>
             <button class="save-label">Сохранить разметку</button>
             <button class="delete-event danger">Удалить проход</button>
             <span class="label-status muted"></span>
@@ -132,7 +159,8 @@
       const status = event.querySelector(".label-status");
       const payload = {
         label: event.querySelector(".label").value,
-        cat_name: event.querySelector(".cat-name").value || null
+        cat_name: event.querySelector(".cat-name").value || null,
+        training_target: event.querySelector(".training-target").value
       };
       const response = await fetch(`/api/events/${event.dataset.event}/label`, {
         method: "POST",
@@ -161,6 +189,32 @@
       button.disabled = false;
     });
   });
+
+  const trainingButton = document.querySelector("#start-local-training");
+  trainingButton?.addEventListener("click", async () => {
+    const status = document.querySelector("#training-status");
+    trainingButton.disabled = true;
+    const response = await fetch("/api/training/local/start", {method: "POST"});
+    const result = await response.json();
+    status.textContent = response.ok
+      ? `Процесс запущен, PID ${result.pid}`
+      : `Ошибка: ${result.detail}`;
+    if (!response.ok) trainingButton.disabled = false;
+  });
+
+  async function refreshTrainingStatus() {
+    const response = await fetch("/api/training/local/status");
+    if (!response.ok) return;
+    const result = await response.json();
+    document.querySelector("#training-status").textContent = result.message;
+    if (["completed", "failed", "idle"].includes(result.state)) {
+      trainingButton.disabled = false;
+      return;
+    }
+    trainingButton.disabled = true;
+    setTimeout(refreshTrainingStatus, 3000);
+  }
+  refreshTrainingStatus();
 </script>
 </body>
 </html>

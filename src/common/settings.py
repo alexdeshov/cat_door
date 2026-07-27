@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     ffmpeg_path: str = "ffmpeg"
     preview_fps: int = Field(default=5, ge=1, le=10)
     capture_duration_seconds: int = Field(default=8, ge=3, le=30)
+    local_training_epochs: int = Field(default=2, ge=1, le=100)
     web_host: str = "127.0.0.1"
     web_port: int = Field(default=8080, ge=1, le=65535)
 

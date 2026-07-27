@@ -1,8 +1,13 @@
+import json
 import shutil
+import subprocess
+import sys
 from collections.abc import Generator
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
+from uuid import uuid4
 
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -15,8 +20,10 @@ from sqlalchemy.orm import Session
 from src.common.database import Event, create_session_factory, session_dependency
 from src.common.settings import Settings
 from src.recorder.ffmpeg import RecorderError, mjpeg_stream, record_clip
+from training.workflow import create_macbook_export, write_status
 
 LABELS = {"pending", "known_cat", "foreign_cat", "not_visible", "multiple_cats"}
+TRAINING_TARGETS = {"excluded", "macbook", "local"}
 
 
 class CapturePayload(BaseModel):
@@ -26,6 +33,7 @@ class CapturePayload(BaseModel):
 class LabelPayload(BaseModel):
     label: str
     cat_name: str | None = Field(default=None, max_length=100)
+    training_target: str = "excluded"
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -47,6 +55,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         session: Annotated[Session, Depends(get_session)],
     ) -> HTMLResponse:
         events = session.scalars(select(Event).order_by(Event.created_at.desc()).limit(100)).all()
+        target_counts = {
+            target: sum(event.training_target == target for event in events)
+            for target in ("macbook", "local")
+        }
+        local_runs = sorted((settings.data_dir / "training" / "local").glob("*/status.json"))
+        local_status = None
+        if local_runs:
+            try:
+                local_status = json.loads(local_runs[-1].read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                local_status = {"state": "unknown", "message": "Статус запуска повреждён"}
         return templates.TemplateResponse(
             request=request,
             name="index.html",
@@ -55,6 +74,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "face_configured": bool(settings.camera_face_rtsp),
                 "side_configured": bool(settings.camera_side_rtsp),
                 "default_duration": settings.capture_duration_seconds,
+                "target_counts": target_counts,
+                "local_status": local_status,
+                "local_training_epochs": settings.local_training_epochs,
             },
         )
 
@@ -130,10 +152,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(422, "Для домашнего кота укажите имя")
         if payload.label != "known_cat" and cat_name:
             raise HTTPException(422, "Имя допустимо только для домашнего кота")
+        if payload.training_target not in TRAINING_TARGETS:
+            raise HTTPException(422, "Неизвестное назначение обучения")
+        if payload.training_target != "excluded" and payload.label not in {
+            "known_cat",
+            "foreign_cat",
+        }:
+            raise HTTPException(
+                422,
+                "Для обучения можно выбрать только домашнего или чужого кота",
+            )
         event.label = payload.label
         event.cat_name = cat_name
+        event.training_target = payload.training_target
         session.commit()
-        return {"id": event.id, "label": event.label, "cat_name": event.cat_name}
+        return {
+            "id": event.id,
+            "label": event.label,
+            "cat_name": event.cat_name,
+            "training_target": event.training_target,
+        }
 
     @app.delete("/api/events/{event_id}", status_code=204)
     def delete_event(
@@ -156,6 +194,78 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         session.delete(event)
         session.commit()
+
+    @app.get("/api/training/macbook/export")
+    def export_for_macbook() -> FileResponse:
+        try:
+            archive = create_macbook_export(
+                settings.resolved_database_path,
+                settings.data_dir,
+                settings.ffmpeg_path,
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+        return FileResponse(
+            archive,
+            media_type="application/zip",
+            filename=archive.name,
+        )
+
+    @app.post("/api/training/local/start", status_code=202)
+    def start_local_training() -> dict[str, object]:
+        runs_root = settings.data_dir / "training" / "local"
+        existing = sorted(runs_root.glob("*/status.json"))
+        if existing:
+            try:
+                latest = json.loads(existing[-1].read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                latest = {}
+            if latest.get("state") in {"starting", "preparing", "training"}:
+                raise HTTPException(409, "Локальное обучение уже выполняется")
+
+        run_id = f"{datetime.now(UTC):%Y%m%d-%H%M%S}-{uuid4().hex[:8]}"
+        output_dir = runs_root / run_id
+        status_path = output_dir / "status.json"
+        write_status(status_path, state="starting", message="Запуск отдельного процесса")
+        log_path = output_dir / "training.log"
+        command = [
+            sys.executable,
+            "-m",
+            "training.local_job",
+            str(settings.resolved_database_path.resolve()),
+            str(settings.data_dir.resolve()),
+            settings.ffmpeg_path,
+            str(output_dir.resolve()),
+            "--epochs",
+            str(settings.local_training_epochs),
+        ]
+        creationflags = 0
+        if sys.platform == "win32":
+            creationflags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+        try:
+            with log_path.open("ab") as log:
+                process = subprocess.Popen(
+                    command,
+                    stdin=subprocess.DEVNULL,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    cwd=Path.cwd(),
+                    creationflags=creationflags,
+                )
+        except OSError as exc:
+            write_status(status_path, state="failed", message="Не удалось запустить Python")
+            raise HTTPException(500, "Не удалось запустить процесс обучения") from exc
+        return {"run_id": run_id, "pid": process.pid, "state": "starting"}
+
+    @app.get("/api/training/local/status")
+    def local_training_status() -> dict[str, object]:
+        statuses = sorted((settings.data_dir / "training" / "local").glob("*/status.json"))
+        if not statuses:
+            return {"state": "idle", "message": "Локальное обучение ещё не запускалось"}
+        try:
+            return json.loads(statuses[-1].read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise HTTPException(500, "Не удалось прочитать статус обучения") from exc
 
     @app.get("/media/{event_id}/{view}")
     def media(

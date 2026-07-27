@@ -41,3 +41,7 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+
+[[tool.mypy.overrides]]
+module = ["onnxruntime", "torchvision", "torchvision.*"]
+ignore_missing_imports = true

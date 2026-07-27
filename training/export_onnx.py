@@ -25,6 +25,8 @@ def export_checkpoint(checkpoint_path: Path, destination: Path) -> dict[str, obj
         dynamo=True,
         external_data=False,
     )
+    if program is None:
+        raise RuntimeError("PyTorch ONNX exporter did not return an ONNX program")
     program.save(destination)
     return {
         "architecture": checkpoint["architecture"],

@@ -24,6 +24,7 @@ class Event(Base):
     side_media_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
     label: Mapped[str] = mapped_column(String(30), default="pending")
     cat_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    training_target: Mapped[str] = mapped_column(String(20), default="excluded")
     error_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
 
