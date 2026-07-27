@@ -21,7 +21,7 @@ def export_checkpoint(checkpoint_path: Path, destination: Path) -> dict[str, obj
         (example,),
         input_names=["image"],
         output_names=["logits"],
-        dynamic_shapes={"image": {0: "batch"}},
+        dynamic_shapes=({0: "batch"},),
         dynamo=True,
         external_data=False,
     )

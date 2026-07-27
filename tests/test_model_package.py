@@ -46,3 +46,39 @@ def test_verify_rejects_unsafe_member(runtime_path: Path) -> None:
 
     with pytest.raises(ValueError, match="unsafe package member"):
         verify_package(package)
+
+
+def test_verify_rejects_unexpected_member(runtime_path: Path) -> None:
+    package = runtime_path / "unexpected.zip"
+    with zipfile.ZipFile(package, "w") as archive:
+        archive.writestr("face_model.onnx", b"synthetic-onnx")
+        archive.writestr("model_info.json", "{}")
+        archive.writestr("thresholds.json", "{}")
+        archive.writestr("checksums.sha256", "")
+        archive.writestr("checkpoint.pt", b"must-not-be-packaged")
+
+    with pytest.raises(ValueError, match=r"unexpected package files: checkpoint\.pt"):
+        verify_package(package)
+
+
+def test_build_rejects_unexpected_source_file(runtime_path: Path) -> None:
+    source = runtime_path / "source"
+    source.mkdir()
+    (source / "face_model.onnx").write_bytes(b"synthetic-onnx")
+    (source / "model_info.json").write_text("{}", encoding="utf-8")
+    (source / "thresholds.json").write_text("{}", encoding="utf-8")
+    (source / "checkpoint.pt").write_bytes(b"must-not-be-packaged")
+
+    with pytest.raises(ValueError, match=r"unexpected package files: checkpoint\.pt"):
+        build_package(source, runtime_path / "model.zip")
+
+
+def test_build_rejects_destination_inside_source(runtime_path: Path) -> None:
+    source = runtime_path / "source"
+    source.mkdir()
+    (source / "face_model.onnx").write_bytes(b"synthetic-onnx")
+    (source / "model_info.json").write_text("{}", encoding="utf-8")
+    (source / "thresholds.json").write_text("{}", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="package destination must be outside source_dir"):
+        build_package(source, source / "model.zip")

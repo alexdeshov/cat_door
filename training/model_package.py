@@ -8,6 +8,12 @@ from typing import Any
 REQUIRED_METADATA = {"model_info.json", "thresholds.json", "checksums.sha256"}
 
 
+def _unexpected_package_files(names: set[str]) -> list[str]:
+    return sorted(
+        name for name in names if name not in REQUIRED_METADATA and not name.endswith(".onnx")
+    )
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as source:
@@ -17,8 +23,13 @@ def sha256_file(path: Path) -> str:
 
 
 def build_package(source_dir: Path, destination: Path) -> None:
+    if source_dir.resolve() in destination.resolve().parents:
+        raise ValueError("package destination must be outside source_dir")
     files = sorted(path for path in source_dir.iterdir() if path.is_file())
     names = {path.name for path in files}
+    unexpected = _unexpected_package_files(names)
+    if unexpected:
+        raise ValueError(f"unexpected package files: {', '.join(unexpected)}")
     if not {"model_info.json", "thresholds.json"}.issubset(names):
         raise ValueError("model_info.json and thresholds.json are required")
     if not any(path.suffix == ".onnx" for path in files):
@@ -58,6 +69,9 @@ def verify_package(package_path: Path) -> dict[str, Any]:
             path = PurePosixPath(name)
             if path.is_absolute() or ".." in path.parts or len(path.parts) != 1:
                 raise ValueError(f"unsafe package member: {name}")
+        unexpected = _unexpected_package_files(set(names))
+        if unexpected:
+            raise ValueError(f"unexpected package files: {', '.join(unexpected)}")
         missing = REQUIRED_METADATA - set(names)
         if missing:
             raise ValueError(f"missing package files: {', '.join(sorted(missing))}")
