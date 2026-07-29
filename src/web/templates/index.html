@@ -12,7 +12,6 @@
     .badge { padding: 6px 10px; border-radius: 999px; background: #064e3b; color: #a7f3d0; }
     .panel { background: #1f2937; border: 1px solid #374151; border-radius: 14px; padding: 18px; margin-bottom: 20px; }
     .stream { width: 100%; aspect-ratio: 16/9; object-fit: contain; background: #030712; border-radius: 9px; }
-    .rotate-180 { transform: rotate(180deg); }
     .controls { display: flex; gap: 12px; align-items: center; margin-top: 14px; flex-wrap: wrap; }
     button, select, input { font: inherit; border-radius: 8px; border: 1px solid #4b5563; padding: 9px 12px; }
     button { background: #2563eb; color: white; cursor: pointer; }
@@ -23,6 +22,12 @@
     .event { display: grid; grid-template-columns: minmax(220px, 360px) 1fr; gap: 16px; border-top: 1px solid #374151; padding-top: 14px; }
     .camera-grid { grid-template-columns: minmax(0, 1fr) minmax(220px, 360px); }
     video { width: 100%; border-radius: 8px; background: #030712; }
+    .event-player { margin: 6px 0 12px; }
+    .event-player video { display: block; }
+    .video-controls { display: grid; grid-template-columns: auto 1fr auto auto; gap: 8px; align-items: center; margin-top: 6px; }
+    .video-controls button { padding: 6px 10px; }
+    .video-controls input[type="range"] { width: 100%; min-width: 80px; padding: 0; }
+    .video-time { min-width: 82px; text-align: center; font-variant-numeric: tabular-nums; }
     .muted { color: #9ca3af; }
     .error { color: #fca5a5; }
     .detector-alert { padding: 12px 14px; border-radius: 9px; background: #111827; border: 1px solid #4b5563; }
@@ -241,13 +246,36 @@
       <article class="event" data-event="{{ event.id }}">
         <div>
           {% if event.status in ["ready", "partial"] and event.media_path %}
-            <strong>Центральная камера</strong>
-            <video class="rotate-180" controls preload="metadata" src="/media/{{ event.id }}/face"></video>
-            {% if event.side_media_path %}
-              <strong>Дополнительная камера</strong>
-              <video class="rotate-180" controls preload="metadata"
-                src="/media/{{ event.id }}/side"></video>
-            {% endif %}
+            <div class="event-media">
+              <div class="event-recording" data-camera-role="face">
+                <strong class="event-camera-title">Центральная камера — Cute 2</strong>
+                <div class="event-player">
+                  <video preload="metadata" src="/media/{{ event.id }}/face"></video>
+                  <div class="video-controls">
+                    <button class="video-play" type="button" aria-label="Воспроизвести">▶</button>
+                    <input class="video-seek" type="range" min="0" max="1000" value="0"
+                      aria-label="Позиция видео">
+                    <span class="video-time">0:00 / 0:00</span>
+                    <button class="video-fullscreen" type="button" aria-label="На весь экран">⛶</button>
+                  </div>
+                </div>
+              </div>
+              {% if event.side_media_path %}
+                <div class="event-recording" data-camera-role="side">
+                  <strong class="event-camera-title">Дополнительная камера — Ursa Minor</strong>
+                  <div class="event-player">
+                    <video preload="metadata" src="/media/{{ event.id }}/side"></video>
+                    <div class="video-controls">
+                      <button class="video-play" type="button" aria-label="Воспроизвести">▶</button>
+                      <input class="video-seek" type="range" min="0" max="1000" value="0"
+                        aria-label="Позиция видео">
+                      <span class="video-time">0:00 / 0:00</span>
+                      <button class="video-fullscreen" type="button" aria-label="На весь экран">⛶</button>
+                    </div>
+                  </div>
+                </div>
+              {% endif %}
+            </div>
           {% else %}
             <p class="error">Запись не готова: {{ event.error_code or event.status }}</p>
           {% endif %}
@@ -286,6 +314,38 @@
   </section>
 </main>
 <script>
+  function formatVideoTime(seconds) {
+    if (!Number.isFinite(seconds)) return "0:00";
+    const minutes = Math.floor(seconds / 60);
+    return `${minutes}:${String(Math.floor(seconds % 60)).padStart(2, "0")}`;
+  }
+
+  document.querySelectorAll(".event-player").forEach(player => {
+    const video = player.querySelector("video");
+    const play = player.querySelector(".video-play");
+    const seek = player.querySelector(".video-seek");
+    const time = player.querySelector(".video-time");
+
+    const refresh = () => {
+      seek.value = video.duration ? Math.round(video.currentTime / video.duration * 1000) : 0;
+      time.textContent = `${formatVideoTime(video.currentTime)} / ${formatVideoTime(video.duration)}`;
+      play.textContent = video.paused ? "▶" : "❚❚";
+      play.setAttribute("aria-label", video.paused ? "Воспроизвести" : "Пауза");
+    };
+    play.addEventListener("click", () => video.paused ? video.play() : video.pause());
+    video.addEventListener("click", () => video.paused ? video.play() : video.pause());
+    video.addEventListener("loadedmetadata", refresh);
+    video.addEventListener("timeupdate", refresh);
+    video.addEventListener("play", refresh);
+    video.addEventListener("pause", refresh);
+    seek.addEventListener("input", () => {
+      if (video.duration) video.currentTime = Number(seek.value) / 1000 * video.duration;
+    });
+    player.querySelector(".video-fullscreen").addEventListener("click", () => {
+      if (player.requestFullscreen) player.requestFullscreen();
+    });
+  });
+
   const cameraLayoutKey = "catdoor-camera-layout";
   const cameraRotationKey = "catdoor-camera-rotations-v2";
   const streamVersion = "{{ stream_version }}";
@@ -322,7 +382,31 @@
     return `/stream/${role}.mjpeg?v=${streamVersion}`;
   }
 
+  function applyEventVideoRotations() {
+    document.querySelectorAll(".event-recording").forEach(recording => {
+      const role = recording.dataset.cameraRole;
+      const video = recording.querySelector("video");
+      video.style.transform = `rotate(${(180 + cameraRotations[role]) % 360}deg)`;
+    });
+  }
+
+  function applyEventMediaLayout(swapped) {
+    document.querySelectorAll(".event-media").forEach(media => {
+      const face = media.querySelector('[data-camera-role="face"]');
+      const side = media.querySelector('[data-camera-role="side"]');
+      if (!face) return;
+      face.querySelector(".event-camera-title").textContent =
+        `${swapped ? "Дополнительная" : "Центральная"} камера — Cute 2`;
+      if (!side) return;
+      side.querySelector(".event-camera-title").textContent =
+        `${swapped ? "Центральная" : "Дополнительная"} камера — Ursa Minor`;
+      media.replaceChildren(...(swapped ? [side, face] : [face, side]));
+    });
+    applyEventVideoRotations();
+  }
+
   function applyCameraLayout(swapped) {
+    applyEventMediaLayout(swapped);
     if (!primaryCamera || !secondaryCamera) return;
     primaryCamera.dataset.cameraRole = swapped ? "side" : "face";
     setCameraSource(primaryCamera, streamUrl(swapped ? "side" : "face"));
@@ -403,6 +487,7 @@
       const role = camera.dataset.cameraRole;
       cameraRotations[role] = (cameraRotations[role] + 90) % 360;
       applyCameraRotation(camera);
+      applyEventVideoRotations();
       try {
         localStorage.setItem(cameraRotationKey, JSON.stringify(cameraRotations));
       } catch (error) {

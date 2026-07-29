@@ -72,6 +72,17 @@ def test_capture_and_label_known_cat(runtime_path: Path, monkeypatch) -> None:
     assert "Настройки детекции" in page.text
     assert 'id="detection-face-confirmation-frames"' in page.text
     assert 'id="detection-side-confirmation-frames"' in page.text
+    assert '<video preload="metadata"' in page.text
+    assert "<video controls" not in page.text
+    assert 'class="video-controls"' in page.text
+    assert 'class="video-seek"' in page.text
+    assert 'document.querySelectorAll(".event-player")' in page.text
+    assert 'data-camera-role="face"' in page.text
+    assert '<div class="event-recording" data-camera-role="side">' not in page.text
+    assert "function applyEventMediaLayout(swapped)" in page.text
+    assert "applyEventMediaLayout(swapped);" in page.text
+    assert "function applyEventVideoRotations()" in page.text
+    assert "(180 + cameraRotations[role]) % 360" in page.text
 
 
 def test_summary_is_above_cameras_and_counts_all_events(
@@ -380,3 +391,7 @@ def test_capture_two_cameras_in_parallel(runtime_path: Path, monkeypatch) -> Non
     assert (runtime_path / "events" / "00000001" / "side.mp4").is_file()
     assert client.get("/media/1/face").status_code == 200
     assert client.get("/media/1/side").status_code == 200
+    page = client.get("/").text
+    assert 'data-camera-role="face"' in page
+    assert 'data-camera-role="side"' in page
+    assert 'swapped ? [side, face] : [face, side]' in page
