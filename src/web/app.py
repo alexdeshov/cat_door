@@ -19,7 +19,9 @@ from sqlalchemy.orm import Session
 
 from src.common.database import Event, create_session_factory, session_dependency
 from src.common.settings import Settings
-from src.recorder.ffmpeg import RecorderError, mjpeg_stream, record_clip
+from src.common.windows_power import SleepInhibitor
+from src.recorder.ffmpeg import RecorderError, record_clip
+from src.recorder.preview import local_mjpeg_stream, preview_path
 from src.recorder.status import read_recorder_status
 from training.workflow import create_macbook_export, write_status
 
@@ -136,7 +138,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not urls[view]:
             raise HTTPException(503, "Камера не настроена")
         return StreamingResponse(
-            mjpeg_stream(settings.ffmpeg_path, urls[view], settings.preview_fps),
+            local_mjpeg_stream(preview_path(settings.data_dir, view), settings.preview_fps),
             media_type="multipart/x-mixed-replace; boundary=frame",
         )
 
@@ -384,7 +386,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
 def run() -> None:
     settings = Settings()
-    uvicorn.run(create_app(settings), host=settings.web_host, port=settings.web_port)
+    with SleepInhibitor():
+        uvicorn.run(create_app(settings), host=settings.web_host, port=settings.web_port)
 
 
 if __name__ == "__main__":

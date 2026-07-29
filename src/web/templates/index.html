@@ -100,7 +100,7 @@
       <div>
         <h3 id="primary-camera-title">Основная камера — Cute 2</h3>
         {% if face_configured %}
-          <img id="primary-camera-stream" class="stream rotate-180"
+          <img id="primary-camera-stream" class="stream"
             src="/stream/face.mjpeg" alt="Поток камеры Cute 2">
           <button class="rotate-camera" data-slot="primary" type="button">
             Повернуть на 90°
@@ -110,7 +110,7 @@
       <div>
         <h3 id="secondary-camera-title">Дополнительная камера — Ursa Minor</h3>
         {% if side_configured %}
-          <img id="secondary-camera-stream" class="stream rotate-180"
+          <img id="secondary-camera-stream" class="stream"
             src="/stream/side.mjpeg" alt="Поток камеры Ursa Minor">
           <button class="rotate-camera" data-slot="secondary" type="button">
             Повернуть на 90°
@@ -235,11 +235,11 @@
 </main>
 <script>
   const cameraLayoutKey = "catdoor-camera-layout";
-  const cameraRotationKey = "catdoor-camera-rotations";
+  const cameraRotationKey = "catdoor-camera-rotations-v2";
   const primaryCamera = document.querySelector("#primary-camera-stream");
   const secondaryCamera = document.querySelector("#secondary-camera-stream");
   const swapCamerasButton = document.querySelector("#swap-cameras");
-  let cameraRotations = {face: 180, side: 180};
+  let cameraRotations = {face: 0, side: 0};
 
   try {
     const savedRotations = JSON.parse(localStorage.getItem(cameraRotationKey) || "{}");

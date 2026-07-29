@@ -2,7 +2,7 @@ from unittest.mock import Mock
 
 import numpy as np
 
-from src.recorder.frames import FRAME_BYTES, rgb_frame_stream
+from src.recorder.frames import FRAME_BYTES, prepare_detector_frame, rgb_frame_stream
 
 
 def test_rgb_frame_stream_decodes_fixed_frame(monkeypatch) -> None:
@@ -23,11 +23,25 @@ def test_rgb_frame_stream_decodes_fixed_frame(monkeypatch) -> None:
     frames = list(rgb_frame_stream("ffmpeg", "rtsp://camera", 3.0))
 
     assert len(frames) == 1
-    assert frames[0].shape == (320, 320, 3)
+    assert frames[0].shape == (360, 640, 3)
     assert frames[0].dtype == np.uint8
     assert int(frames[0][0, 0, 0]) == 7
-    assert "fps=3.0,scale=320:320,hflip,vflip" in commands[0]
+    assert (
+        "fps=3.0,scale=640:360:force_original_aspect_ratio=decrease,"
+        "pad=640:360:(ow-iw)/2:(oh-ih)/2,hflip,vflip"
+    ) in commands[0]
     process.terminate.assert_called_once()
+
+
+def test_detector_frame_remains_square_without_distortion() -> None:
+    preview = np.full((360, 640, 3), 100, dtype=np.uint8)
+
+    detector = prepare_detector_frame(preview)
+
+    assert detector.shape == (320, 320, 3)
+    assert np.all(detector[:70] == 0)
+    assert np.all(detector[70:250] == 100)
+    assert np.all(detector[250:] == 0)
 
 
 def test_rgb_frame_stream_can_write_ring_segments(runtime_path, monkeypatch) -> None:

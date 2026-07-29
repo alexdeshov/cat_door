@@ -54,7 +54,7 @@ def test_capture_and_label_known_cat(runtime_path: Path, monkeypatch) -> None:
     page = client.get("/")
     assert page.status_code == 200
     assert "Барсик" in page.text
-    assert 'class="stream rotate-180"' in page.text
+    assert 'class="stream"' in page.text
     assert 'class="event camera-grid"' in page.text
     assert ".camera-grid { grid-template-columns: minmax(0, 1fr) minmax(220px, 360px); }" in (
         page.text
@@ -65,6 +65,7 @@ def test_capture_and_label_known_cat(runtime_path: Path, monkeypatch) -> None:
     assert 'if (camera.getAttribute("src") !== source)' in page.text
     assert 'cameraRotations[role] = (cameraRotations[role] + 90) % 360' in page.text
     assert 'localStorage.setItem(cameraRotationKey, JSON.stringify(cameraRotations))' in page.text
+    assert 'const cameraRotationKey = "catdoor-camera-rotations-v2"' in page.text
     assert "Автоматический сбор событий" in page.text
 
 

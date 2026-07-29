@@ -13,7 +13,8 @@ from src.inference.cat_detector import DetectorError, OpenVinoCatDetector
 from src.inference.cat_identity import OpenVinoCatIdentity
 from src.recorder.automatic import AutomaticEventConfig, AutomaticEventMachine
 from src.recorder.events import AutomaticEventRequest, persist_automatic_event
-from src.recorder.frames import rgb_frame_stream
+from src.recorder.frames import prepare_detector_frame, rgb_frame_stream
+from src.recorder.preview import preview_path, publish_preview
 from src.recorder.status import write_recorder_status
 
 
@@ -73,7 +74,11 @@ def _frame_worker(
             if stop.is_set():
                 return
             try:
-                output.put((role, frame), timeout=0.1)
+                publish_preview(preview_path(settings.data_dir, role), frame)
+            except OSError:
+                pass
+            try:
+                output.put((role, prepare_detector_frame(frame)), timeout=0.1)
             except queue.Full:
                 continue
     except OSError:
