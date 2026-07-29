@@ -29,8 +29,10 @@ def test_install_creates_all_user_startup_values(monkeypatch: pytest.MonkeyPatch
 
     manage_autostart.install()
 
-    assert len(calls) == 3
-    assert all(call[:2] == ["ADD", manage_autostart.RUN_KEY] for call in calls)
+    add_calls = [call for call in calls if call[0] == "ADD"]
+    assert len(add_calls) == 3
+    assert calls[0][:2] == ["DELETE", manage_autostart.RUN_KEY]
+    assert all(call[:2] == ["ADD", manage_autostart.RUN_KEY] for call in add_calls)
     assert any("start-web" in call for call in calls)
-    assert any("start-recorder" in call for call in calls)
+    assert any("start-recorder-recording" in call for call in calls)
     assert any("start-browser" in call for call in calls)

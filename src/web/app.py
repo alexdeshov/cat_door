@@ -18,6 +18,12 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from src.common.database import Event, create_session_factory, session_dependency
+from src.common.detection_config import (
+    DetectionConfig,
+    detection_config_path,
+    load_detection_config,
+    save_detection_config,
+)
 from src.common.settings import Settings
 from src.common.windows_power import SleepInhibitor
 from src.recorder.ffmpeg import RecorderError, record_clip
@@ -52,6 +58,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title="CatDoor AI", version="0.1.0")
     app.state.settings = settings
     app.state.session_factory = factory
+
+    def current_detection_config() -> DetectionConfig:
+        return load_detection_config(
+            detection_config_path(settings.data_dir),
+            DetectionConfig.from_settings(settings),
+        )
 
     def get_session() -> Generator[Session, None, None]:
         yield from session_dependency(factory)
@@ -127,6 +139,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "recorder_status": recorder_status,
                 "automatic_capture_enabled": recorder_enabled,
                 "automatic_capture_dry_run": recorder_dry_run,
+                "stream_version": uuid4().hex,
+                "detection_config": current_detection_config(),
             },
         )
 
@@ -140,6 +154,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return StreamingResponse(
             local_mjpeg_stream(preview_path(settings.data_dir, view), settings.preview_fps),
             media_type="multipart/x-mixed-replace; boundary=frame",
+            headers={
+                "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+                "Pragma": "no-cache",
+                "Expires": "0",
+                "X-Accel-Buffering": "no",
+            },
         )
 
     @app.get("/api/recorder/status")
@@ -158,6 +178,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except ValueError:
             stale = True
         return {**status, "stale": stale}
+
+    @app.get("/api/detection/settings")
+    def get_detection_settings() -> DetectionConfig:
+        return current_detection_config()
+
+    @app.put("/api/detection/settings")
+    def update_detection_settings(payload: DetectionConfig) -> DetectionConfig:
+        try:
+            save_detection_config(detection_config_path(settings.data_dir), payload)
+        except OSError as exc:
+            raise HTTPException(500, "Не удалось сохранить настройки детекции") from exc
+        return payload
 
     @app.post("/api/events", status_code=201)
     def capture(

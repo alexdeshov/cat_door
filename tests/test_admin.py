@@ -63,10 +63,15 @@ def test_capture_and_label_known_cat(runtime_path: Path, monkeypatch) -> None:
     assert 'localStorage.setItem(cameraLayoutKey, swapped ? "swapped" : "default")' in page.text
     assert page.text.count('class="rotate-camera"') == 1
     assert 'if (camera.getAttribute("src") !== source)' in page.text
+    assert "function streamUrl(role)" in page.text
+    assert "/stream/face.mjpeg?v=" in page.text
     assert 'cameraRotations[role] = (cameraRotations[role] + 90) % 360' in page.text
     assert 'localStorage.setItem(cameraRotationKey, JSON.stringify(cameraRotations))' in page.text
     assert 'const cameraRotationKey = "catdoor-camera-rotations-v2"' in page.text
     assert "Автоматический сбор событий" in page.text
+    assert "Настройки детекции" in page.text
+    assert 'id="detection-face-confirmation-frames"' in page.text
+    assert 'id="detection-side-confirmation-frames"' in page.text
 
 
 def test_summary_is_above_cameras_and_counts_all_events(
@@ -189,6 +194,62 @@ def test_recorder_status_reports_missing_heartbeat(runtime_path: Path, monkeypat
         "message": "CatDoorRecorder не запущен",
         "stale": True,
     }
+
+
+def test_detection_settings_can_be_updated(runtime_path: Path, monkeypatch) -> None:
+    client = make_client(runtime_path, monkeypatch)
+    payload = {
+        "face": {
+            "confidence_threshold": 0.30,
+            "box_min_confidence": 0.15,
+            "confirmation_frames": 2,
+            "window_frames": 5,
+        },
+        "side": {
+            "confidence_threshold": 0.50,
+            "box_min_confidence": 0.15,
+            "confirmation_frames": 2,
+            "window_frames": 4,
+        },
+        "candidate_timeout_seconds": 2.0,
+        "absence_seconds": 2.5,
+        "tail_seconds": 8.0,
+        "cooldown_seconds": 4.0,
+    }
+
+    response = client.put("/api/detection/settings", json=payload)
+
+    assert response.status_code == 200
+    assert response.json() == payload
+    assert client.get("/api/detection/settings").json() == payload
+
+
+def test_detection_settings_reject_invalid_window(runtime_path: Path, monkeypatch) -> None:
+    client = make_client(runtime_path, monkeypatch)
+
+    response = client.put(
+        "/api/detection/settings",
+        json={
+            "face": {
+                "confidence_threshold": 0.30,
+                "box_min_confidence": 0.15,
+                "confirmation_frames": 5,
+                "window_frames": 2,
+            },
+            "side": {
+                "confidence_threshold": 0.55,
+                "box_min_confidence": 0.20,
+                "confirmation_frames": 2,
+                "window_frames": 5,
+            },
+            "candidate_timeout_seconds": 3.0,
+            "absence_seconds": 3.0,
+            "tail_seconds": 10.0,
+            "cooldown_seconds": 5.0,
+        },
+    )
+
+    assert response.status_code == 422
 
 
 def test_rejects_unknown_label(runtime_path: Path, monkeypatch) -> None:

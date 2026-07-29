@@ -6,7 +6,11 @@ from pathlib import Path
 from uuid import uuid4
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw
+
+from src.inference.cat_detector import CatDetection
+
+DETECTOR_SIZE = 320
 
 
 def preview_path(data_dir: Path, role: str) -> Path:
@@ -22,6 +26,40 @@ def crop_padding(frame: np.ndarray) -> np.ndarray:
         active_rows[0] : active_rows[-1] + 1,
         active_columns[0] : active_columns[-1] + 1,
     ]
+
+
+def annotate_detections(
+    frame: np.ndarray,
+    detections: tuple[CatDetection, ...],
+    *,
+    event_threshold: float,
+    box_min_confidence: float,
+) -> np.ndarray:
+    image = Image.fromarray(crop_padding(frame), mode="RGB")
+    draw = ImageDraw.Draw(image)
+    scale = min(DETECTOR_SIZE / image.width, DETECTOR_SIZE / image.height)
+    offset_x = (DETECTOR_SIZE - image.width * scale) / 2
+    offset_y = (DETECTOR_SIZE - image.height * scale) / 2
+    for detection in sorted(detections, key=lambda item: item.confidence, reverse=True)[:5]:
+        if detection.confidence < box_min_confidence:
+            continue
+        x1, y1, x2, y2 = detection.box
+        coordinates = (
+            max(0, min(image.width, (x1 - offset_x) / scale)),
+            max(0, min(image.height, (y1 - offset_y) / scale)),
+            max(0, min(image.width, (x2 - offset_x) / scale)),
+            max(0, min(image.height, (y2 - offset_y) / scale)),
+        )
+        color = "#22c55e" if detection.confidence >= event_threshold else "#f59e0b"
+        draw.rectangle(coordinates, outline=color, width=3)
+        draw.text(
+            (coordinates[0] + 4, max(0, coordinates[1] - 14)),
+            f"cat {detection.confidence:.2f}",
+            fill=color,
+            stroke_width=2,
+            stroke_fill="black",
+        )
+    return np.asarray(image, dtype=np.uint8)
 
 
 def publish_preview(path: Path, frame: np.ndarray) -> None:

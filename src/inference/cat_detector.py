@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +11,18 @@ import numpy as np
 
 class DetectorError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class CatDetection:
+    box: tuple[float, float, float, float]
+    confidence: float
+
+
+@dataclass(frozen=True)
+class CatDetectionResult:
+    confidence: float
+    detections: tuple[CatDetection, ...]
 
 
 def _sha256(path: Path) -> str:
@@ -52,12 +65,24 @@ class OpenVinoCatDetector:
         self._labels = self._compiled.output("labels")
         self._scores = self._compiled.output("scores")
 
-    def confidence(self, rgb_frame: np.ndarray) -> float:
+    def detect(self, rgb_frame: np.ndarray) -> CatDetectionResult:
         if rgb_frame.shape != (320, 320, 3):
             raise ValueError("detector frame must have shape (320, 320, 3)")
         tensor = np.transpose(rgb_frame, (2, 0, 1))[None].astype(np.float32) / 255.0
         result = self._compiled({self._input: tensor})
+        boxes = np.asarray(result[self._boxes])
         labels = np.asarray(result[self._labels])
         scores = np.asarray(result[self._scores])
-        cat_scores = scores[labels == self.cat_class_id]
-        return float(cat_scores.max()) if cat_scores.size else 0.0
+        cat_indices = np.flatnonzero(labels == self.cat_class_id)
+        detections = tuple(
+            CatDetection(
+                box=tuple(float(value) for value in boxes[index]),
+                confidence=float(scores[index]),
+            )
+            for index in cat_indices
+        )
+        confidence = max((detection.confidence for detection in detections), default=0.0)
+        return CatDetectionResult(confidence=confidence, detections=detections)
+
+    def confidence(self, rgb_frame: np.ndarray) -> float:
+        return self.detect(rgb_frame).confidence

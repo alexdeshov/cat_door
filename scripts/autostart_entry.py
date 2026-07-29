@@ -11,7 +11,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Start a CatDoor component from Windows")
-    parser.add_argument("component", choices=("web", "recorder", "browser"))
+    parser.add_argument("component", choices=("web", "recorder", "recorder-recording", "browser"))
     arguments = parser.parse_args()
 
     if arguments.component == "browser":
@@ -28,7 +28,7 @@ def main() -> None:
 
     from scripts.start_recorder import start_recorder
 
-    print(start_recorder(recording=False))
+    print(start_recorder(recording=arguments.component == "recorder-recording"))
 
 
 if __name__ == "__main__":

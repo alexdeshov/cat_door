@@ -4,17 +4,27 @@ import argparse
 import queue
 import threading
 import time
+from collections import deque
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy.exc import SQLAlchemyError
+
+from src.common.detection_config import (
+    CameraDetectionConfig,
+    DetectionConfig,
+    detection_config_path,
+    load_detection_config,
+)
 from src.common.settings import Settings
 from src.inference.cat_detector import DetectorError, OpenVinoCatDetector
 from src.inference.cat_identity import OpenVinoCatIdentity
 from src.recorder.automatic import AutomaticEventConfig, AutomaticEventMachine
+from src.recorder.detection_journal import DetectionJournal
 from src.recorder.events import AutomaticEventRequest, persist_automatic_event
 from src.recorder.frames import prepare_detector_frame, rgb_frame_stream
-from src.recorder.preview import preview_path, publish_preview
+from src.recorder.preview import annotate_detections, preview_path, publish_preview
 from src.recorder.status import write_recorder_status
 
 
@@ -23,15 +33,31 @@ def recorder_status_path(settings: Settings) -> Path:
 
 
 def build_automatic_config(settings: Settings) -> AutomaticEventConfig:
-    return AutomaticEventConfig(
-        confidence_threshold=settings.detection_confidence_threshold,
-        confirmation_frames=settings.detection_confirmation_frames,
-        window_frames=settings.detection_window_frames,
-        candidate_timeout_seconds=settings.detection_candidate_timeout_seconds,
-        absence_seconds=settings.detection_absence_seconds,
-        tail_seconds=settings.detection_tail_seconds,
-        cooldown_seconds=settings.detection_cooldown_seconds,
-    )
+    return DetectionConfig.from_settings(settings).event_config()
+
+
+def _put_latest(output: queue.Queue[Any], item: Any) -> None:
+    try:
+        output.put_nowait(item)
+    except queue.Full:
+        try:
+            output.get_nowait()
+        except queue.Empty:
+            pass
+        try:
+            output.put_nowait(item)
+        except queue.Full:
+            pass
+
+
+class CameraConfirmationTracker:
+    def __init__(self, config: CameraDetectionConfig) -> None:
+        self.config = config
+        self._window: deque[bool] = deque(maxlen=config.window_frames)
+
+    def observe(self, confidence: float) -> bool:
+        self._window.append(confidence >= self.config.confidence_threshold)
+        return sum(self._window) >= self.config.confirmation_frames
 
 
 def publish_heartbeat(settings: Settings) -> None:
@@ -56,7 +82,7 @@ def publish_heartbeat(settings: Settings) -> None:
 def _frame_worker(
     role: str,
     settings: Settings,
-    output: queue.Queue[tuple[str, Any]],
+    output: queue.Queue[tuple[str, Any, Any, float]],
     stop: threading.Event,
 ) -> None:
     url = settings.camera_face_rtsp if role == "face" else settings.camera_side_rtsp
@@ -73,19 +99,20 @@ def _frame_worker(
         ):
             if stop.is_set():
                 return
-            try:
-                publish_preview(preview_path(settings.data_dir, role), frame)
-            except OSError:
-                pass
-            try:
-                output.put((role, prepare_detector_frame(frame)), timeout=0.1)
-            except queue.Full:
-                continue
+            item = (role, prepare_detector_frame(frame), frame, time.monotonic())
+            _put_latest(output, item)
     except OSError:
         return
 
 
 def monitor_automatic(settings: Settings, duration_seconds: float | None) -> None:
+    config_path = detection_config_path(settings.data_dir)
+    runtime_config = load_detection_config(config_path, DetectionConfig.from_settings(settings))
+    journal = DetectionJournal(
+        settings.data_dir / "runtime" / "detection.jsonl",
+        max_bytes=settings.detection_log_max_bytes,
+        backup_count=settings.detection_log_backup_count,
+    )
     detector = OpenVinoCatDetector(settings.detector_model_path, settings.detector_device)
     identity_models = {
         role: OpenVinoCatIdentity(path, settings.detector_device)
@@ -95,8 +122,12 @@ def monitor_automatic(settings: Settings, duration_seconds: float | None) -> Non
         )
         if path is not None
     }
-    machine = AutomaticEventMachine(build_automatic_config(settings))
-    frames: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=4)
+    machine = AutomaticEventMachine(runtime_config.event_config())
+    trackers = {
+        role: CameraConfirmationTracker(getattr(runtime_config, role))
+        for role in ("face", "side")
+    }
+    frames: queue.Queue[tuple[str, Any, Any, float]] = queue.Queue(maxsize=2)
     stop = threading.Event()
     workers = [
         threading.Thread(
@@ -119,11 +150,42 @@ def monitor_automatic(settings: Settings, duration_seconds: float | None) -> Non
     active_started_at: float | None = None
     active_initiating_camera: str | None = None
     active_confidences = {"face": 0.0, "side": 0.0}
+    journal.write(
+        "session_started",
+        camera_settings={
+            role: getattr(runtime_config, role).model_dump()
+            for role in ("face", "side")
+        },
+        sample_fps=settings.detector_sample_fps,
+        recording=not settings.automatic_capture_dry_run,
+        cameras={
+            "face": bool(settings.camera_face_rtsp),
+            "side": bool(settings.camera_side_rtsp),
+        },
+    )
+    last_config_check_at = 0.0
     try:
         while duration_seconds is None or time.monotonic() - started_at < duration_seconds:
+            now = time.monotonic()
+            if now - last_config_check_at >= 1 and machine.state.value == "idle":
+                updated_config = load_detection_config(config_path, runtime_config)
+                if updated_config != runtime_config:
+                    runtime_config = updated_config
+                    machine = AutomaticEventMachine(runtime_config.event_config())
+                    trackers = {
+                        role: CameraConfirmationTracker(getattr(runtime_config, role))
+                        for role in ("face", "side")
+                    }
+                    journal.write("config_updated", **runtime_config.model_dump())
+                last_config_check_at = now
             try:
-                role, frame = frames.get(timeout=2)
+                role, frame, preview_frame, captured_at = frames.get(timeout=2)
             except queue.Empty:
+                journal.write(
+                    "frames_waiting",
+                    state=machine.state.value,
+                    frames_processed=frames_processed,
+                )
                 write_recorder_status(
                     recorder_status_path(settings),
                     process="CatDoorRecorder",
@@ -136,7 +198,24 @@ def monitor_automatic(settings: Settings, duration_seconds: float | None) -> Non
                     confidences=confidences,
                 )
                 continue
-            confidence = detector.confidence(frame)
+            inference_started_at = time.monotonic()
+            detection = detector.detect(frame)
+            inference_ms = (time.monotonic() - inference_started_at) * 1000
+            frame_age_ms = (time.monotonic() - captured_at) * 1000
+            confidence = detection.confidence
+            camera_config = getattr(runtime_config, role)
+            camera_confirmed = trackers[role].observe(confidence)
+            try:
+                annotated_frame = annotate_detections(
+                    preview_frame,
+                    detection.detections,
+                    event_threshold=camera_config.confidence_threshold,
+                    box_min_confidence=camera_config.box_min_confidence,
+                )
+                publish_preview(preview_path(settings.data_dir, role), annotated_frame)
+            except OSError:
+                pass
+            previous_state = machine.state.value
             confidences[role] = round(confidence, 4)
             if confidence >= settings.detection_confidence_threshold and role in identity_models:
                 prediction = identity_models[role].predict(
@@ -148,7 +227,28 @@ def monitor_automatic(settings: Settings, duration_seconds: float | None) -> Non
                     "confidence": round(prediction.confidence, 4),
                 }
             frames_processed[role] += 1
-            update = machine.observe(time.monotonic(), {role: confidence})
+            update = machine.observe(time.monotonic(), {role: 1.0 if camera_confirmed else 0.0})
+            journal.write(
+                "observation",
+                camera=role,
+                confidence=round(confidence, 4),
+                threshold=camera_config.confidence_threshold,
+                detected=confidence >= camera_config.confidence_threshold,
+                camera_confirmed=camera_confirmed,
+                confirmation_frames=camera_config.confirmation_frames,
+                window_frames=camera_config.window_frames,
+                previous_state=previous_state,
+                state=update.state.value,
+                action=update.action.value if update.action is not None else None,
+                initiating_camera=update.initiating_camera,
+                frames_processed=dict(frames_processed),
+                inference_ms=round(inference_ms, 1),
+                frame_age_ms=round(frame_age_ms, 1),
+                boxes_visible=sum(
+                    item.confidence >= camera_config.box_min_confidence
+                    for item in detection.detections
+                ),
+            )
             if active_started_at is not None:
                 active_confidences[role] = max(active_confidences[role], confidence)
             if update.action is not None:
@@ -170,9 +270,17 @@ def monitor_automatic(settings: Settings, duration_seconds: float | None) -> Non
                     confidence_side=active_confidences["side"],
                 )
                 if not settings.automatic_capture_dry_run:
+                    journal.write(
+                        "event_publish_scheduled",
+                        started_at=request.started_at,
+                        ended_at=request.ended_at,
+                        initiating_camera=request.initiating_camera,
+                        confidence_face=round(request.confidence_face, 4),
+                        confidence_side=round(request.confidence_side, 4),
+                    )
                     threading.Thread(
                         target=_persist_after_segment_close,
-                        args=(settings, request),
+                        args=(settings, request, journal),
                         daemon=True,
                         name="catdoor-event-writer",
                     ).start()
@@ -201,6 +309,13 @@ def monitor_automatic(settings: Settings, duration_seconds: float | None) -> Non
                 initiating_camera=update.initiating_camera,
             )
             last_status_at = now
+    except (OSError, RuntimeError, ValueError, SQLAlchemyError) as exc:
+        journal.write(
+            "session_error",
+            error_type=type(exc).__name__,
+            message=str(exc)[:500],
+        )
+        raise
     finally:
         stop.set()
         write_recorder_status(
@@ -216,20 +331,36 @@ def monitor_automatic(settings: Settings, duration_seconds: float | None) -> Non
             identity=identity_predictions,
             last_action=last_action,
         )
+        journal.write(
+            "session_stopped",
+            frames_processed=frames_processed,
+            last_action=last_action,
+        )
+        journal.close()
 
 
 def _persist_after_segment_close(
     settings: Settings,
     request: AutomaticEventRequest,
+    journal: DetectionJournal,
 ) -> None:
     time.sleep(settings.ring_segment_seconds + 1)
-    persist_automatic_event(
-        settings.resolved_database_path,
-        settings.data_dir,
-        settings.ffmpeg_path,
-        settings.ring_segment_seconds,
-        request,
-    )
+    try:
+        event = persist_automatic_event(
+            settings.resolved_database_path,
+            settings.data_dir,
+            settings.ffmpeg_path,
+            settings.ring_segment_seconds,
+            request,
+        )
+    except (OSError, RuntimeError, ValueError, SQLAlchemyError) as exc:
+        journal.write(
+            "event_publish_failed",
+            error_type=type(exc).__name__,
+            message=str(exc)[:500],
+        )
+        return
+    journal.write("event_published", event_id=event.id, status=event.status)
 
 
 def run(*, once: bool = False, probe_seconds: float | None = None) -> None:

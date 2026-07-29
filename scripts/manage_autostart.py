@@ -7,9 +7,10 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 TASKS = {
     "CatDoorWeb": "web",
-    "CatDoorRecorderDryRun": "recorder",
+    "CatDoorRecorderRecording": "recorder-recording",
     "CatDoorAdminChrome": "browser",
 }
+LEGACY_VALUES = ("CatDoorRecorderDryRun",)
 RUN_KEY = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run"
 
 
@@ -40,6 +41,8 @@ def run_registry(arguments: list[str], *, check: bool = True) -> subprocess.Comp
 
 
 def install() -> None:
+    for value_name in LEGACY_VALUES:
+        run_registry(["DELETE", RUN_KEY, "/V", value_name, "/F"], check=False)
     for value_name, component in TASKS.items():
         run_registry(
             ["ADD", RUN_KEY, "/V", value_name, "/T", "REG_SZ", "/D", task_command(component), "/F"]
@@ -48,7 +51,7 @@ def install() -> None:
 
 
 def uninstall() -> None:
-    for value_name in TASKS:
+    for value_name in (*TASKS, *LEGACY_VALUES):
         result = run_registry(["DELETE", RUN_KEY, "/V", value_name, "/F"], check=False)
         if result.returncode == 0:
             print(f"Удалено: {value_name}")

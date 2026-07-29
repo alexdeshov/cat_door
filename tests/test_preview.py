@@ -3,7 +3,14 @@ from __future__ import annotations
 import numpy as np
 from PIL import Image
 
-from src.recorder.preview import crop_padding, local_mjpeg_stream, preview_path, publish_preview
+from src.inference.cat_detector import CatDetection
+from src.recorder.preview import (
+    annotate_detections,
+    crop_padding,
+    local_mjpeg_stream,
+    preview_path,
+    publish_preview,
+)
 
 
 def test_preview_is_published_as_atomic_jpeg(runtime_path) -> None:
@@ -40,3 +47,19 @@ def test_preview_crops_exact_letterbox_padding(runtime_path) -> None:
 
     with Image.open(path) as image:
         assert image.size == (320, 180)
+
+
+def test_preview_draws_detection_box_in_source_coordinates() -> None:
+    frame = np.zeros((360, 640, 3), dtype=np.uint8)
+    frame[:, :, :] = 30
+    detections = (CatDetection(box=(80, 115, 240, 205), confidence=0.8),)
+
+    annotated = annotate_detections(
+        frame,
+        detections,
+        event_threshold=0.55,
+        box_min_confidence=0.2,
+    )
+
+    assert annotated.shape == (360, 640, 3)
+    assert np.any(annotated[:, :, 1] > 150)

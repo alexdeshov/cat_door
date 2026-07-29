@@ -1,10 +1,18 @@
 import json
+import queue
 from pathlib import Path
 
 import pytest
 
+from src.common.detection_config import CameraDetectionConfig
 from src.common.settings import Settings
-from src.recorder.app import build_automatic_config, publish_heartbeat, recorder_status_path
+from src.recorder.app import (
+    CameraConfirmationTracker,
+    _put_latest,
+    build_automatic_config,
+    publish_heartbeat,
+    recorder_status_path,
+)
 
 
 def test_disabled_recorder_writes_safe_heartbeat(runtime_path: Path) -> None:
@@ -41,3 +49,27 @@ def test_invalid_detection_window_is_rejected() -> None:
 
     with pytest.raises(ValueError):
         build_automatic_config(settings)
+
+
+def test_latest_frame_replaces_oldest_when_queue_is_full() -> None:
+    frames: queue.Queue[int] = queue.Queue(maxsize=2)
+    _put_latest(frames, 1)
+    _put_latest(frames, 2)
+    _put_latest(frames, 3)
+
+    assert [frames.get_nowait(), frames.get_nowait()] == [2, 3]
+
+
+def test_camera_confirmation_tracker_uses_own_threshold_and_window() -> None:
+    tracker = CameraConfirmationTracker(
+        CameraDetectionConfig(
+            confidence_threshold=0.30,
+            box_min_confidence=0.15,
+            confirmation_frames=2,
+            window_frames=3,
+        )
+    )
+
+    assert tracker.observe(0.31) is False
+    assert tracker.observe(0.10) is False
+    assert tracker.observe(0.40) is True
