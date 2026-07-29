@@ -1,5 +1,6 @@
 import argparse
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -13,7 +14,8 @@ def train(
     output: Path,
     epochs: int,
     image_size: int,
-) -> None:
+    progress: Callable[[int, int, float], None] | None = None,
+) -> dict[str, object]:
     import torch
     from PIL import Image
     from torch.utils.data import DataLoader, Dataset
@@ -62,13 +64,20 @@ def train(
     optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
     loss_function = torch.nn.CrossEntropyLoss()
     loader = DataLoader(train_data, batch_size=32, shuffle=True, num_workers=0)
-    for _ in range(epochs):
+    for epoch in range(1, epochs + 1):
         model.train()
+        running_loss = 0.0
+        batches = 0
         for images, targets in loader:
             optimizer.zero_grad(set_to_none=True)
             loss = loss_function(model(images.to(device)), targets.to(device))
             loss.backward()
             optimizer.step()
+            running_loss += float(loss.detach().cpu())
+            batches += 1
+        epoch_loss = running_loss / max(batches, 1)
+        if progress is not None:
+            progress(epoch, epochs, epoch_loss)
     model.eval()
     correct = 0
     validation_loader = DataLoader(validation_data, batch_size=32, num_workers=0)
@@ -88,7 +97,13 @@ def train(
         },
         output,
     )
-    print(json.dumps({"device": str(device), "checkpoint": str(output)}, indent=2))
+    result = {
+        "device": str(device),
+        "checkpoint": str(output),
+        "validation_accuracy": correct / len(validation_data),
+    }
+    print(json.dumps(result, indent=2))
+    return result
 
 
 def main() -> None:

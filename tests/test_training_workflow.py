@@ -67,5 +67,12 @@ def test_build_dataset_uses_selected_events_only(runtime_path: Path, monkeypatch
 
     items = load_manifest(manifest)
     assert report["events"] == 1
+    assert report["events_per_label"] == {"Барсик": 1}
+    assert report["ready_for_production"] is False
+    assert report["warnings"] == [
+        "Для классификатора нужны минимум два известных кота",
+        "Барсик: независимых проходов — 1; рекомендуется не менее 100",
+        "Мало примеров чужих котов для проверки ложных распознаваний",
+    ]
     assert [item.label for item in items] == ["Барсик", "Барсик"]
     assert rotations == [True, True]

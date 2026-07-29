@@ -30,6 +30,11 @@
     .detector-alert.candidate, .detector-alert.tail { border-color: #d97706; color: #fde68a; }
     .detector-alert.active { border-color: #dc2626; background: #450a0a; color: #fecaca; }
     .detector-alert.offline, .detector-alert.error { border-color: #dc2626; color: #fecaca; }
+    .summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; margin: 14px 0; }
+    .summary-card { padding: 12px; border-radius: 9px; background: #111827; border: 1px solid #374151; }
+    .summary-card strong { display: block; font-size: 1.6rem; }
+    .training-report { display: grid; gap: 10px; }
+    progress { width: 100%; height: 18px; }
     @media (max-width: 720px) { .event { grid-template-columns: 1fr; } }
   </style>
 </head>
@@ -39,6 +44,56 @@
   <span class="badge">Тестовый режим — дверь не управляется</span>
 </header>
 <main>
+  <section class="panel">
+    <h2>Автоматический сбор событий</h2>
+    <div class="summary-grid">
+      <div class="summary-card"><strong>{{ event_summary.total }}</strong><span class="muted">всего проходов</span></div>
+      <div class="summary-card"><strong>{{ event_summary.automatic }}</strong><span class="muted">записано автоматически</span></div>
+      <div class="summary-card"><strong>{{ event_summary.pending }}</strong><span class="muted">ждут разметки</span></div>
+      <div class="summary-card"><strong>{{ event_summary.known }}</strong><span class="muted">домашних проходов</span></div>
+      <div class="summary-card"><strong>{{ event_summary.foreign }}</strong><span class="muted">чужих котов</span></div>
+      <div class="summary-card"><strong>{{ event_summary.failed }}</strong><span class="muted">ошибок записи</span></div>
+    </div>
+    {% if known_cat_names %}
+      <p>Известные коты: <strong>{{ known_cat_names | join(", ") }}</strong></p>
+    {% else %}
+      <p class="muted">Имена котов пока не размечены.</p>
+    {% endif %}
+    <p id="detector-alert" class="detector-alert">
+      Получение состояния детектора…
+    </p>
+    {% if recorder_status %}
+      <p>
+        <strong>{{ recorder_status.message }}</strong>
+        <span class="muted">· heartbeat {{ recorder_status.updated_at }}</span>
+      </p>
+    {% else %}
+      <p class="muted">Независимый CatDoorRecorder ещё не запущен.</p>
+    {% endif %}
+    {% if recorder_status and recorder_status.detector_connected %}
+      <p class="muted">
+        Кадры face/side:
+        {{ recorder_status.frames_processed.face }}/{{ recorder_status.frames_processed.side }}.
+        Уверенность cat:
+        {{ recorder_status.confidences.face }}/{{ recorder_status.confidences.side }}.
+      </p>
+      {% if recorder_status.identity %}
+        <p>
+          Распознавание:
+          {% for view, prediction in recorder_status.identity.items() %}
+            <strong>{{ view }} — {{ prediction.name or "неизвестный кот" }}</strong>
+            ({{ prediction.confidence }})
+          {% endfor %}
+        </p>
+      {% endif %}
+    {% endif %}
+    <p class="muted">
+      Автосбор: {{ "включён" if automatic_capture_enabled else "выключен" }}.
+      Режим: {{ "только наблюдение, без автоматической записи" if automatic_capture_dry_run else "запись событий" }}.
+    </p>
+    <p id="detector-details" class="muted"></p>
+  </section>
+
   <section class="panel">
     <h2>Камеры</h2>
     <div class="event camera-grid">
@@ -84,34 +139,6 @@
   </section>
 
   <section class="panel">
-    <h2>Автоматический сбор событий</h2>
-    <p id="detector-alert" class="detector-alert">
-      Получение состояния детектора…
-    </p>
-    {% if recorder_status %}
-      <p>
-        <strong>{{ recorder_status.message }}</strong>
-        <span class="muted">· heartbeat {{ recorder_status.updated_at }}</span>
-      </p>
-    {% else %}
-      <p class="muted">Независимый CatDoorRecorder ещё не запущен.</p>
-    {% endif %}
-    {% if recorder_status and recorder_status.detector_connected %}
-      <p class="muted">
-        Кадры face/side:
-        {{ recorder_status.frames_processed.face }}/{{ recorder_status.frames_processed.side }}.
-        Уверенность cat:
-        {{ recorder_status.confidences.face }}/{{ recorder_status.confidences.side }}.
-      </p>
-    {% endif %}
-    <p class="muted">
-      Автосбор: {{ "включён" if automatic_capture_enabled else "выключен" }}.
-      Режим: {{ "только наблюдение, без автоматической записи" if automatic_capture_dry_run else "запись событий" }}.
-    </p>
-    <p id="detector-details" class="muted"></p>
-  </section>
-
-  <section class="panel">
     <h2>Подготовка обучения</h2>
     <p class="muted">
       Для MacBook выбрано событий: {{ target_counts.macbook }}.
@@ -134,7 +161,29 @@
   </section>
 
   <section class="panel">
+    <h2>Отчёт о процессе обучения</h2>
+    <div class="training-report">
+      <p id="training-report-state" class="detector-alert">
+        Обучение ещё не запускалось.
+      </p>
+      <progress id="training-progress" max="100" value="0"></progress>
+      <div id="training-report-details" class="muted"></div>
+      <div id="training-report-warnings"></div>
+    </div>
+    <p class="muted">
+      Малый набор пригоден только для проверки pipeline. Такая модель не должна
+      использоваться для принятия решений о двери.
+    </p>
+  </section>
+
+  <section class="panel">
     <h2>Сохранённые события</h2>
+    <p class="muted">Отметьте проходы одного и того же кота и присвойте им общее имя.</p>
+    <div class="controls">
+      <input id="bulk-cat-name" placeholder="Имя кота">
+      <button id="bulk-label">Объединить выбранные для обучения</button>
+      <span id="bulk-label-status" class="muted"></span>
+    </div>
     <div class="events">
     {% for event in events %}
       <article class="event" data-event="{{ event.id }}">
@@ -152,6 +201,7 @@
           {% endif %}
         </div>
         <div>
+          <label><input class="event-selector" type="checkbox"> Один и тот же кот</label>
           <strong>Событие #{{ event.id }}</strong>
           <p class="muted">
             {{ event.created_at }} · {{ event.duration_seconds }} сек. ·
@@ -310,6 +360,32 @@
     });
   });
 
+  document.querySelector("#bulk-label")?.addEventListener("click", async () => {
+    const selected = [...document.querySelectorAll(".event-selector:checked")]
+      .map(input => Number(input.closest(".event").dataset.event));
+    const catName = document.querySelector("#bulk-cat-name").value.trim();
+    const status = document.querySelector("#bulk-label-status");
+    if (!selected.length || !catName) {
+      status.textContent = "Выберите события и укажите имя";
+      return;
+    }
+    const response = await fetch("/api/events/bulk-label", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        event_ids: selected,
+        label: "known_cat",
+        cat_name: catName,
+        training_target: "macbook"
+      })
+    });
+    const result = await response.json();
+    status.textContent = response.ok
+      ? `Объединено событий: ${result.updated}`
+      : `Ошибка: ${result.detail}`;
+    if (response.ok) location.reload();
+  });
+
   document.querySelectorAll(".delete-event").forEach(button => {
     button.addEventListener("click", async () => {
       const event = button.closest(".event");
@@ -337,14 +413,63 @@
     status.textContent = response.ok
       ? `Процесс запущен, PID ${result.pid}`
       : `Ошибка: ${result.detail}`;
-    if (!response.ok) trainingButton.disabled = false;
+    if (!response.ok) {
+      trainingButton.disabled = false;
+    } else {
+      setTimeout(refreshTrainingStatus, 500);
+    }
   });
+
+  function renderTrainingReport(result) {
+    const state = document.querySelector("#training-report-state");
+    const progress = document.querySelector("#training-progress");
+    const details = document.querySelector("#training-report-details");
+    const warnings = document.querySelector("#training-report-warnings");
+    state.textContent = result.message || result.state;
+    state.className = `detector-alert ${result.state === "failed" ? "error" : "idle"}`;
+    const epoch = Number(result.epoch || 0);
+    const epochs = Number(result.epochs || 0);
+    progress.value = epochs ? Math.round(epoch / epochs * 100) : (
+      result.state === "completed" ? 100 : 0
+    );
+    const report = result.report || {};
+    const labels = Object.entries(report.events_per_label || {})
+      .map(([name, count]) => `${name === "__foreign__" ? "чужие коты" : name}: ${count}`)
+      .join(", ");
+    const views = Object.entries(report.views || {})
+      .map(([name, count]) => `${name}: ${count} кадров`)
+      .join(", ");
+    const parts = [];
+    if (report.events != null) parts.push(`Проходов: ${report.events}`);
+    if (labels) parts.push(`По котам: ${labels}`);
+    if (views) parts.push(`Ракурсы: ${views}`);
+    if (epochs) parts.push(`Эпоха: ${epoch}/${epochs}`);
+    if (result.loss != null) parts.push(`Loss: ${result.loss}`);
+    if (result.metrics) {
+      for (const [view, metric] of Object.entries(result.metrics)) {
+        if (metric.validation_accuracy != null) {
+          parts.push(
+            `${view} validation accuracy: ${(metric.validation_accuracy * 100).toFixed(1)}%`
+          );
+        }
+      }
+    }
+    details.textContent = parts.join(" · ") || "Данные появятся после подготовки датасета.";
+    warnings.replaceChildren();
+    for (const warning of report.warnings || []) {
+      const row = document.createElement("p");
+      row.className = "error";
+      row.textContent = `Предупреждение: ${warning}`;
+      warnings.appendChild(row);
+    }
+  }
 
   async function refreshTrainingStatus() {
     const response = await fetch("/api/training/local/status");
     if (!response.ok) return;
     const result = await response.json();
     document.querySelector("#training-status").textContent = result.message;
+    renderTrainingReport(result);
     if (["completed", "failed", "idle"].includes(result.state)) {
       trainingButton.disabled = false;
       return;
@@ -388,6 +513,15 @@
       details.textContent =
         `Кадры face/side: ${frames.face ?? 0}/${frames.side ?? 0}` +
         ` · confidence: ${confidences.face ?? 0}/${confidences.side ?? 0}${camera}`;
+      const identities = Object.values(result.identity || {});
+      if (!result.stale && identities.length) {
+        const known = identities
+          .filter(item => item.name)
+          .sort((left, right) => right.confidence - left.confidence)[0];
+        alert.textContent = known
+          ? `Распознан кот: ${known.name} (${known.confidence})`
+          : "Кот обнаружен, но личность не распознана";
+      }
     } catch (error) {
       alert.className = "detector-alert offline";
       alert.textContent = "Не удалось получить состояние детектора";

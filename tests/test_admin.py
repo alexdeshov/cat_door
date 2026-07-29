@@ -1,8 +1,9 @@
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
-from src.common.database import Event
+from src.common.database import Event, create_session_factory
 from src.common.settings import Settings
 from src.recorder.status import write_recorder_status
 from src.web.app import create_app
@@ -65,6 +66,38 @@ def test_capture_and_label_known_cat(runtime_path: Path, monkeypatch) -> None:
     assert 'cameraRotations[role] = (cameraRotations[role] + 90) % 360' in page.text
     assert 'localStorage.setItem(cameraRotationKey, JSON.stringify(cameraRotations))' in page.text
     assert "Автоматический сбор событий" in page.text
+
+
+def test_summary_is_above_cameras_and_counts_all_events(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    client = make_client(runtime_path, monkeypatch)
+    client.post("/api/events", json={"duration_seconds": 5})
+    client.post("/api/events", json={"duration_seconds": 5})
+    client.post(
+        "/api/events/1/label",
+        json={
+            "label": "known_cat",
+            "cat_name": "Барсик",
+            "training_target": "excluded",
+        },
+    )
+    factory = create_session_factory(runtime_path / "test.sqlite3")
+    with factory() as session:
+        second = session.get(Event, 2)
+        assert second is not None
+        second.trigger_source = "automatic"
+        session.commit()
+
+    page = client.get("/")
+
+    assert page.status_code == 200
+    assert page.text.index("Автоматический сбор событий") < page.text.index("<h2>Камеры</h2>")
+    assert "<strong>2</strong><span class=\"muted\">всего проходов</span>" in page.text
+    assert "<strong>1</strong><span class=\"muted\">записано автоматически</span>" in page.text
+    assert "<strong>1</strong><span class=\"muted\">ждут разметки</span>" in page.text
+    assert "Известные коты: <strong>Барсик</strong>" in page.text
     assert "Независимый CatDoorRecorder ещё не запущен." in page.text
 
 
@@ -77,6 +110,46 @@ def test_known_cat_requires_name(runtime_path: Path, monkeypatch) -> None:
         json={"label": "known_cat", "cat_name": None},
     )
     assert response.status_code == 422
+
+
+def test_bulk_labels_same_cat_for_macbook(runtime_path: Path, monkeypatch) -> None:
+    client = make_client(runtime_path, monkeypatch)
+    client.post("/api/events", json={"duration_seconds": 5})
+    client.post("/api/events", json={"duration_seconds": 5})
+
+    response = client.post(
+        "/api/events/bulk-label",
+        json={
+            "event_ids": [1, 2],
+            "label": "known_cat",
+            "cat_name": "Барсик",
+            "training_target": "macbook",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"updated": 2, "cat_name": "Барсик"}
+    factory = create_session_factory(runtime_path / "test.sqlite3")
+    with factory() as session:
+        events = session.scalars(select(Event).order_by(Event.id)).all()
+        assert [(event.cat_name, event.training_target) for event in events] == [
+            ("Барсик", "macbook"),
+            ("Барсик", "macbook"),
+        ]
+
+
+def test_bulk_label_rejects_missing_event(runtime_path: Path, monkeypatch) -> None:
+    client = make_client(runtime_path, monkeypatch)
+    response = client.post(
+        "/api/events/bulk-label",
+        json={
+            "event_ids": [999],
+            "label": "known_cat",
+            "cat_name": "Барсик",
+            "training_target": "macbook",
+        },
+    )
+    assert response.status_code == 404
 
 
 def test_page_shows_detector_probe_metrics(runtime_path: Path, monkeypatch) -> None:
@@ -178,6 +251,10 @@ def test_macbook_export_download(runtime_path: Path, monkeypatch) -> None:
 
 def test_start_local_training_is_detached(runtime_path: Path, monkeypatch) -> None:
     client = make_client(runtime_path, monkeypatch)
+    page = client.get("/")
+    assert "Отчёт о процессе обучения" in page.text
+    assert 'id="training-progress"' in page.text
+    assert 'id="training-report-warnings"' in page.text
 
     class FakeProcess:
         pid = 4321

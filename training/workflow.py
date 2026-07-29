@@ -1,6 +1,7 @@
 import json
 import shutil
 import subprocess
+from collections import defaultdict
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -117,6 +118,32 @@ def build_dataset(
     manifest = destination / "dataset.jsonl"
     write_manifest(items, manifest)
     report = validate_manifest(items, destination)
+    events_per_label: dict[str, set[str]] = defaultdict(set)
+    for item in items:
+        events_per_label[item.label].add(item.event_id)
+    event_counts = {
+        label: len(event_ids) for label, event_ids in sorted(events_per_label.items())
+    }
+    known_counts = {
+        label: count for label, count in event_counts.items() if label != "__foreign__"
+    }
+    warnings: list[str] = []
+    if len(known_counts) < 2:
+        warnings.append("Для классификатора нужны минимум два известных кота")
+    for label, count in known_counts.items():
+        if count < 100:
+            warnings.append(
+                f"{label}: независимых проходов — {count}; рекомендуется не менее 100"
+            )
+    if event_counts.get("__foreign__", 0) < 30:
+        warnings.append("Мало примеров чужих котов для проверки ложных распознаваний")
+    report.update(
+        {
+            "events_per_label": event_counts,
+            "warnings": warnings,
+            "ready_for_production": not warnings,
+        }
+    )
     (destination / "dataset-report.json").write_text(
         json.dumps(report, ensure_ascii=False, indent=2),
         encoding="utf-8",

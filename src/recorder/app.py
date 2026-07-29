@@ -10,6 +10,7 @@ from typing import Any
 
 from src.common.settings import Settings
 from src.inference.cat_detector import DetectorError, OpenVinoCatDetector
+from src.inference.cat_identity import OpenVinoCatIdentity
 from src.recorder.automatic import AutomaticEventConfig, AutomaticEventMachine
 from src.recorder.events import AutomaticEventRequest, persist_automatic_event
 from src.recorder.frames import rgb_frame_stream
@@ -81,6 +82,14 @@ def _frame_worker(
 
 def monitor_automatic(settings: Settings, duration_seconds: float | None) -> None:
     detector = OpenVinoCatDetector(settings.detector_model_path, settings.detector_device)
+    identity_models = {
+        role: OpenVinoCatIdentity(path, settings.detector_device)
+        for role, path in (
+            ("face", settings.identity_face_model_path),
+            ("side", settings.identity_side_model_path),
+        )
+        if path is not None
+    }
     machine = AutomaticEventMachine(build_automatic_config(settings))
     frames: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=4)
     stop = threading.Event()
@@ -98,6 +107,7 @@ def monitor_automatic(settings: Settings, duration_seconds: float | None) -> Non
 
     started_at = time.monotonic()
     confidences = {"face": 0.0, "side": 0.0}
+    identity_predictions: dict[str, dict[str, object]] = {}
     frames_processed = {"face": 0, "side": 0}
     last_action: str | None = None
     last_status_at = 0.0
@@ -123,6 +133,15 @@ def monitor_automatic(settings: Settings, duration_seconds: float | None) -> Non
                 continue
             confidence = detector.confidence(frame)
             confidences[role] = round(confidence, 4)
+            if confidence >= settings.detection_confidence_threshold and role in identity_models:
+                prediction = identity_models[role].predict(
+                    frame,
+                    settings.identity_confidence_threshold,
+                )
+                identity_predictions[role] = {
+                    "name": prediction.name,
+                    "confidence": round(prediction.confidence, 4),
+                }
             frames_processed[role] += 1
             update = machine.observe(time.monotonic(), {role: confidence})
             if active_started_at is not None:
@@ -172,6 +191,7 @@ def monitor_automatic(settings: Settings, duration_seconds: float | None) -> Non
                 detector_connected=True,
                 frames_processed=frames_processed,
                 confidences=confidences,
+                identity=identity_predictions,
                 last_action=last_action,
                 initiating_camera=update.initiating_camera,
             )
@@ -188,6 +208,7 @@ def monitor_automatic(settings: Settings, duration_seconds: float | None) -> Non
             detector_connected=True,
             frames_processed=frames_processed,
             confidences=confidences,
+            identity=identity_predictions,
             last_action=last_action,
         )
 

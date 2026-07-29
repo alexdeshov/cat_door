@@ -31,6 +31,7 @@ def run_job(
         for item in load_manifest(manifest):
             items_by_view[item.view].append(item)
         trained: list[str] = []
+        metrics: dict[str, object] = {}
         for view in ("face", "side"):
             if not items_by_view[view]:
                 continue
@@ -41,13 +42,34 @@ def run_job(
                 view=view,
                 report=report,
             )
-            train(
+            def report_epoch(
+                epoch: int,
+                total_epochs: int,
+                loss: float,
+                training_view: str = view,
+            ) -> None:
+                write_status(
+                    status_path,
+                    state="training",
+                    message=(
+                        f"Обучение модели {training_view}: эпоха {epoch} из {total_epochs}"
+                    ),
+                    view=training_view,
+                    epoch=epoch,
+                    epochs=total_epochs,
+                    loss=round(loss, 5),
+                    report=report,
+                    models=trained,
+                )
+
+            metrics[view] = train(
                 manifest,
                 dataset_dir,
                 view,
                 output_dir / f"{view}.pt",
                 epochs,
                 160,
+                progress=report_epoch,
             )
             trained.append(view)
         if not trained:
@@ -58,6 +80,7 @@ def run_job(
             message="Экспериментальное обучение завершено",
             models=trained,
             report=report,
+            metrics=metrics,
         )
     except Exception as exc:  # noqa: BLE001 - the detached worker must persist failures
         write_status(

@@ -14,7 +14,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from src.common.database import Event, create_session_factory, session_dependency
@@ -37,6 +37,10 @@ class LabelPayload(BaseModel):
     training_target: str = "excluded"
 
 
+class BulkLabelPayload(LabelPayload):
+    event_ids: list[int] = Field(min_length=1, max_length=100)
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings()
     settings.data_dir.mkdir(parents=True, exist_ok=True)
@@ -56,6 +60,31 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         session: Annotated[Session, Depends(get_session)],
     ) -> HTMLResponse:
         events = session.scalars(select(Event).order_by(Event.created_at.desc()).limit(100)).all()
+        summary_row = session.execute(
+            select(
+                func.count(Event.id),
+                func.count(Event.id).filter(Event.trigger_source == "automatic"),
+                func.count(Event.id).filter(Event.label == "pending"),
+                func.count(Event.id).filter(Event.label == "known_cat"),
+                func.count(Event.id).filter(Event.label == "foreign_cat"),
+                func.count(Event.id).filter(Event.status == "failed"),
+            )
+        ).one()
+        event_summary = {
+            "total": summary_row[0],
+            "automatic": summary_row[1],
+            "manual": summary_row[0] - summary_row[1],
+            "pending": summary_row[2],
+            "known": summary_row[3],
+            "foreign": summary_row[4],
+            "failed": summary_row[5],
+        }
+        known_cat_names = session.scalars(
+            select(Event.cat_name)
+            .where(Event.label == "known_cat", Event.cat_name.is_not(None))
+            .distinct()
+            .order_by(Event.cat_name)
+        ).all()
         target_counts = {
             target: sum(event.training_target == target for event in events)
             for target in ("macbook", "local")
@@ -89,6 +118,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "side_configured": bool(settings.camera_side_rtsp),
                 "default_duration": settings.capture_duration_seconds,
                 "target_counts": target_counts,
+                "event_summary": event_summary,
+                "known_cat_names": known_cat_names,
                 "local_status": local_status,
                 "local_training_epochs": settings.local_training_epochs,
                 "recorder_status": recorder_status,
@@ -206,6 +237,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "cat_name": event.cat_name,
             "training_target": event.training_target,
         }
+
+    @app.post("/api/events/bulk-label")
+    def bulk_label_events(
+        payload: BulkLabelPayload,
+        session: Annotated[Session, Depends(get_session)],
+    ) -> dict[str, object]:
+        if payload.label != "known_cat":
+            raise HTTPException(422, "Группировать можно только события одного домашнего кота")
+        cat_name = payload.cat_name.strip() if payload.cat_name else None
+        if not cat_name:
+            raise HTTPException(422, "Укажите имя кота")
+        if payload.training_target not in {"macbook", "excluded"}:
+            raise HTTPException(422, "Обучение выполняется офлайн на MacBook")
+        unique_ids = sorted(set(payload.event_ids))
+        events = session.scalars(select(Event).where(Event.id.in_(unique_ids))).all()
+        if len(events) != len(unique_ids):
+            raise HTTPException(404, "Одно или несколько событий не найдены")
+        for event in events:
+            event.label = "known_cat"
+            event.cat_name = cat_name
+            event.training_target = payload.training_target
+        session.commit()
+        return {"updated": len(events), "cat_name": cat_name}
 
     @app.delete("/api/events/{event_id}", status_code=204)
     def delete_event(
