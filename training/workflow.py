@@ -98,7 +98,7 @@ def build_dataset(
                 ffmpeg_path,
                 source,
                 event_dir / "frame-%02d.jpg",
-                rotate_180=view == "face",
+                rotate_180=True,
             )
             for frame in frames:
                 items.append(

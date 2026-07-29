@@ -21,9 +21,15 @@
     select, input { background: #111827; color: #e5e7eb; }
     .events { display: grid; gap: 14px; }
     .event { display: grid; grid-template-columns: minmax(220px, 360px) 1fr; gap: 16px; border-top: 1px solid #374151; padding-top: 14px; }
+    .camera-grid { grid-template-columns: minmax(0, 1fr) minmax(220px, 360px); }
     video { width: 100%; border-radius: 8px; background: #030712; }
     .muted { color: #9ca3af; }
     .error { color: #fca5a5; }
+    .detector-alert { padding: 12px 14px; border-radius: 9px; background: #111827; border: 1px solid #4b5563; }
+    .detector-alert.idle { border-color: #047857; color: #a7f3d0; }
+    .detector-alert.candidate, .detector-alert.tail { border-color: #d97706; color: #fde68a; }
+    .detector-alert.active { border-color: #dc2626; background: #450a0a; color: #fecaca; }
+    .detector-alert.offline, .detector-alert.error { border-color: #dc2626; color: #fecaca; }
     @media (max-width: 720px) { .event { grid-template-columns: 1fr; } }
   </style>
 </head>
@@ -35,19 +41,34 @@
 <main>
   <section class="panel">
     <h2>Камеры</h2>
-    <div class="event">
+    <div class="event camera-grid">
       <div>
-        <h3>Центральная камера — Cute 2</h3>
+        <h3 id="primary-camera-title">Основная камера — Cute 2</h3>
         {% if face_configured %}
-          <img class="stream rotate-180" src="/stream/face.mjpeg" alt="Поток центральной камеры">
+          <img id="primary-camera-stream" class="stream rotate-180"
+            src="/stream/face.mjpeg" alt="Поток камеры Cute 2">
+          <button class="rotate-camera" data-slot="primary" type="button">
+            Повернуть на 90°
+          </button>
         {% else %}<p class="error">Центральная камера не настроена.</p>{% endif %}
       </div>
       <div>
-        <h3>Дополнительная камера — Ursa Minor</h3>
+        <h3 id="secondary-camera-title">Дополнительная камера — Ursa Minor</h3>
         {% if side_configured %}
-          <img class="stream" src="/stream/side.mjpeg" alt="Поток боковой камеры">
+          <img id="secondary-camera-stream" class="stream rotate-180"
+            src="/stream/side.mjpeg" alt="Поток камеры Ursa Minor">
+          <button class="rotate-camera" data-slot="secondary" type="button">
+            Повернуть на 90°
+          </button>
         {% else %}<p class="muted">Дополнительная камера не настроена.</p>{% endif %}
       </div>
+    </div>
+    <div class="controls">
+      <button id="swap-cameras" type="button"
+        {{ "disabled" if not face_configured or not side_configured }}>
+        Поменять камеры местами
+      </button>
+      <span id="camera-layout-status" class="muted"></span>
     </div>
     {% if face_configured %}
       <div class="controls">
@@ -60,6 +81,34 @@
     {% else %}
       <p class="error">Камера face не настроена. Задайте CATDOOR_CAMERA_FACE_RTSP.</p>
     {% endif %}
+  </section>
+
+  <section class="panel">
+    <h2>Автоматический сбор событий</h2>
+    <p id="detector-alert" class="detector-alert">
+      Получение состояния детектора…
+    </p>
+    {% if recorder_status %}
+      <p>
+        <strong>{{ recorder_status.message }}</strong>
+        <span class="muted">· heartbeat {{ recorder_status.updated_at }}</span>
+      </p>
+    {% else %}
+      <p class="muted">Независимый CatDoorRecorder ещё не запущен.</p>
+    {% endif %}
+    {% if recorder_status and recorder_status.detector_connected %}
+      <p class="muted">
+        Кадры face/side:
+        {{ recorder_status.frames_processed.face }}/{{ recorder_status.frames_processed.side }}.
+        Уверенность cat:
+        {{ recorder_status.confidences.face }}/{{ recorder_status.confidences.side }}.
+      </p>
+    {% endif %}
+    <p class="muted">
+      Автосбор: {{ "включён" if automatic_capture_enabled else "выключен" }}.
+      Режим: {{ "только наблюдение, без автоматической записи" if automatic_capture_dry_run else "запись событий" }}.
+    </p>
+    <p id="detector-details" class="muted"></p>
   </section>
 
   <section class="panel">
@@ -95,7 +144,8 @@
             <video class="rotate-180" controls preload="metadata" src="/media/{{ event.id }}/face"></video>
             {% if event.side_media_path %}
               <strong>Дополнительная камера</strong>
-              <video controls preload="metadata" src="/media/{{ event.id }}/side"></video>
+              <video class="rotate-180" controls preload="metadata"
+                src="/media/{{ event.id }}/side"></video>
             {% endif %}
           {% else %}
             <p class="error">Запись не готова: {{ event.error_code or event.status }}</p>
@@ -103,7 +153,10 @@
         </div>
         <div>
           <strong>Событие #{{ event.id }}</strong>
-          <p class="muted">{{ event.created_at }} · {{ event.duration_seconds }} сек.</p>
+          <p class="muted">
+            {{ event.created_at }} · {{ event.duration_seconds }} сек. ·
+            {{ "автоматическое" if event.trigger_source == "automatic" else "ручное" }}
+          </p>
           <div class="controls">
             <select class="label">
               <option value="pending" {{ "selected" if event.label == "pending" }}>Не размечено</option>
@@ -131,6 +184,91 @@
   </section>
 </main>
 <script>
+  const cameraLayoutKey = "catdoor-camera-layout";
+  const cameraRotationKey = "catdoor-camera-rotations";
+  const primaryCamera = document.querySelector("#primary-camera-stream");
+  const secondaryCamera = document.querySelector("#secondary-camera-stream");
+  const swapCamerasButton = document.querySelector("#swap-cameras");
+  let cameraRotations = {face: 180, side: 180};
+
+  try {
+    const savedRotations = JSON.parse(localStorage.getItem(cameraRotationKey) || "{}");
+    for (const role of ["face", "side"]) {
+      if ([0, 90, 180, 270].includes(savedRotations[role])) {
+        cameraRotations[role] = savedRotations[role];
+      }
+    }
+  } catch (error) {
+    console.warn("Не удалось прочитать настройки поворота камер", error);
+  }
+
+  function applyCameraRotation(camera) {
+    if (!camera) return;
+    const angle = cameraRotations[camera.dataset.cameraRole];
+    const scale = angle % 180 === 0 ? 1 : 0.5625;
+    camera.style.transform = `rotate(${angle}deg) scale(${scale})`;
+  }
+
+  function setCameraSource(camera, source) {
+    if (camera.getAttribute("src") !== source) {
+      camera.src = source;
+    }
+  }
+
+  function applyCameraLayout(swapped) {
+    if (!primaryCamera || !secondaryCamera) return;
+    primaryCamera.dataset.cameraRole = swapped ? "side" : "face";
+    setCameraSource(primaryCamera, swapped ? "/stream/side.mjpeg" : "/stream/face.mjpeg");
+    primaryCamera.alt = swapped ? "Поток камеры Ursa Minor" : "Поток камеры Cute 2";
+    secondaryCamera.dataset.cameraRole = swapped ? "face" : "side";
+    setCameraSource(secondaryCamera, swapped ? "/stream/face.mjpeg" : "/stream/side.mjpeg");
+    secondaryCamera.alt = swapped ? "Поток камеры Cute 2" : "Поток камеры Ursa Minor";
+    applyCameraRotation(primaryCamera);
+    applyCameraRotation(secondaryCamera);
+    document.querySelector("#primary-camera-title").textContent =
+      `Основная камера — ${swapped ? "Ursa Minor" : "Cute 2"}`;
+    document.querySelector("#secondary-camera-title").textContent =
+      `Дополнительная камера — ${swapped ? "Cute 2" : "Ursa Minor"}`;
+    document.querySelector("#camera-layout-status").textContent =
+      swapped ? "Основная: Ursa Minor" : "Основная: Cute 2";
+    swapCamerasButton.dataset.swapped = String(swapped);
+  }
+
+  if (primaryCamera && secondaryCamera) {
+    let savedLayout = false;
+    try {
+      savedLayout = localStorage.getItem(cameraLayoutKey) === "swapped";
+    } catch (error) {
+      console.warn("Не удалось прочитать настройку расположения камер", error);
+    }
+    applyCameraLayout(savedLayout);
+  }
+
+  swapCamerasButton?.addEventListener("click", () => {
+    const swapped = swapCamerasButton.dataset.swapped !== "true";
+    applyCameraLayout(swapped);
+    try {
+      localStorage.setItem(cameraLayoutKey, swapped ? "swapped" : "default");
+    } catch (error) {
+      console.warn("Не удалось сохранить настройку расположения камер", error);
+    }
+  });
+
+  document.querySelectorAll(".rotate-camera").forEach(button => {
+    button.addEventListener("click", () => {
+      const camera = button.dataset.slot === "primary" ? primaryCamera : secondaryCamera;
+      if (!camera) return;
+      const role = camera.dataset.cameraRole;
+      cameraRotations[role] = (cameraRotations[role] + 90) % 360;
+      applyCameraRotation(camera);
+      try {
+        localStorage.setItem(cameraRotationKey, JSON.stringify(cameraRotations));
+      } catch (error) {
+        console.warn("Не удалось сохранить настройки поворота камер", error);
+      }
+    });
+  });
+
   const captureButton = document.querySelector("#capture");
   captureButton?.addEventListener("click", async () => {
     const status = document.querySelector("#capture-status");
@@ -215,6 +353,50 @@
     setTimeout(refreshTrainingStatus, 3000);
   }
   refreshTrainingStatus();
+
+  const detectorStateLabels = {
+    idle: "Кот не обнаружен",
+    candidate: "Возможный кот — ожидается подтверждение",
+    active: "Кот обнаружен — система начала бы запись",
+    tail: "Кот вышел из кадра — продолжается хвост события",
+    cooldown: "Событие завершено — защита от повторного запуска",
+    waiting_for_frames: "Детектор ожидает кадры камер",
+    probe_completed: "Проверка детектора завершена",
+    disabled: "Автоматический сбор выключен",
+    error: "Ошибка детектора",
+    offline: "Recorder не отвечает"
+  };
+
+  async function refreshDetectorStatus() {
+    const alert = document.querySelector("#detector-alert");
+    const details = document.querySelector("#detector-details");
+    try {
+      const response = await fetch("/api/recorder/status");
+      const result = await response.json();
+      const state = result.stale ? "offline" : result.state;
+      alert.className = `detector-alert ${state}`;
+      alert.textContent = result.stale
+        ? "Recorder не отвечает: heartbeat устарел"
+        : state === "active" && !result.dry_run
+          ? "Кот обнаружен — запись события идёт"
+          : detectorStateLabels[state] || result.message || state;
+      const frames = result.frames_processed || {};
+      const confidences = result.confidences || {};
+      const camera = result.initiating_camera
+        ? ` · камера: ${result.initiating_camera}`
+        : "";
+      details.textContent =
+        `Кадры face/side: ${frames.face ?? 0}/${frames.side ?? 0}` +
+        ` · confidence: ${confidences.face ?? 0}/${confidences.side ?? 0}${camera}`;
+    } catch (error) {
+      alert.className = "detector-alert offline";
+      alert.textContent = "Не удалось получить состояние детектора";
+      details.textContent = "";
+    } finally {
+      setTimeout(refreshDetectorStatus, 1000);
+    }
+  }
+  refreshDetectorStatus();
 </script>
 </body>
 </html>

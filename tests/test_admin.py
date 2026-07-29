@@ -4,6 +4,7 @@ from fastapi.testclient import TestClient
 
 from src.common.database import Event
 from src.common.settings import Settings
+from src.recorder.status import write_recorder_status
 from src.web.app import create_app
 
 
@@ -53,6 +54,18 @@ def test_capture_and_label_known_cat(runtime_path: Path, monkeypatch) -> None:
     assert page.status_code == 200
     assert "Барсик" in page.text
     assert 'class="stream rotate-180"' in page.text
+    assert 'class="event camera-grid"' in page.text
+    assert ".camera-grid { grid-template-columns: minmax(0, 1fr) minmax(220px, 360px); }" in (
+        page.text
+    )
+    assert 'id="swap-cameras"' in page.text
+    assert 'localStorage.setItem(cameraLayoutKey, swapped ? "swapped" : "default")' in page.text
+    assert page.text.count('class="rotate-camera"') == 1
+    assert 'if (camera.getAttribute("src") !== source)' in page.text
+    assert 'cameraRotations[role] = (cameraRotations[role] + 90) % 360' in page.text
+    assert 'localStorage.setItem(cameraRotationKey, JSON.stringify(cameraRotations))' in page.text
+    assert "Автоматический сбор событий" in page.text
+    assert "Независимый CatDoorRecorder ещё не запущен." in page.text
 
 
 def test_known_cat_requires_name(runtime_path: Path, monkeypatch) -> None:
@@ -64,6 +77,44 @@ def test_known_cat_requires_name(runtime_path: Path, monkeypatch) -> None:
         json={"label": "known_cat", "cat_name": None},
     )
     assert response.status_code == 422
+
+
+def test_page_shows_detector_probe_metrics(runtime_path: Path, monkeypatch) -> None:
+    write_recorder_status(
+        runtime_path / "runtime" / "recorder-status.json",
+        state="probe_completed",
+        message="Dry-run проверка завершена",
+        detector_connected=True,
+        frames_processed={"face": 10, "side": 11},
+        confidences={"face": 0.25, "side": 0.5},
+    )
+    client = make_client(runtime_path, monkeypatch, side=True)
+
+    page = client.get("/")
+
+    assert page.status_code == 200
+    assert page.text.count('class="rotate-camera"') == 2
+    assert "Кадры face/side:" in page.text
+    assert "10/11" in page.text
+    assert "0.25/0.5" in page.text
+
+    status = client.get("/api/recorder/status")
+    assert status.status_code == 200
+    assert status.json()["state"] == "probe_completed"
+    assert status.json()["stale"] is False
+
+
+def test_recorder_status_reports_missing_heartbeat(runtime_path: Path, monkeypatch) -> None:
+    client = make_client(runtime_path, monkeypatch)
+
+    status = client.get("/api/recorder/status")
+
+    assert status.status_code == 200
+    assert status.json() == {
+        "state": "offline",
+        "message": "CatDoorRecorder не запущен",
+        "stale": True,
+    }
 
 
 def test_rejects_unknown_label(runtime_path: Path, monkeypatch) -> None:

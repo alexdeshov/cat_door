@@ -37,6 +37,7 @@ backups/
 *.sqlite3
 
 # Models and archives
+models/
 *.onnx
 *.pt
 *.pth

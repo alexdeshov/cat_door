@@ -27,5 +27,6 @@ def test_initial_migration_is_applied_once() -> None:
         ("001_initial",),
         ("002_side_media",),
         ("003_training_target",),
+        ("004_automatic_event_metadata",),
     ]
     assert "events" in tables

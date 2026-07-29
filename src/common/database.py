@@ -3,7 +3,7 @@ from collections.abc import Generator
 from datetime import UTC, datetime
 from pathlib import Path
 
-from sqlalchemy import DateTime, Integer, String, create_engine
+from sqlalchemy import DateTime, Float, Integer, String, create_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 
@@ -26,6 +26,10 @@ class Event(Base):
     cat_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
     training_target: Mapped[str] = mapped_column(String(20), default="excluded")
     error_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    trigger_source: Mapped[str] = mapped_column(String(20), default="manual")
+    initiating_camera: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    detector_confidence_face: Mapped[float | None] = mapped_column(Float, nullable=True)
+    detector_confidence_side: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
 def apply_migrations(database_path: Path) -> None:

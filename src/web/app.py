@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 from src.common.database import Event, create_session_factory, session_dependency
 from src.common.settings import Settings
 from src.recorder.ffmpeg import RecorderError, mjpeg_stream, record_clip
+from src.recorder.status import read_recorder_status
 from training.workflow import create_macbook_export, write_status
 
 LABELS = {"pending", "known_cat", "foreign_cat", "not_visible", "multiple_cats"}
@@ -66,6 +67,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 local_status = json.loads(local_runs[-1].read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
                 local_status = {"state": "unknown", "message": "Статус запуска повреждён"}
+        recorder_status = read_recorder_status(
+            settings.data_dir / "runtime" / "recorder-status.json"
+        )
+        recorder_enabled = (
+            bool(recorder_status.get("automatic_capture_enabled"))
+            if recorder_status
+            else settings.automatic_capture_enabled
+        )
+        recorder_dry_run = (
+            bool(recorder_status.get("dry_run"))
+            if recorder_status
+            else settings.automatic_capture_dry_run
+        )
         return templates.TemplateResponse(
             request=request,
             name="index.html",
@@ -77,6 +91,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "target_counts": target_counts,
                 "local_status": local_status,
                 "local_training_epochs": settings.local_training_epochs,
+                "recorder_status": recorder_status,
+                "automatic_capture_enabled": recorder_enabled,
+                "automatic_capture_dry_run": recorder_dry_run,
             },
         )
 
@@ -91,6 +108,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             mjpeg_stream(settings.ffmpeg_path, urls[view], settings.preview_fps),
             media_type="multipart/x-mixed-replace; boundary=frame",
         )
+
+    @app.get("/api/recorder/status")
+    def recorder_status() -> dict[str, object]:
+        status = read_recorder_status(settings.data_dir / "runtime" / "recorder-status.json")
+        if status is None:
+            return {
+                "state": "offline",
+                "message": "CatDoorRecorder не запущен",
+                "stale": True,
+            }
+        updated_at = status.get("updated_at")
+        try:
+            updated = datetime.fromisoformat(str(updated_at))
+            stale = (datetime.now(UTC) - updated).total_seconds() > 10
+        except ValueError:
+            stale = True
+        return {**status, "stale": stale}
 
     @app.post("/api/events", status_code=201)
     def capture(

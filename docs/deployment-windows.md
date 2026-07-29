@@ -14,3 +14,14 @@
 ## Runtime
 
 Предпочтительно OpenVINO. ONNX Runtime используется как резервный вариант.
+
+## Локальный фоновый запуск
+
+Web и recorder можно запускать как отделённые процессы:
+
+```powershell
+python -m scripts.start_web
+python -m scripts.start_recorder --record
+```
+
+Логи сохраняются только локально в `CatDoorData/runtime/`.

@@ -11,6 +11,7 @@ def test_build_dataset_uses_selected_events_only(runtime_path: Path, monkeypatch
     event_dir = runtime_path / "events" / "00000001"
     event_dir.mkdir(parents=True)
     (event_dir / "face.mp4").write_bytes(b"video")
+    (event_dir / "side.mp4").write_bytes(b"video")
     factory = create_session_factory(database_path)
     with factory() as session:
         session.add(
@@ -19,6 +20,7 @@ def test_build_dataset_uses_selected_events_only(runtime_path: Path, monkeypatch
                 status="ready",
                 duration_seconds=5,
                 media_path="events/00000001/face.mp4",
+                side_media_path="events/00000001/side.mp4",
                 label="known_cat",
                 cat_name="Барсик",
                 training_target="local",
@@ -65,5 +67,5 @@ def test_build_dataset_uses_selected_events_only(runtime_path: Path, monkeypatch
 
     items = load_manifest(manifest)
     assert report["events"] == 1
-    assert [item.label for item in items] == ["Барсик"]
-    assert rotations == [True]
+    assert [item.label for item in items] == ["Барсик", "Барсик"]
+    assert rotations == [True, True]

@@ -13,6 +13,7 @@ dependencies = [
 
 [project.scripts]
 catdoor-web = "src.web.app:run"
+catdoor-recorder = "src.recorder.app:main"
 
 [project.optional-dependencies]
 dev = [
@@ -34,6 +35,11 @@ acceptance = [
     "numpy>=2.0",
     "pillow>=11.0",
 ]
+inference = [
+    "openvino>=2025.0,<2027",
+    "numpy>=2.0",
+    "pillow>=11.0",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -43,5 +49,5 @@ line-length = 100
 target-version = "py311"
 
 [[tool.mypy.overrides]]
-module = ["onnxruntime", "torchvision", "torchvision.*"]
+module = ["onnxruntime", "openvino", "torchvision", "torchvision.*"]
 ignore_missing_imports = true
