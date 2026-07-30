@@ -71,12 +71,29 @@ Split вычисляется детерминированно из `event_id`: 7
 
 ```bash
 python -m training.train_classifier work/manifest.split.jsonl export/dataset \
-  work/face.pt --view face --epochs 20
+  work/face.pt --view face --epochs 20 \
+  --weights-path ~/CatDoorTraining/models/mobilenet-v3-small-imagenet.pth
 ```
 
 При доступности MPS он выбирается автоматически, иначе используется CPU.
-Скрипт не скачивает pretrained-веса и может работать в полностью изолированной
-среде.
+Классификатор дообучается из
+`MobileNet_V3_Small_Weights.IMAGENET1K_V1`; обучение с нуля не используется.
+Один раз при подготовке MacBook можно скачать официальный state dict в каталог
+вне репозитория:
+
+```bash
+mkdir -p ~/CatDoorTraining/models
+python -c "import torch; from torchvision.models import MobileNet_V3_Small_Weights as W; torch.save(W.IMAGENET1K_V1.get_state_dict(progress=True, check_hash=True), '$HOME/CatDoorTraining/models/mobilenet-v3-small-imagenet.pth')"
+```
+
+Без `--weights-path` torchvision использует свой локальный cache и при
+необходимости пытается скачать те же официальные веса. Если cache пуст и сети
+нет, команда завершится понятной ошибкой до начала обучения. Файлы `.pth` и
+`.pt` не добавляются в Git.
+
+Обучающая выборка использует умеренный `RandomResizedCrop`, изменение яркости и
+контраста и поворот до 7 градусов. Горизонтальное отражение отключено, чтобы не
+менять семантику ракурса; validation использует только resize и нормализацию.
 
 ## ONNX и пакет
 

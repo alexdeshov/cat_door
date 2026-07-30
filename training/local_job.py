@@ -16,6 +16,7 @@ def run_job(
     output_dir: Path,
     detector_model_path: Path,
     detector_device: str,
+    weights_path: Path | None,
     epochs: int,
 ) -> None:
     status_path = output_dir / "status.json"
@@ -74,6 +75,7 @@ def run_job(
                 epochs,
                 160,
                 progress=report_epoch,
+                weights_path=weights_path,
             )
             trained.append(view)
         if not trained:
@@ -103,6 +105,7 @@ def main() -> None:
     parser.add_argument("output_dir", type=Path)
     parser.add_argument("--detector-model", type=Path, required=True)
     parser.add_argument("--detector-device", default="CPU")
+    parser.add_argument("--weights-path", type=Path)
     parser.add_argument("--epochs", type=int, default=2)
     args = parser.parse_args()
     run_job(
@@ -112,6 +115,7 @@ def main() -> None:
         args.output_dir,
         args.detector_model,
         args.detector_device,
+        args.weights_path,
         args.epochs,
     )
     print(json.dumps({"status": str(args.output_dir / "status.json")}))

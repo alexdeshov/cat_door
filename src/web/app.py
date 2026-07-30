@@ -368,6 +368,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "--epochs",
             str(settings.local_training_epochs),
         ]
+        if settings.identity_pretrained_weights_path is not None:
+            command.extend(
+                [
+                    "--weights-path",
+                    str(settings.identity_pretrained_weights_path.resolve()),
+                ]
+            )
         creationflags = 0
         if sys.platform == "win32":
             creationflags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS

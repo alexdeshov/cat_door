@@ -78,13 +78,19 @@ open-set поведение на чужих котах не проверено.
 
 ```bash
 python -m training.train_classifier DATASET/dataset.jsonl DATASET \
-  OUTPUT/face.pt --view face --epochs 20 --image-size 160
+  OUTPUT/face.pt --view face --epochs 20 --image-size 160 \
+  --weights-path ~/CatDoorTraining/models/mobilenet-v3-small-imagenet.pth
 python -m training.export_onnx OUTPUT/face.pt OUTPUT/face-identity.onnx \
   --model-info OUTPUT/face-identity.json
 ```
 
 Для `side` команды аналогичны с `--view side`. Обучение использует MPS, если он доступен.
 Сырые данные, видео и обученные веса в Git не добавляются.
+Начальные веса — официальный ImageNet-претрен MobileNetV3 Small. Их разрешено
+один раз скачать на MacBook либо указать локальным `--weights-path`; без сети и
+без локальных/cache-весов обучение не начинается. Безопасные аугментации меняют
+яркость, контраст, масштаб кропа и слегка поворачивают его. Горизонтальное
+отражение не применяется.
 
 ## Установка модели на Windows
 
