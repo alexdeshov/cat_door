@@ -3,92 +3,13 @@ import json
 import tempfile
 import time
 import zipfile
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+from src.common.metrics import AcceptanceMetrics, calculate_metrics
 from training.dataset import DatasetItem, load_manifest, validate_manifest
 from training.model_package import verify_package
-
-FOREIGN_LABEL = "__foreign__"
-
-
-@dataclass(frozen=True)
-class AcceptanceMetrics:
-    samples: int
-    known_samples: int
-    foreign_samples: int
-    correct: int
-    false_accepts: int
-    false_rejects: int
-    uncertain: int
-    accuracy: float
-    false_accept_rate: float
-    false_reject_rate: float
-    uncertain_rate: float
-    mean_inference_ms: float
-    latency_passed: bool
-    passed: bool
-
-
-def calculate_metrics(
-    expected: list[str],
-    predicted: list[str | None],
-    inference_ms: list[float],
-    *,
-    max_far: float,
-    max_frr: float,
-    max_mean_inference_ms: float = float("inf"),
-) -> AcceptanceMetrics:
-    if not expected or len(expected) != len(predicted) or len(expected) != len(inference_ms):
-        raise ValueError("expected, predicted and inference_ms must have the same non-zero length")
-    known_samples = sum(label != FOREIGN_LABEL for label in expected)
-    foreign_samples = len(expected) - known_samples
-    correct = sum(
-        prediction == label
-        for label, prediction in zip(expected, predicted, strict=True)
-        if label != FOREIGN_LABEL
-    )
-    correct += sum(
-        prediction is None
-        for label, prediction in zip(expected, predicted, strict=True)
-        if label == FOREIGN_LABEL
-    )
-    false_accepts = sum(
-        label == FOREIGN_LABEL and prediction is not None
-        for label, prediction in zip(expected, predicted, strict=True)
-    )
-    false_rejects = sum(
-        label != FOREIGN_LABEL and prediction != label
-        for label, prediction in zip(expected, predicted, strict=True)
-    )
-    uncertain = sum(prediction is None for prediction in predicted)
-    far = false_accepts / foreign_samples if foreign_samples else 0.0
-    frr = false_rejects / known_samples if known_samples else 0.0
-    mean_inference_ms = sum(inference_ms) / len(inference_ms)
-    latency_passed = mean_inference_ms <= max_mean_inference_ms
-    return AcceptanceMetrics(
-        samples=len(expected),
-        known_samples=known_samples,
-        foreign_samples=foreign_samples,
-        correct=correct,
-        false_accepts=false_accepts,
-        false_rejects=false_rejects,
-        uncertain=uncertain,
-        accuracy=correct / len(expected),
-        false_accept_rate=far,
-        false_reject_rate=frr,
-        uncertain_rate=uncertain / len(expected),
-        mean_inference_ms=mean_inference_ms,
-        latency_passed=latency_passed,
-        passed=(
-            foreign_samples > 0
-            and known_samples > 0
-            and far <= max_far
-            and frr <= max_frr
-            and latency_passed
-        ),
-    )
 
 
 def _softmax(values: Any) -> Any:

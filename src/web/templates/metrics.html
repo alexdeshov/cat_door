@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Метрики — CatDoor AI</title>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, sans-serif; }
+    body { margin: 0; background: #111827; color: #e5e7eb; }
+    header, main { width: min(1100px, calc(100% - 32px)); margin: 24px auto; }
+    header { display: flex; justify-content: space-between; gap: 16px; align-items: center; }
+    a { color: #93c5fd; }
+    .panel { background: #1f2937; border: 1px solid #374151; border-radius: 14px; padding: 18px; margin-bottom: 20px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
+    .card { padding: 14px; border-radius: 10px; background: #111827; border: 1px solid #374151; }
+    .card strong { display: block; font-size: 1.55rem; }
+    .muted { color: #9ca3af; }
+    .warning { color: #fde68a; }
+    .error { color: #fca5a5; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: 9px; border-bottom: 1px solid #374151; text-align: left; }
+    input, select, button { font: inherit; border-radius: 8px; border: 1px solid #4b5563; padding: 9px 12px; }
+    input, select { background: #111827; color: #e5e7eb; }
+    button { background: #2563eb; color: white; cursor: pointer; }
+    .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 10px; }
+  </style>
+</head>
+<body>
+<header>
+  <h1>Метрики моделей</h1>
+  <a href="/">← Камеры и события</a>
+</header>
+<main>
+  {% for key, title in [("7_days", "Последние 7 дней"), ("30_days", "Последние 30 дней")] %}
+    {% set window = online.windows[key] %}
+    {% set metrics = window.metrics %}
+    <section class="panel">
+      <h2>{{ title }}</h2>
+      {% if metrics %}
+        <div class="grid">
+          <div class="card">
+            <strong>{{ "%.2f%%"|format(metrics.false_accept_rate * 100) if metrics.false_accept_rate is not none else "—" }}</strong>
+            <span>FAR · {{ metrics.false_accepts }} из {{ metrics.foreign_samples }}</span>
+          </div>
+          <div class="card">
+            <strong>{{ "%.2f%%"|format(metrics.false_reject_rate * 100) if metrics.false_reject_rate is not none else "—" }}</strong>
+            <span>FRR · {{ metrics.false_rejects }} из {{ metrics.known_samples }}</span>
+          </div>
+          <div class="card">
+            <strong>{{ metrics.misidentified_known }}</strong>
+            <span>известных котов названы неверно</span>
+          </div>
+          <div class="card">
+            <strong>{{ "%.2f%%"|format(metrics.uncertain_rate * 100) }}</strong>
+            <span>uncertain · {{ metrics.uncertain }} из {{ metrics.samples }}</span>
+          </div>
+        </div>
+      {% else %}
+        <p class="muted">Нет размеченных событий с online-предсказаниями.</p>
+      {% endif %}
+      <p class="muted">
+        Всего событий: {{ window.events }} · ждут разметки: {{ window.pending }} ·
+        identity-оценок: {{ window.labelled_identity_events }}
+      </p>
+    </section>
+  {% endfor %}
+
+  <section class="panel">
+    <h2>Детекция по камерам</h2>
+    <table>
+      <thead><tr><th>Камера</th><th>Наблюдений</th><th>Выше порога</th><th>Медиана inference</th><th>Медиана возраста кадра</th></tr></thead>
+      <tbody>
+      {% for role, values in detection.items() %}
+        <tr>
+          <td>{{ "Cute 2" if role == "face" else "Ursa Minor" }}</td>
+          <td>{{ values.observations }}</td>
+          <td>{{ values.above_threshold }}</td>
+          <td>{{ "%.1f мс"|format(values.median_inference_ms) if values.median_inference_ms is not none else "—" }}</td>
+          <td>{{ "%.1f мс"|format(values.median_frame_age_ms) if values.median_frame_age_ms is not none else "—" }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </section>
+
+  <section class="panel">
+    <h2>Прогресс датасета</h2>
+    {% set progress = online.windows.all.dataset_progress %}
+    {% if progress %}
+      <table>
+        <thead><tr><th>Кот</th><th>Независимых событий</th><th>Кадров identity в online-событиях</th><th>Цель</th></tr></thead>
+        <tbody>
+        {% for name, values in progress.items() %}
+          <tr><td>{{ name }}</td><td>{{ values.events }}</td><td>{{ values.identity_frames }}</td><td>100+ событий</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <p class="muted">Размеченных домашних котов пока нет.</p>
+    {% endif %}
+  </section>
+
+  <section class="panel">
+    <h2>Новая офлайн-оценка</h2>
+    <p class="muted">Последовательный replay выполняется отдельным процессом на OpenVINO CPU. Он ничего не активирует.</p>
+    {% if not detector_ready %}
+      <p class="warning">Detector не настроен. Укажите имя ONNX из локального каталога models ниже.</p>
+    {% elif not identity_ready %}
+      <p class="muted">Identity-модели не настроены; detector-only replay всё равно доступен.</p>
+    {% endif %}
+    <div class="form-grid">
+      <label>Режим
+        <select id="evaluation-kind">
+          <option value="identity">Identity + detector</option>
+          <option value="detector">Только сравнение detector</option>
+        </select>
+      </label>
+      <label>С даты <input id="evaluation-from" type="datetime-local"></label>
+      <label>По дату <input id="evaluation-to" type="datetime-local"></label>
+      <label>Detector ONNX <input id="evaluation-detector" placeholder="текущая модель"></label>
+      <label>Face identity ONNX <input id="evaluation-face" placeholder="текущая модель"></label>
+      <label>Side identity ONNX <input id="evaluation-side" placeholder="текущая модель"></label>
+    </div>
+    <p><button id="start-evaluation">Запустить оценку</button> <span id="evaluation-status" class="muted"></span></p>
+  </section>
+
+  <section class="panel">
+    <h2>Запуски оценки</h2>
+    <p><a href="/metrics/compare">Сравнить два завершённых запуска</a></p>
+    {% if runs %}
+      <table>
+        <thead><tr><th>ID</th><th>Создан</th><th>Тип</th><th>Статус</th><th>Отчёт</th></tr></thead>
+        <tbody>
+        {% for run in runs %}
+          <tr>
+            <td>#{{ run.id }}</td><td>{{ run.created_at }}</td><td>{{ run.run_kind }}</td>
+            <td>{{ run.status }}</td><td><a href="/metrics/runs/{{ run.id }}">Открыть</a></td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <p class="muted">Оценки ещё не запускались.</p>
+    {% endif %}
+  </section>
+</main>
+<script>
+  const evaluationKind = document.querySelector("#evaluation-kind");
+  const identityInputs = [
+    document.querySelector("#evaluation-face"),
+    document.querySelector("#evaluation-side")
+  ];
+  evaluationKind.addEventListener("change", () => {
+    const disabled = evaluationKind.value === "detector";
+    identityInputs.forEach(input => {
+      input.disabled = disabled;
+      if (disabled) input.value = "";
+    });
+  });
+  document.querySelector("#start-evaluation").addEventListener("click", async () => {
+    const button = document.querySelector("#start-evaluation");
+    const status = document.querySelector("#evaluation-status");
+    button.disabled = true;
+    status.textContent = "Запуск…";
+    const optionalValue = id => document.querySelector(id).value || null;
+    const response = await fetch("/api/evaluations", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        run_kind: evaluationKind.value,
+        created_from: optionalValue("#evaluation-from"),
+        created_to: optionalValue("#evaluation-to"),
+        labels: ["known_cat", "foreign_cat", "pending", "multiple_cats", "not_visible"],
+        detector_model: optionalValue("#evaluation-detector"),
+        face_model: optionalValue("#evaluation-face"),
+        side_model: optionalValue("#evaluation-side")
+      })
+    });
+    const result = await response.json();
+    if (!response.ok) {
+      status.textContent = result.detail || "Не удалось запустить оценку";
+      button.disabled = false;
+      return;
+    }
+    status.innerHTML = `Запуск #${result.run_id} создан. <a href="/metrics/runs/${result.run_id}">Открыть статус</a>`;
+  });
+</script>
+</body>
+</html>

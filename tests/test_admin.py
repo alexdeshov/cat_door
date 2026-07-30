@@ -1,9 +1,10 @@
+import json
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from src.common.database import Event, create_session_factory
+from src.common.database import EvaluationRun, Event, create_session_factory
 from src.common.settings import Settings
 from src.recorder.status import write_recorder_status
 from src.web.app import create_app
@@ -213,6 +214,275 @@ def test_recorder_status_reports_missing_heartbeat(runtime_path: Path, monkeypat
         "message": "CatDoorRecorder не запущен",
         "stale": True,
     }
+
+
+def test_starts_detached_offline_evaluation_on_cpu(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    models = runtime_path / "models"
+    models.mkdir()
+    detector = models / "detector.onnx"
+    detector.write_bytes(b"detector")
+    detector.with_suffix(".json").write_text(
+        '{"architecture":"test","cat_class_id":17}',
+        encoding="utf-8",
+    )
+    identity = models / "face.onnx"
+    identity.write_bytes(b"identity")
+    identity.with_suffix(".json").write_text(
+        '{"labels":["Барсик"],"image_size":160}',
+        encoding="utf-8",
+    )
+    launched: dict[str, object] = {}
+
+    class FakeProcess:
+        pid = 4321
+
+    def fake_popen(command: list[str], **kwargs: object) -> FakeProcess:
+        launched["command"] = command
+        launched["kwargs"] = kwargs
+        return FakeProcess()
+
+    monkeypatch.setattr("src.web.app.subprocess.Popen", fake_popen)
+    settings = Settings(
+        data_dir=runtime_path,
+        database_path=runtime_path / "test.sqlite3",
+        detector_model_path=detector,
+        identity_face_model_path=identity,
+    )
+    client = TestClient(create_app(settings))
+
+    response = client.post(
+        "/api/evaluations",
+        json={"labels": ["known_cat", "foreign_cat"]},
+    )
+
+    assert response.status_code == 202
+    assert response.json() == {"run_id": 1, "pid": 4321, "state": "starting"}
+    command = launched["command"]
+    assert isinstance(command, list)
+    assert "training.evaluation_job" in command
+    assert "--face-model" in command
+    assert "GPU" not in command
+    factory = create_session_factory(runtime_path / "test.sqlite3")
+    with factory() as session:
+        run = session.get(EvaluationRun, 1)
+        assert run is not None
+        assert run.status == "starting"
+        assert run.detector_model_version_id is not None
+        assert run.face_model_version_id is not None
+        assert run.side_model_version_id is None
+
+
+def test_starts_detector_only_evaluation_without_identity_models(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    models = runtime_path / "models"
+    models.mkdir()
+    detector = models / "candidate.onnx"
+    detector.write_bytes(b"candidate")
+    detector.with_suffix(".json").write_text(
+        '{"architecture":"yolox_nano","cat_class_id":15}',
+        encoding="utf-8",
+    )
+    launched: dict[str, object] = {}
+
+    class FakeProcess:
+        pid = 5432
+
+    def fake_popen(command: list[str], **kwargs: object) -> FakeProcess:
+        launched["command"] = command
+        return FakeProcess()
+
+    monkeypatch.setattr("src.web.app.subprocess.Popen", fake_popen)
+    client = TestClient(
+        create_app(
+            Settings(
+                data_dir=runtime_path,
+                database_path=runtime_path / "test.sqlite3",
+                detector_model_path=detector,
+            )
+        )
+    )
+
+    response = client.post(
+        "/api/evaluations",
+        json={
+            "run_kind": "detector",
+            "labels": ["known_cat", "foreign_cat", "not_visible"],
+        },
+    )
+
+    assert response.status_code == 202
+    command = launched["command"]
+    assert isinstance(command, list)
+    assert command[command.index("--run-kind") + 1] == "detector"
+    assert "--face-model" not in command
+    assert "--side-model" not in command
+    factory = create_session_factory(runtime_path / "test.sqlite3")
+    with factory() as session:
+        run = session.get(EvaluationRun, 1)
+        assert run is not None
+        assert run.run_kind == "detector"
+        assert run.detector_model_version_id is not None
+        assert run.face_model_version_id is None
+
+
+def test_evaluation_rejects_path_outside_models(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    client = make_client(runtime_path, monkeypatch)
+
+    response = client.post(
+        "/api/evaluations",
+        json={"detector_model": "../secret.onnx"},
+    )
+
+    assert response.status_code == 422
+
+
+def test_metrics_page_shows_online_detection_and_evaluation_sections(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    client = make_client(runtime_path, monkeypatch)
+
+    page = client.get("/metrics")
+
+    assert page.status_code == 200
+    assert "Последние 7 дней" in page.text
+    assert "Детекция по камерам" in page.text
+    assert "Новая офлайн-оценка" in page.text
+    assert 'option value="detector"' in page.text
+    assert "Сравнить два завершённых запуска" in page.text
+    assert client.get("/").text.count('href="/metrics"') == 1
+
+
+def test_completed_evaluation_report_and_comparison_are_rendered(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    client = make_client(runtime_path, monkeypatch)
+    factory = create_session_factory(runtime_path / "test.sqlite3")
+    reports = [
+        {
+            "events_processed": 10,
+            "identity_events": 8,
+            "clean_events": 8,
+            "training_seen_events": 2,
+            "metrics": {"combined": None},
+            "night_metrics": {"combined": None},
+            "detection": {},
+            "clean_metrics": {
+                "combined": {
+                    "false_accept_rate": far,
+                    "false_reject_rate": 0.2,
+                    "misidentified_known": 1,
+                    "uncertain_rate": 0.1,
+                    "accuracy": 0.8,
+                    "mean_inference_ms": 12.0,
+                    "threshold_sweep": [],
+                    "confusion": {},
+                }
+            },
+        }
+        for far in (0.2, 0.1)
+    ]
+    with factory() as session:
+        for report in reports:
+            session.add(
+                EvaluationRun(
+                    run_kind="identity",
+                    filter_json="{}",
+                    status="completed",
+                    metrics_json=json.dumps(report),
+                )
+            )
+        session.commit()
+
+    report_page = client.get("/metrics/runs/1")
+    comparison = client.get("/metrics/compare?left=1&right=2")
+
+    assert report_page.status_code == 200
+    assert "Чистые события" in report_page.text
+    assert "Охват" in report_page.text
+    assert comparison.status_code == 200
+    assert "Сравнивается combined-метрика" in comparison.text
+    assert "-0.1000" in comparison.text
+
+
+def test_detector_evaluation_report_and_comparison_are_rendered(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    client = make_client(runtime_path, monkeypatch)
+    factory = create_session_factory(runtime_path / "test.sqlite3")
+
+    def report(miss_rate: float) -> dict[str, object]:
+        values = {
+            "events": 4,
+            "missing_media": 0,
+            "cat_events": 2,
+            "misses": int(miss_rate * 2),
+            "miss_rate": miss_rate,
+            "not_visible_events": 2,
+            "false_triggers": 0,
+            "false_trigger_rate": 0.0,
+            "threshold": 0.3,
+            "median_inference_ms": 50.0,
+            "p95_inference_ms": 60.0,
+            "confidence_distribution": {
+                group: {
+                    "samples": 2,
+                    "min": 0.1,
+                    "p25": 0.2,
+                    "median": 0.3,
+                    "p75": 0.4,
+                    "p95": 0.5,
+                    "max": 0.6,
+                }
+                for group in ("all", "cat", "not_visible")
+            },
+        }
+        return {
+            "run_kind": "detector",
+            "events_processed": 4,
+            "cat_events": 2,
+            "not_visible_events": 2,
+            "clean_events": 4,
+            "night_events": 1,
+            "sections": {
+                section: {"face": values, "side": values}
+                for section in ("all", "clean", "night")
+            },
+            "threshold_sweep": {"face": [], "side": []},
+        }
+
+    with factory() as session:
+        for miss_rate in (0.5, 0.0):
+            session.add(
+                EvaluationRun(
+                    run_kind="detector",
+                    filter_json="{}",
+                    status="completed",
+                    metrics_json=json.dumps(report(miss_rate)),
+                )
+            )
+        session.commit()
+
+    report_page = client.get("/metrics/runs/1")
+    comparison = client.get("/metrics/compare?left=1&right=2")
+
+    assert report_page.status_code == 200
+    assert "Сравнение детектора #1" in report_page.text
+    assert "False trigger" in report_page.text
+    assert comparison.status_code == 200
+    assert "Сравниваются miss rate" in comparison.text
+    assert "face: Miss rate" in comparison.text
+    assert "-0.5000" in comparison.text
 
 
 def test_detection_settings_can_be_updated(runtime_path: Path, monkeypatch) -> None:

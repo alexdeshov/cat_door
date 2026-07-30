@@ -57,9 +57,21 @@ def export_detector(destination: Path, weights_path: Path) -> Path:
         "architecture": "ssdlite320_mobilenet_v3_large",
         "weights": "COCO_V1",
         "license": "BSD-3-Clause",
-        "input": {"name": "images", "shape": [1, 3, 320, 320], "range": [0.0, 1.0]},
+        "input": {
+            "name": "images",
+            "shape": [1, 3, 320, 320],
+            "range": [0.0, 1.0],
+            "channel_order": "rgb",
+            "scale": 1.0 / 255.0,
+            "mean": [0.0, 0.0, 0.0],
+            "std": [1.0, 1.0, 1.0],
+            "letterbox_value": 0,
+            "resize_mode": "letterbox",
+            "letterbox_alignment": "center",
+        },
         "outputs": ["boxes", "labels", "scores"],
         "cat_class_id": categories.index("cat"),
+        "postprocessing": {"score_threshold": 0.01},
         "sha256": sha256(destination),
     }
     destination.with_suffix(".json").write_text(

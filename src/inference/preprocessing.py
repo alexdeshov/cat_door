@@ -52,20 +52,51 @@ def crop_normalized_roi(
     return np.ascontiguousarray(source[top:bottom, left:right])
 
 
-def prepare_detector_frame(frame: np.ndarray) -> np.ndarray:
+def prepare_detector_frame(
+    frame: np.ndarray,
+    input_size: int = DETECTOR_INPUT_SIZE,
+    letterbox_value: int = 0,
+    resize_mode: str = "letterbox",
+    letterbox_alignment: str = "center",
+) -> np.ndarray:
+    if input_size <= 0:
+        raise ValueError("detector input size must be positive")
+    if not 0 <= letterbox_value <= 255:
+        raise ValueError("detector letterbox value must be between 0 and 255")
     image = Image.fromarray(crop_frame_padding(frame), mode="RGB")
-    image.thumbnail(
-        (DETECTOR_INPUT_SIZE, DETECTOR_INPUT_SIZE),
+    if resize_mode == "stretch":
+        return np.asarray(
+            image.resize(
+                (input_size, input_size),
+                Image.Resampling.BILINEAR,
+            ),
+            dtype=np.uint8,
+        )
+    if resize_mode != "letterbox":
+        raise ValueError("detector resize mode must be letterbox or stretch")
+    if letterbox_alignment not in {"center", "top_left"}:
+        raise ValueError("detector letterbox alignment must be center or top_left")
+    scale = min(input_size / image.width, input_size / image.height)
+    resized_width = max(1, min(input_size, int(image.width * scale)))
+    resized_height = max(1, min(input_size, int(image.height * scale)))
+    image = image.resize(
+        (resized_width, resized_height),
         Image.Resampling.BILINEAR,
     )
-    detector_image = Image.new("RGB", (DETECTOR_INPUT_SIZE, DETECTOR_INPUT_SIZE))
-    detector_image.paste(
-        image,
-        (
-            (DETECTOR_INPUT_SIZE - image.width) // 2,
-            (DETECTOR_INPUT_SIZE - image.height) // 2,
-        ),
+    detector_image = Image.new(
+        "RGB",
+        (input_size, input_size),
+        color=(letterbox_value,) * 3,
     )
+    offset = (
+        (0, 0)
+        if letterbox_alignment == "top_left"
+        else (
+            (input_size - image.width) // 2,
+            (input_size - image.height) // 2,
+        )
+    )
+    detector_image.paste(image, offset)
     return np.asarray(detector_image, dtype=np.uint8)
 
 
@@ -73,14 +104,36 @@ def map_detector_box_to_frame(
     box: tuple[float, float, float, float],
     frame_width: int,
     frame_height: int,
+    input_size: int = DETECTOR_INPUT_SIZE,
+    resize_mode: str = "letterbox",
+    letterbox_alignment: str = "center",
 ) -> tuple[float, float, float, float]:
-    scale = min(
-        DETECTOR_INPUT_SIZE / frame_width,
-        DETECTOR_INPUT_SIZE / frame_height,
-    )
-    offset_x = (DETECTOR_INPUT_SIZE - frame_width * scale) / 2
-    offset_y = (DETECTOR_INPUT_SIZE - frame_height * scale) / 2
     x1, y1, x2, y2 = box
+    if resize_mode == "stretch":
+        return (
+            max(0.0, min(float(frame_width), x1 / input_size * frame_width)),
+            max(0.0, min(float(frame_height), y1 / input_size * frame_height)),
+            max(0.0, min(float(frame_width), x2 / input_size * frame_width)),
+            max(0.0, min(float(frame_height), y2 / input_size * frame_height)),
+        )
+    if resize_mode != "letterbox":
+        raise ValueError("detector resize mode must be letterbox or stretch")
+    if letterbox_alignment not in {"center", "top_left"}:
+        raise ValueError("detector letterbox alignment must be center or top_left")
+    scale = min(
+        input_size / frame_width,
+        input_size / frame_height,
+    )
+    offset_x = (
+        0.0
+        if letterbox_alignment == "top_left"
+        else (input_size - frame_width * scale) / 2
+    )
+    offset_y = (
+        0.0
+        if letterbox_alignment == "top_left"
+        else (input_size - frame_height * scale) / 2
+    )
     return (
         max(0.0, min(float(frame_width), (x1 - offset_x) / scale)),
         max(0.0, min(float(frame_height), (y1 - offset_y) / scale)),
@@ -97,11 +150,17 @@ def map_detector_box_to_source(
     detector_frame_height: int,
     *,
     roi: NormalizedRoi | None,
+    input_size: int = DETECTOR_INPUT_SIZE,
+    resize_mode: str = "letterbox",
+    letterbox_alignment: str = "center",
 ) -> tuple[float, float, float, float]:
     detector_coordinates = map_detector_box_to_frame(
         box,
         detector_frame_width,
         detector_frame_height,
+        input_size,
+        resize_mode,
+        letterbox_alignment,
     )
     roi_x = roi.x if roi is not None else 0.0
     roi_y = roi.y if roi is not None else 0.0
@@ -127,6 +186,9 @@ def crop_strongest_cat(
     expansion: float = IDENTITY_CROP_EXPANSION,
     detector_frame: np.ndarray | None = None,
     roi: NormalizedRoi | None = None,
+    input_size: int = DETECTOR_INPUT_SIZE,
+    resize_mode: str = "letterbox",
+    letterbox_alignment: str = "center",
 ) -> np.ndarray | None:
     eligible = tuple(
         detection
@@ -147,6 +209,9 @@ def crop_strongest_cat(
         detector_source.shape[1],
         detector_source.shape[0],
         roi=roi,
+        input_size=input_size,
+        resize_mode=resize_mode,
+        letterbox_alignment=letterbox_alignment,
     )
     width = x2 - x1
     height = y2 - y1

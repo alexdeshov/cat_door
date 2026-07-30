@@ -6,7 +6,7 @@ from collections.abc import Generator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import uuid4
 
 import uvicorn
@@ -17,13 +17,23 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from src.common.database import Event, create_session_factory, session_dependency
+from src.common.database import (
+    EvaluationRun,
+    Event,
+    EventPrediction,
+    ModelVersion,
+    create_session_factory,
+    session_dependency,
+)
 from src.common.detection_config import (
     DetectionConfig,
     detection_config_path,
     load_detection_config,
     save_detection_config,
 )
+from src.common.detection_stats import read_detection_stats
+from src.common.model_registry import register_model_version
+from src.common.online_metrics import build_online_metrics
 from src.common.settings import Settings
 from src.common.windows_power import SleepInhibitor
 from src.recorder.ffmpeg import RecorderError, record_clip
@@ -49,6 +59,25 @@ class BulkLabelPayload(LabelPayload):
     event_ids: list[int] = Field(min_length=1, max_length=100)
 
 
+class EvaluationStartPayload(BaseModel):
+    run_kind: Literal["identity", "detector"] = "identity"
+    created_from: datetime | None = None
+    created_to: datetime | None = None
+    labels: list[str] = Field(
+        default_factory=lambda: [
+            "known_cat",
+            "foreign_cat",
+            "pending",
+            "multiple_cats",
+            "not_visible",
+        ]
+    )
+    training_targets: list[str] = Field(default_factory=list)
+    detector_model: str | None = None
+    face_model: str | None = None
+    side_model: str | None = None
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings()
     settings.data_dir.mkdir(parents=True, exist_ok=True)
@@ -68,12 +97,44 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def get_session() -> Generator[Session, None, None]:
         yield from session_dependency(factory)
 
+    def resolve_evaluation_model(
+        configured: Path | None,
+        requested: str | None,
+    ) -> Path | None:
+        if requested is None:
+            return configured
+        candidate = Path(requested)
+        if candidate.is_absolute() or ".." in candidate.parts or candidate.suffix != ".onnx":
+            raise HTTPException(422, "Имя модели должно быть безопасным относительным ONNX-путём")
+        models_root = settings.detector_model_path.parent.resolve()
+        resolved = (models_root / candidate).resolve()
+        if models_root not in resolved.parents:
+            raise HTTPException(422, "Модель должна находиться в локальном каталоге models")
+        return resolved
+
     @app.get("/", response_class=HTMLResponse)
     def index(
         request: Request,
         session: Annotated[Session, Depends(get_session)],
     ) -> HTMLResponse:
         events = session.scalars(select(Event).order_by(Event.created_at.desc()).limit(100)).all()
+        event_ids = [event.id for event in events]
+        prediction_rows = (
+            session.scalars(
+                select(EventPrediction)
+                .where(
+                    EventPrediction.event_id.in_(event_ids),
+                    EventPrediction.origin == "online",
+                )
+                .order_by(EventPrediction.created_at.desc(), EventPrediction.id.desc())
+            ).all()
+            if event_ids
+            else []
+        )
+        event_predictions: dict[int, dict[str, EventPrediction]] = {}
+        for prediction in prediction_rows:
+            by_view = event_predictions.setdefault(prediction.event_id, {})
+            by_view.setdefault(prediction.view, prediction)
         summary_row = session.execute(
             select(
                 func.count(Event.id),
@@ -128,6 +189,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             name="index.html",
             context={
                 "events": events,
+                "event_predictions": event_predictions,
                 "face_configured": bool(settings.camera_face_rtsp),
                 "side_configured": bool(settings.camera_side_rtsp),
                 "default_duration": settings.capture_duration_seconds,
@@ -403,6 +465,294 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except (OSError, json.JSONDecodeError) as exc:
             raise HTTPException(500, "Не удалось прочитать статус обучения") from exc
 
+    @app.post("/api/evaluations", status_code=202)
+    def start_evaluation(
+        payload: EvaluationStartPayload,
+        session: Annotated[Session, Depends(get_session)],
+    ) -> dict[str, object]:
+        invalid_labels = sorted(set(payload.labels) - LABELS)
+        invalid_targets = sorted(set(payload.training_targets) - TRAINING_TARGETS)
+        if invalid_labels:
+            raise HTTPException(422, f"Неизвестные метки: {', '.join(invalid_labels)}")
+        if invalid_targets:
+            raise HTTPException(
+                422,
+                f"Неизвестные назначения обучения: {', '.join(invalid_targets)}",
+            )
+        if (
+            payload.created_from is not None
+            and payload.created_to is not None
+            and payload.created_from > payload.created_to
+        ):
+            raise HTTPException(422, "Начало диапазона должно быть раньше окончания")
+        running = session.scalar(
+            select(EvaluationRun)
+            .where(EvaluationRun.status.in_(["starting", "running"]))
+            .limit(1)
+        )
+        if running is not None:
+            raise HTTPException(409, "Офлайн-оценка уже выполняется")
+
+        detector_path = resolve_evaluation_model(
+            settings.detector_model_path,
+            payload.detector_model,
+        )
+        face_path = (
+            resolve_evaluation_model(
+                settings.identity_face_model_path,
+                payload.face_model,
+            )
+            if payload.run_kind == "identity"
+            else None
+        )
+        side_path = (
+            resolve_evaluation_model(
+                settings.identity_side_model_path,
+                payload.side_model,
+            )
+            if payload.run_kind == "identity"
+            else None
+        )
+        if detector_path is None or not detector_path.is_file():
+            raise HTTPException(422, "Локальная detector-модель не найдена")
+        identity_paths = {
+            role: path
+            for role, path in (("face", face_path), ("side", side_path))
+            if path is not None and path.is_file()
+        }
+        if payload.run_kind == "identity" and not identity_paths:
+            raise HTTPException(422, "Не установлена ни одна локальная identity-модель")
+        try:
+            detector_version = register_model_version(
+                session,
+                kind="detector",
+                model_path=detector_path,
+            )
+            identity_versions = {
+                role: register_model_version(
+                    session,
+                    kind=f"identity_{role}",
+                    model_path=path,
+                )
+                for role, path in identity_paths.items()
+            }
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        filter_value = {
+            "created_from": (
+                payload.created_from.isoformat() if payload.created_from else None
+            ),
+            "created_to": payload.created_to.isoformat() if payload.created_to else None,
+            "labels": payload.labels,
+            "training_targets": payload.training_targets,
+        }
+        run = EvaluationRun(
+            run_kind=payload.run_kind,
+            filter_json=json.dumps(filter_value, ensure_ascii=False),
+            detector_model_version_id=detector_version.id,
+            face_model_version_id=(
+                identity_versions["face"].id if "face" in identity_versions else None
+            ),
+            side_model_version_id=(
+                identity_versions["side"].id if "side" in identity_versions else None
+            ),
+            status="starting",
+        )
+        session.add(run)
+        session.commit()
+        run_directory = settings.data_dir / "evaluations" / f"{run.id:08d}"
+        status_path = run_directory / "status.json"
+        write_status(
+            status_path,
+            state="starting",
+            message="Запуск отдельного процесса оценки",
+            run_id=run.id,
+        )
+        log_path = run_directory / "evaluation.log"
+        command = [
+            sys.executable,
+            "-m",
+            "training.evaluation_job",
+            str(settings.resolved_database_path.resolve()),
+            str(settings.data_dir.resolve()),
+            settings.ffmpeg_path,
+            str(run.id),
+            str(detector_path.resolve()),
+            str(status_path.resolve()),
+            "--identity-threshold",
+            str(settings.identity_confidence_threshold),
+            "--run-kind",
+            payload.run_kind,
+        ]
+        for role in ("face", "side"):
+            if role in identity_paths:
+                command.extend(
+                    [f"--{role}-model", str(identity_paths[role].resolve())]
+                )
+        creationflags = 0
+        if sys.platform == "win32":
+            creationflags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+        try:
+            with log_path.open("ab") as log:
+                process = subprocess.Popen(
+                    command,
+                    stdin=subprocess.DEVNULL,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    cwd=Path.cwd(),
+                    creationflags=creationflags,
+                )
+        except OSError as exc:
+            run.status = "failed"
+            run.completed_at = datetime.now(UTC)
+            run.error_message = "Не удалось запустить Python"
+            session.commit()
+            write_status(
+                status_path,
+                state="failed",
+                message="Не удалось запустить Python",
+                run_id=run.id,
+            )
+            raise HTTPException(500, "Не удалось запустить процесс оценки") from exc
+        return {"run_id": run.id, "pid": process.pid, "state": "starting"}
+
+    @app.get("/api/evaluations/{run_id}/status")
+    def evaluation_status(
+        run_id: int,
+        session: Annotated[Session, Depends(get_session)],
+    ) -> dict[str, object]:
+        run = session.get(EvaluationRun, run_id)
+        if run is None:
+            raise HTTPException(404, "Запуск оценки не найден")
+        status_path = settings.data_dir / "evaluations" / f"{run_id:08d}" / "status.json"
+        try:
+            return json.loads(status_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return {"run_id": run.id, "state": run.status}
+        except (OSError, json.JSONDecodeError) as exc:
+            raise HTTPException(500, "Не удалось прочитать статус оценки") from exc
+
+    @app.get("/api/metrics/online")
+    def online_metrics(
+        session: Annotated[Session, Depends(get_session)],
+    ) -> dict[str, object]:
+        return build_online_metrics(session)
+
+    @app.get("/metrics", response_class=HTMLResponse)
+    def metrics_page(
+        request: Request,
+        session: Annotated[Session, Depends(get_session)],
+    ) -> HTMLResponse:
+        runs = session.scalars(
+            select(EvaluationRun).order_by(EvaluationRun.created_at.desc())
+        ).all()
+        return templates.TemplateResponse(
+            request=request,
+            name="metrics.html",
+            context={
+                "online": build_online_metrics(session),
+                "detection": read_detection_stats(
+                    settings.data_dir / "runtime" / "detection.jsonl"
+                ),
+                "runs": runs,
+                "detector_ready": settings.detector_model_path.is_file(),
+                "identity_ready": any(
+                    path is not None and path.is_file()
+                    for path in (
+                        settings.identity_face_model_path,
+                        settings.identity_side_model_path,
+                    )
+                ),
+            },
+        )
+
+    @app.get("/metrics/runs/{run_id}", response_class=HTMLResponse)
+    def evaluation_report_page(
+        request: Request,
+        run_id: int,
+        session: Annotated[Session, Depends(get_session)],
+    ) -> HTMLResponse:
+        run = session.get(EvaluationRun, run_id)
+        if run is None:
+            raise HTTPException(404, "Запуск оценки не найден")
+        try:
+            report = json.loads(run.metrics_json) if run.metrics_json else None
+        except json.JSONDecodeError:
+            report = None
+        version_ids = {
+            version_id
+            for version_id in (
+                run.detector_model_version_id,
+                run.face_model_version_id,
+                run.side_model_version_id,
+            )
+            if version_id is not None
+        }
+        versions = (
+            {
+                version.id: version
+                for version in session.scalars(
+                    select(ModelVersion).where(ModelVersion.id.in_(version_ids))
+                ).all()
+            }
+            if version_ids
+            else {}
+        )
+        report_template = (
+            "metrics-detector-report.html"
+            if isinstance(report, dict) and report.get("run_kind") == "detector"
+            else "metrics-report.html"
+        )
+        return templates.TemplateResponse(
+            request=request,
+            name=report_template,
+            context={"run": run, "report": report, "versions": versions},
+        )
+
+    @app.get("/metrics/compare", response_class=HTMLResponse)
+    def comparison_page(
+        request: Request,
+        session: Annotated[Session, Depends(get_session)],
+        left: int | None = None,
+        right: int | None = None,
+    ) -> HTMLResponse:
+        runs = session.scalars(
+            select(EvaluationRun)
+            .where(EvaluationRun.status == "completed")
+            .order_by(EvaluationRun.created_at.desc())
+        ).all()
+        selected: list[EvaluationRun | None] = [
+            session.get(EvaluationRun, run_id) if run_id is not None else None
+            for run_id in (left, right)
+        ]
+        reports: list[dict[str, object] | None] = []
+        for run in selected:
+            try:
+                value = json.loads(run.metrics_json) if run and run.metrics_json else None
+            except json.JSONDecodeError:
+                value = None
+            reports.append(value if isinstance(value, dict) else None)
+        metric_rows = _comparison_rows(reports[0], reports[1])
+        comparison_kind = (
+            selected[0].run_kind
+            if selected[0] is not None
+            and selected[1] is not None
+            and selected[0].run_kind == selected[1].run_kind
+            else None
+        )
+        return templates.TemplateResponse(
+            request=request,
+            name="metrics-compare.html",
+            context={
+                "runs": runs,
+                "left": left,
+                "right": right,
+                "selected": selected,
+                "metric_rows": metric_rows,
+                "comparison_kind": comparison_kind,
+            },
+        )
+
     @app.get("/media/{event_id}/{view}")
     def media(
         event_id: int,
@@ -428,6 +778,135 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
 
     return app
+
+
+def _comparison_rows(
+    left: dict[str, object] | None,
+    right: dict[str, object] | None,
+) -> list[dict[str, object]]:
+    left_kind = left.get("run_kind", "identity") if left else None
+    right_kind = right.get("run_kind", "identity") if right else None
+    if left_kind != right_kind:
+        return []
+    if left_kind == "detector":
+        return _detector_comparison_rows(left, right)
+    names = (
+        ("false_accept_rate", "FAR", False),
+        ("false_reject_rate", "FRR", False),
+        ("misidentified_known", "Ошибочных имён", False),
+        ("uncertain_rate", "Uncertain", False),
+        ("accuracy", "Accuracy", True),
+        ("mean_inference_ms", "Средний inference, мс", False),
+    )
+    values = [
+        _combined_clean_metrics(report)
+        for report in (left, right)
+    ]
+    rows: list[dict[str, object]] = []
+    for key, label, higher_is_better in names:
+        left_value = values[0].get(key) if values[0] else None
+        right_value = values[1].get(key) if values[1] else None
+        delta = (
+            float(right_value) - float(left_value)
+            if isinstance(left_value, (int, float))
+            and isinstance(right_value, (int, float))
+            else None
+        )
+        favorable = (
+            delta is not None
+            and delta != 0
+            and ((delta > 0) if higher_is_better else (delta < 0))
+        )
+        rows.append(
+            {
+                "label": label,
+                "left": left_value,
+                "right": right_value,
+                "delta": delta,
+                "delta_class": (
+                    "good" if favorable else "bad" if delta not in {None, 0} else ""
+                ),
+            }
+        )
+    return rows
+
+
+def _detector_comparison_rows(
+    left: dict[str, object] | None,
+    right: dict[str, object] | None,
+) -> list[dict[str, object]]:
+    names = (
+        ("miss_rate", "Miss rate", False),
+        ("false_trigger_rate", "False trigger rate", False),
+        ("median_inference_ms", "Медиана inference, мс", False),
+        ("p95_inference_ms", "p95 inference, мс", False),
+    )
+    rows: list[dict[str, object]] = []
+    for view in ("face", "side"):
+        values = [
+            _detector_clean_metrics(report, view)
+            for report in (left, right)
+        ]
+        for key, label, higher_is_better in names:
+            left_value = values[0].get(key) if values[0] else None
+            right_value = values[1].get(key) if values[1] else None
+            delta = (
+                float(right_value) - float(left_value)
+                if isinstance(left_value, (int, float))
+                and not isinstance(left_value, bool)
+                and isinstance(right_value, (int, float))
+                and not isinstance(right_value, bool)
+                else None
+            )
+            favorable = (
+                delta is not None
+                and delta != 0
+                and ((delta > 0) if higher_is_better else (delta < 0))
+            )
+            rows.append(
+                {
+                    "label": f"{view}: {label}",
+                    "left": left_value,
+                    "right": right_value,
+                    "delta": delta,
+                    "delta_class": (
+                        "good"
+                        if favorable
+                        else "bad"
+                        if delta not in {None, 0}
+                        else ""
+                    ),
+                }
+            )
+    return rows
+
+
+def _detector_clean_metrics(
+    report: dict[str, object] | None,
+    view: str,
+) -> dict[str, object] | None:
+    if report is None:
+        return None
+    sections = report.get("sections")
+    if not isinstance(sections, dict):
+        return None
+    clean = sections.get("clean")
+    if not isinstance(clean, dict):
+        return None
+    values = clean.get(view)
+    return values if isinstance(values, dict) else None
+
+
+def _combined_clean_metrics(
+    report: dict[str, object] | None,
+) -> dict[str, object] | None:
+    if report is None:
+        return None
+    clean = report.get("clean_metrics")
+    if not isinstance(clean, dict):
+        return None
+    combined = clean.get("combined")
+    return combined if isinstance(combined, dict) else None
 
 
 def run() -> None:

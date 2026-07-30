@@ -3,7 +3,7 @@ from collections.abc import Generator
 from datetime import UTC, datetime
 from pathlib import Path
 
-from sqlalchemy import DateTime, Float, Integer, String, create_engine
+from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text, create_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 
@@ -30,6 +30,74 @@ class Event(Base):
     initiating_camera: Mapped[str | None] = mapped_column(String(10), nullable=True)
     detector_confidence_face: Mapped[float | None] = mapped_column(Float, nullable=True)
     detector_confidence_side: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+
+class ModelVersion(Base):
+    __tablename__ = "model_versions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    kind: Mapped[str] = mapped_column(String(30), index=True)
+    file_name: Mapped[str] = mapped_column(String(255))
+    sha256: Mapped[str] = mapped_column(String(64), unique=True)
+    metadata_json: Mapped[str] = mapped_column(Text)
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+
+
+class EvaluationRun(Base):
+    __tablename__ = "evaluation_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    run_kind: Mapped[str] = mapped_column(String(20), default="identity")
+    filter_json: Mapped[str] = mapped_column(Text)
+    detector_model_version_id: Mapped[int | None] = mapped_column(
+        ForeignKey("model_versions.id"), nullable=True
+    )
+    face_model_version_id: Mapped[int | None] = mapped_column(
+        ForeignKey("model_versions.id"), nullable=True
+    )
+    side_model_version_id: Mapped[int | None] = mapped_column(
+        ForeignKey("model_versions.id"), nullable=True
+    )
+    status: Mapped[str] = mapped_column(String(20))
+    metrics_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class EventPrediction(Base):
+    __tablename__ = "event_predictions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    event_id: Mapped[int] = mapped_column(
+        ForeignKey("events.id", ondelete="CASCADE"), index=True
+    )
+    model_version_id: Mapped[int] = mapped_column(
+        ForeignKey("model_versions.id"), index=True
+    )
+    view: Mapped[str] = mapped_column(String(20))
+    origin: Mapped[str] = mapped_column(String(20), index=True)
+    evaluation_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("evaluation_runs.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    decision: Mapped[str] = mapped_column(String(120))
+    predicted_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    frames_used: Mapped[int] = mapped_column(Integer, default=0)
+    max_detector_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    mean_inference_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
+    raw_scores_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
 
 
 def apply_migrations(database_path: Path) -> None:

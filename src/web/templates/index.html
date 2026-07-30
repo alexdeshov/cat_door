@@ -65,7 +65,7 @@
 <body>
 <header>
   <h1>CatDoor AI</h1>
-  <span class="badge">Тестовый режим — дверь не управляется</span>
+  <div><a href="/metrics">Метрики</a> · <span class="badge">Тестовый режим — дверь не управляется</span></div>
 </header>
 <main>
   <section class="panel">
@@ -386,6 +386,33 @@
             {{ event.created_at }} · {{ event.duration_seconds }} сек. ·
             {{ "автоматическое" if event.trigger_source == "automatic" else "ручное" }}
           </p>
+          {% set predictions = event_predictions.get(event.id, {}) %}
+          {% if predictions %}
+            <p class="muted">
+              Модель:
+              {% for view, prediction in predictions.items() %}
+                {{ "Cute 2" if view == "face" else "Ursa Minor" }} —
+                {% if prediction.decision.startswith("known:") %}
+                  {{ prediction.predicted_name }} {{ "%.2f"|format(prediction.confidence) }}
+                {% elif prediction.decision == "uncertain" %}
+                  не уверена{% if prediction.confidence is not none %}
+                    ({{ "%.2f"|format(prediction.confidence) }}){% endif %}
+                {% else %}
+                  не запускалась
+                {% endif %}{{ "; " if not loop.last }}
+              {% endfor %}
+              / Разметка:
+              {% if event.label == "known_cat" %}
+                {{ event.cat_name }}
+              {% elif event.label == "foreign_cat" %}
+                чужой кот
+              {% elif event.label == "pending" %}
+                не размечено
+              {% else %}
+                {{ event.label }}
+              {% endif %}
+            </p>
+          {% endif %}
           <div class="controls">
             <select class="label">
               <option value="pending" {{ "selected" if event.label == "pending" }}>Не размечено</option>

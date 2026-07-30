@@ -82,3 +82,20 @@ def test_preview_maps_roi_detection_to_full_frame() -> None:
 
     assert annotated[135, 240, 1] > 150
     assert np.all(annotated[90, 160] == 30)
+
+
+def test_preview_maps_416_detection_to_full_frame() -> None:
+    frame = np.full((360, 640, 3), 30, dtype=np.uint8)
+    detections = (
+        CatDetection(box=(104.0, 149.5, 312.0, 266.5), confidence=0.8),
+    )
+
+    annotated = annotate_detections(
+        frame,
+        detections,
+        event_threshold=0.55,
+        box_min_confidence=0.2,
+        detector_input_size=416,
+    )
+
+    assert annotated[90, 160, 1] > 150

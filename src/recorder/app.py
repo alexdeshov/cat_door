@@ -12,12 +12,15 @@ from typing import Any, Protocol
 
 from sqlalchemy.exc import SQLAlchemyError
 
+from src.common.database import create_session_factory
 from src.common.detection_config import (
     CameraDetectionConfig,
     DetectionConfig,
     detection_config_path,
     load_detection_config,
 )
+from src.common.metrics import ScoredPrediction, aggregate_frame_predictions, mean_or_none
+from src.common.model_registry import register_model_version
 from src.common.settings import Settings
 from src.inference.cat_detector import (
     CatDetectionResult,
@@ -25,10 +28,18 @@ from src.inference.cat_detector import (
     OpenVinoCatDetector,
 )
 from src.inference.cat_identity import IdentityPrediction, OpenVinoCatIdentity
-from src.inference.preprocessing import crop_strongest_cat, prepare_detector_frame
+from src.inference.preprocessing import (
+    DETECTOR_INPUT_SIZE,
+    crop_strongest_cat,
+    prepare_detector_frame,
+)
 from src.recorder.automatic import AutomaticEventConfig, AutomaticEventMachine
 from src.recorder.detection_journal import DetectionJournal
-from src.recorder.events import AutomaticEventRequest, persist_automatic_event
+from src.recorder.events import (
+    AutomaticEventPrediction,
+    AutomaticEventRequest,
+    persist_automatic_event,
+)
 from src.recorder.frames import rgb_frame_stream
 from src.recorder.preview import annotate_detections, preview_path, publish_preview
 from src.recorder.status import write_recorder_status
@@ -113,6 +124,7 @@ class IdentityModel(Protocol):
 class IdentityAttempt:
     prediction: IdentityPrediction | None
     skipped_reason: str | None
+    inference_ms: float | None = None
 
 
 def _predict_identity_if_detected(
@@ -122,6 +134,9 @@ def _predict_identity_if_detected(
     camera_config: CameraDetectionConfig,
     model: IdentityModel | None,
     identity_threshold: float,
+    detector_input_size: int = DETECTOR_INPUT_SIZE,
+    detector_resize_mode: str = "letterbox",
+    detector_letterbox_alignment: str = "center",
 ) -> IdentityAttempt:
     if model is None:
         return IdentityAttempt(None, "model_unavailable")
@@ -133,10 +148,80 @@ def _predict_identity_if_detected(
         min_confidence=camera_config.confidence_threshold,
         detector_frame=detector_frame,
         roi=camera_config.roi,
+        input_size=detector_input_size,
+        resize_mode=detector_resize_mode,
+        letterbox_alignment=detector_letterbox_alignment,
     )
     if cat_crop is None:
         return IdentityAttempt(None, "no_confident_box")
-    return IdentityAttempt(model.predict(cat_crop, identity_threshold), None)
+    started_at = time.monotonic()
+    prediction = model.predict(cat_crop, identity_threshold)
+    return IdentityAttempt(
+        prediction,
+        None,
+        (time.monotonic() - started_at) * 1000,
+    )
+
+
+def _register_loaded_models(
+    settings: Settings,
+    identity_models: dict[str, OpenVinoCatIdentity],
+) -> dict[str, int]:
+    factory = create_session_factory(settings.resolved_database_path)
+    with factory() as session:
+        detector = register_model_version(
+            session,
+            kind="detector",
+            model_path=settings.detector_model_path,
+        )
+        versions = {"detector": detector.id}
+        for role, model_path in (
+            ("face", settings.identity_face_model_path),
+            ("side", settings.identity_side_model_path),
+        ):
+            if role not in identity_models or model_path is None:
+                continue
+            version = register_model_version(
+                session,
+                kind=f"identity_{role}",
+                model_path=model_path,
+            )
+            versions[role] = version.id
+        session.commit()
+    return versions
+
+
+def _build_online_predictions(
+    model_versions: dict[str, int],
+    identity_scores: dict[str, list[ScoredPrediction]],
+    identity_timings: dict[str, list[float]],
+    detector_confidences: dict[str, float],
+    threshold: float,
+) -> tuple[AutomaticEventPrediction, ...]:
+    predictions: list[AutomaticEventPrediction] = []
+    for role in ("face", "side"):
+        model_version_id = model_versions.get(role)
+        if model_version_id is None:
+            continue
+        scores = identity_scores[role]
+        aggregate = aggregate_frame_predictions(scores, threshold)
+        predictions.append(
+            AutomaticEventPrediction(
+                model_version_id=model_version_id,
+                view=role,
+                decision=aggregate.decision,
+                predicted_name=aggregate.predicted_name,
+                confidence=aggregate.confidence,
+                frames_used=aggregate.frames_used,
+                max_detector_confidence=detector_confidences[role],
+                mean_inference_ms=mean_or_none(identity_timings[role]),
+                raw_scores=tuple(
+                    (prediction.name, prediction.confidence)
+                    for prediction in scores
+                ),
+            )
+        )
+    return tuple(predictions)
 
 
 def publish_heartbeat(settings: Settings) -> None:
@@ -167,6 +252,10 @@ def _frame_worker(
     config_lock: threading.Lock,
     reload_stream: threading.Event,
     stop: threading.Event,
+    detector_input_size: int,
+    detector_letterbox_value: int,
+    detector_resize_mode: str,
+    detector_letterbox_alignment: str,
 ) -> None:
     url = settings.camera_face_rtsp if role == "face" else settings.camera_side_rtsp
     if not url:
@@ -191,7 +280,13 @@ def _frame_worker(
                     break
                 item = (
                     role,
-                    prepare_detector_frame(sample.detector),
+                    prepare_detector_frame(
+                        sample.detector,
+                        detector_input_size,
+                        detector_letterbox_value,
+                        detector_resize_mode,
+                        detector_letterbox_alignment,
+                    ),
                     sample.preview,
                     sample.detector,
                     time.monotonic(),
@@ -221,6 +316,7 @@ def monitor_automatic(settings: Settings, duration_seconds: float | None) -> Non
         )
         if path is not None
     }
+    model_versions = _register_loaded_models(settings, identity_models)
     machine = AutomaticEventMachine(runtime_config.event_config())
     trackers = {
         role: CameraConfirmationTracker(getattr(runtime_config, role))
@@ -254,6 +350,10 @@ def monitor_automatic(settings: Settings, duration_seconds: float | None) -> Non
                 config_lock,
                 reload_events[role],
                 stop,
+                detector.input_size,
+                detector.letterbox_value,
+                detector.resize_mode,
+                detector.letterbox_alignment,
             ),
             daemon=True,
             name=f"catdoor-{role}-frames",
@@ -272,6 +372,14 @@ def monitor_automatic(settings: Settings, duration_seconds: float | None) -> Non
     active_started_at: float | None = None
     active_initiating_camera: str | None = None
     active_confidences = {"face": 0.0, "side": 0.0}
+    active_identity_scores: dict[str, list[ScoredPrediction]] = {
+        "face": [],
+        "side": [],
+    }
+    active_identity_timings: dict[str, list[float]] = {
+        "face": [],
+        "side": [],
+    }
     journal.write(
         "session_started",
         camera_settings={
@@ -362,6 +470,9 @@ def monitor_automatic(settings: Settings, duration_seconds: float | None) -> Non
                     box_min_confidence=camera_config.box_min_confidence,
                     detector_frame=detector_frame,
                     roi=camera_config.roi,
+                    detector_input_size=detector.input_size,
+                    detector_resize_mode=detector.resize_mode,
+                    detector_letterbox_alignment=detector.letterbox_alignment,
                 )
                 publish_preview(preview_path(settings.data_dir, role), annotated_frame)
             except OSError:
@@ -375,6 +486,9 @@ def monitor_automatic(settings: Settings, duration_seconds: float | None) -> Non
                 camera_config,
                 identity_models.get(role),
                 settings.identity_confidence_threshold,
+                detector.input_size,
+                detector.resize_mode,
+                detector.letterbox_alignment,
             )
             if prediction.skipped_reason == "no_confident_box":
                 journal.write(
@@ -426,17 +540,41 @@ def monitor_automatic(settings: Settings, duration_seconds: float | None) -> Non
                 active_started_at = time.time() - settings.automatic_prebuffer_seconds
                 active_initiating_camera = update.initiating_camera
                 active_confidences = dict(confidences)
-            elif (
+                active_identity_scores = {"face": [], "side": []}
+                active_identity_timings = {"face": [], "side": []}
+            if active_started_at is not None and prediction.prediction is not None:
+                candidate_name = (
+                    prediction.prediction.candidate_name
+                    or prediction.prediction.name
+                )
+                if candidate_name is not None:
+                    active_identity_scores[role].append(
+                        ScoredPrediction(
+                            name=candidate_name,
+                            confidence=prediction.prediction.confidence,
+                        )
+                    )
+                    if prediction.inference_ms is not None:
+                        active_identity_timings[role].append(prediction.inference_ms)
+            if (
                 update.action is not None
                 and update.action.value == "stop"
                 and active_started_at is not None
             ):
+                online_predictions = _build_online_predictions(
+                    model_versions,
+                    active_identity_scores,
+                    active_identity_timings,
+                    active_confidences,
+                    settings.identity_confidence_threshold,
+                )
                 request = AutomaticEventRequest(
                     started_at=active_started_at,
                     ended_at=time.time(),
                     initiating_camera=active_initiating_camera,
                     confidence_face=active_confidences["face"],
                     confidence_side=active_confidences["side"],
+                    predictions=online_predictions,
                 )
                 if not settings.automatic_capture_dry_run:
                     journal.write(
@@ -456,6 +594,8 @@ def monitor_automatic(settings: Settings, duration_seconds: float | None) -> Non
                 active_started_at = None
                 active_initiating_camera = None
                 active_confidences = {"face": 0.0, "side": 0.0}
+                active_identity_scores = {"face": [], "side": []}
+                active_identity_timings = {"face": [], "side": []}
             now = time.monotonic()
             if update.action is None and now - last_status_at < 0.5:
                 continue

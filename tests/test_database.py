@@ -28,5 +28,7 @@ def test_initial_migration_is_applied_once() -> None:
         ("002_side_media",),
         ("003_training_target",),
         ("004_automatic_event_metadata",),
+        ("005_model_metrics",),
     ]
     assert "events" in tables
+    assert {"model_versions", "event_predictions", "evaluation_runs"} <= tables
