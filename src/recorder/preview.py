@@ -10,8 +10,9 @@ from PIL import Image, ImageDraw
 
 from src.inference.cat_detector import CatDetection
 from src.inference.preprocessing import (
+    NormalizedRoi,
     crop_frame_padding,
-    map_detector_box_to_frame,
+    map_detector_box_to_source,
 )
 
 
@@ -28,16 +29,24 @@ def annotate_detections(
     *,
     event_threshold: float,
     box_min_confidence: float,
+    detector_frame: np.ndarray | None = None,
+    roi: NormalizedRoi | None = None,
 ) -> np.ndarray:
     image = Image.fromarray(crop_frame_padding(frame), mode="RGB")
+    detector_source = crop_frame_padding(
+        detector_frame if detector_frame is not None else frame
+    )
     draw = ImageDraw.Draw(image)
     for detection in sorted(detections, key=lambda item: item.confidence, reverse=True)[:5]:
         if detection.confidence < box_min_confidence:
             continue
-        coordinates = map_detector_box_to_frame(
+        coordinates = map_detector_box_to_source(
             detection.box,
             image.width,
             image.height,
+            detector_source.shape[1],
+            detector_source.shape[0],
+            roi=roi,
         )
         color = "#22c55e" if detection.confidence >= event_threshold else "#f59e0b"
         draw.rectangle(coordinates, outline=color, width=3)

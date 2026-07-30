@@ -56,6 +56,35 @@ def _put_latest(output: queue.Queue[Any], item: Any) -> None:
             pass
 
 
+def _clear_queue(output: queue.Queue[Any]) -> None:
+    while True:
+        try:
+            output.get_nowait()
+        except queue.Empty:
+            return
+
+
+def _get_fair_frame(
+    inputs: dict[str, queue.Queue[Any]],
+    next_role: str,
+    timeout: float,
+) -> tuple[Any, str]:
+    deadline = time.monotonic() + timeout
+    roles = (next_role, "side" if next_role == "face" else "face")
+    while True:
+        for role in roles:
+            try:
+                item = inputs[role].get_nowait()
+            except queue.Empty:
+                continue
+            following_role = "side" if role == "face" else "face"
+            return item, following_role
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise queue.Empty
+        time.sleep(min(0.01, remaining))
+
+
 class CameraConfirmationTracker:
     def __init__(self, config: CameraDetectionConfig) -> None:
         self.config = config
@@ -78,6 +107,7 @@ class IdentityAttempt:
 
 def _predict_identity_if_detected(
     frame: Any,
+    detector_frame: Any,
     detection: CatDetectionResult,
     camera_config: CameraDetectionConfig,
     model: IdentityModel | None,
@@ -91,6 +121,8 @@ def _predict_identity_if_detected(
         frame,
         detection.detections,
         min_confidence=camera_config.confidence_threshold,
+        detector_frame=detector_frame,
+        roi=camera_config.roi,
     )
     if cat_crop is None:
         return IdentityAttempt(None, "no_confident_box")
@@ -119,27 +151,46 @@ def publish_heartbeat(settings: Settings) -> None:
 def _frame_worker(
     role: str,
     settings: Settings,
-    output: queue.Queue[tuple[str, Any, Any, float]],
+    output: queue.Queue[tuple[str, Any, Any, Any, float, CameraDetectionConfig]],
+    camera_configs: dict[str, CameraDetectionConfig],
+    config_lock: threading.Lock,
+    reload_stream: threading.Event,
     stop: threading.Event,
 ) -> None:
     url = settings.camera_face_rtsp if role == "face" else settings.camera_side_rtsp
     if not url:
         return
-    try:
-        for frame in rgb_frame_stream(
-            settings.ffmpeg_path,
-            url,
-            settings.detector_sample_fps,
-            segment_directory=settings.data_dir / "runtime" / "ring" / role,
-            segment_seconds=settings.ring_segment_seconds,
-            retention_seconds=settings.ring_retention_seconds,
-        ):
-            if stop.is_set():
-                return
-            item = (role, prepare_detector_frame(frame), frame, time.monotonic())
-            _put_latest(output, item)
-    except OSError:
-        return
+    while not stop.is_set():
+        with config_lock:
+            camera_config = camera_configs[role]
+            reload_stream.clear()
+        try:
+            for sample in rgb_frame_stream(
+                settings.ffmpeg_path,
+                url,
+                camera_config.sample_fps,
+                segment_directory=settings.data_dir / "runtime" / "ring" / role,
+                segment_seconds=settings.ring_segment_seconds,
+                retention_seconds=settings.ring_retention_seconds,
+                roi=camera_config.roi,
+            ):
+                if stop.is_set():
+                    return
+                if reload_stream.is_set():
+                    break
+                item = (
+                    role,
+                    prepare_detector_frame(sample.detector),
+                    sample.preview,
+                    sample.detector,
+                    time.monotonic(),
+                    camera_config,
+                )
+                _put_latest(output, item)
+        except OSError:
+            pass
+        if not reload_stream.is_set():
+            stop.wait(1)
 
 
 def monitor_automatic(settings: Settings, duration_seconds: float | None) -> None:
@@ -164,12 +215,35 @@ def monitor_automatic(settings: Settings, duration_seconds: float | None) -> Non
         role: CameraConfirmationTracker(getattr(runtime_config, role))
         for role in ("face", "side")
     }
-    frames: queue.Queue[tuple[str, Any, Any, float]] = queue.Queue(maxsize=2)
+    frame_queues: dict[
+        str,
+        queue.Queue[tuple[str, Any, Any, Any, float, CameraDetectionConfig]],
+    ] = {
+        role: queue.Queue(maxsize=1)
+        for role in ("face", "side")
+    }
+    worker_configs = {
+        role: getattr(runtime_config, role)
+        for role in ("face", "side")
+    }
+    config_lock = threading.Lock()
+    reload_events = {
+        role: threading.Event()
+        for role in ("face", "side")
+    }
     stop = threading.Event()
     workers = [
         threading.Thread(
             target=_frame_worker,
-            args=(role, settings, frames, stop),
+            args=(
+                role,
+                settings,
+                frame_queues[role],
+                worker_configs,
+                config_lock,
+                reload_events[role],
+                stop,
+            ),
             daemon=True,
             name=f"catdoor-{role}-frames",
         )
@@ -193,7 +267,10 @@ def monitor_automatic(settings: Settings, duration_seconds: float | None) -> Non
             role: getattr(runtime_config, role).model_dump()
             for role in ("face", "side")
         },
-        sample_fps=settings.detector_sample_fps,
+        sample_fps={
+            role: getattr(runtime_config, role).sample_fps
+            for role in ("face", "side")
+        },
         recording=not settings.automatic_capture_dry_run,
         cameras={
             "face": bool(settings.camera_face_rtsp),
@@ -201,12 +278,24 @@ def monitor_automatic(settings: Settings, duration_seconds: float | None) -> Non
         },
     )
     last_config_check_at = 0.0
+    next_camera = "face"
     try:
         while duration_seconds is None or time.monotonic() - started_at < duration_seconds:
             now = time.monotonic()
             if now - last_config_check_at >= 1 and machine.state.value == "idle":
                 updated_config = load_detection_config(config_path, runtime_config)
                 if updated_config != runtime_config:
+                    with config_lock:
+                        for role in ("face", "side"):
+                            previous_camera = getattr(runtime_config, role)
+                            updated_camera = getattr(updated_config, role)
+                            worker_configs[role] = updated_camera
+                            if (
+                                previous_camera.sample_fps != updated_camera.sample_fps
+                                or previous_camera.roi != updated_camera.roi
+                            ):
+                                _clear_queue(frame_queues[role])
+                                reload_events[role].set()
                     runtime_config = updated_config
                     machine = AutomaticEventMachine(runtime_config.event_config())
                     trackers = {
@@ -216,7 +305,19 @@ def monitor_automatic(settings: Settings, duration_seconds: float | None) -> Non
                     journal.write("config_updated", **runtime_config.model_dump())
                 last_config_check_at = now
             try:
-                role, frame, preview_frame, captured_at = frames.get(timeout=2)
+                item, next_camera = _get_fair_frame(
+                    frame_queues,
+                    next_camera,
+                    timeout=2,
+                )
+                (
+                    role,
+                    frame,
+                    preview_frame,
+                    detector_frame,
+                    captured_at,
+                    camera_config,
+                ) = item
             except queue.Empty:
                 journal.write(
                     "frames_waiting",
@@ -240,7 +341,6 @@ def monitor_automatic(settings: Settings, duration_seconds: float | None) -> Non
             inference_ms = (time.monotonic() - inference_started_at) * 1000
             frame_age_ms = (time.monotonic() - captured_at) * 1000
             confidence = detection.confidence
-            camera_config = getattr(runtime_config, role)
             camera_confirmed = trackers[role].observe(confidence)
             try:
                 annotated_frame = annotate_detections(
@@ -248,6 +348,8 @@ def monitor_automatic(settings: Settings, duration_seconds: float | None) -> Non
                     detection.detections,
                     event_threshold=camera_config.confidence_threshold,
                     box_min_confidence=camera_config.box_min_confidence,
+                    detector_frame=detector_frame,
+                    roi=camera_config.roi,
                 )
                 publish_preview(preview_path(settings.data_dir, role), annotated_frame)
             except OSError:
@@ -256,6 +358,7 @@ def monitor_automatic(settings: Settings, duration_seconds: float | None) -> Non
             confidences[role] = round(confidence, 4)
             prediction = _predict_identity_if_detected(
                 preview_frame,
+                detector_frame,
                 detection,
                 camera_config,
                 identity_models.get(role),
@@ -285,6 +388,12 @@ def monitor_automatic(settings: Settings, duration_seconds: float | None) -> Non
                 camera_confirmed=camera_confirmed,
                 confirmation_frames=camera_config.confirmation_frames,
                 window_frames=camera_config.window_frames,
+                sample_fps=camera_config.sample_fps,
+                roi=(
+                    camera_config.roi.model_dump()
+                    if camera_config.roi is not None
+                    else None
+                ),
                 previous_state=previous_state,
                 state=update.state.value,
                 action=update.action.value if update.action is not None else None,

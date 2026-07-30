@@ -72,7 +72,7 @@ def test_capture_and_label_known_cat(runtime_path: Path, monkeypatch) -> None:
     assert "Настройки детекции" in page.text
     assert 'id="detection-face-confirmation-frames"' in page.text
     assert 'id="detection-side-confirmation-frames"' in page.text
-    assert page.text.count('class="setting-help"') == 12
+    assert page.text.count('class="setting-help"') == 16
     assert 'aria-label="Подсказка: рабочий confidence"' in page.text
     assert "На запуск события не влияет." in page.text
     assert "Окно не должно быть меньше числа подтверждений." in page.text
@@ -220,12 +220,16 @@ def test_detection_settings_can_be_updated(runtime_path: Path, monkeypatch) -> N
             "box_min_confidence": 0.15,
             "confirmation_frames": 2,
             "window_frames": 5,
+            "sample_fps": 8.0,
+            "roi": {"x": 0.1, "y": 0.2, "width": 0.7, "height": 0.6},
         },
         "side": {
             "confidence_threshold": 0.50,
             "box_min_confidence": 0.15,
             "confirmation_frames": 2,
             "window_frames": 4,
+            "sample_fps": 3.0,
+            "roi": None,
         },
         "candidate_timeout_seconds": 2.0,
         "absence_seconds": 2.5,
@@ -238,6 +242,9 @@ def test_detection_settings_can_be_updated(runtime_path: Path, monkeypatch) -> N
     assert response.status_code == 200
     assert response.json() == payload
     assert client.get("/api/detection/settings").json() == payload
+    page = client.get("/")
+    assert 'id="detection-face-sample-fps"' in page.text
+    assert 'id="detection-face-roi-enabled"' in page.text
 
 
 def test_detection_settings_reject_invalid_window(runtime_path: Path, monkeypatch) -> None:
@@ -251,12 +258,16 @@ def test_detection_settings_reject_invalid_window(runtime_path: Path, monkeypatc
                 "box_min_confidence": 0.15,
                 "confirmation_frames": 5,
                 "window_frames": 2,
+                "sample_fps": 8.0,
+                "roi": None,
             },
             "side": {
                 "confidence_threshold": 0.55,
                 "box_min_confidence": 0.20,
                 "confirmation_frames": 2,
                 "window_frames": 5,
+                "sample_fps": 3.0,
+                "roi": None,
             },
             "candidate_timeout_seconds": 3.0,
             "absence_seconds": 3.0,

@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     identity_side_model_path: Path | None = None
     identity_pretrained_weights_path: Path | None = None
     identity_confidence_threshold: float = Field(default=0.80, ge=0.0, le=1.0)
+    detector_face_sample_fps: float = Field(default=8.0, gt=0.0, le=10.0)
     detector_sample_fps: float = Field(default=3.0, gt=0.0, le=10.0)
     ring_segment_seconds: int = Field(default=2, ge=1, le=10)
     ring_retention_seconds: int = Field(default=180, ge=30, le=1800)

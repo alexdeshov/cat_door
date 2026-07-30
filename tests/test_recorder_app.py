@@ -11,6 +11,7 @@ from src.inference.cat_detector import CatDetection, CatDetectionResult
 from src.inference.cat_identity import IdentityPrediction
 from src.recorder.app import (
     CameraConfirmationTracker,
+    _get_fair_frame,
     _predict_identity_if_detected,
     _put_latest,
     build_automatic_config,
@@ -64,6 +65,23 @@ def test_latest_frame_replaces_oldest_when_queue_is_full() -> None:
     assert [frames.get_nowait(), frames.get_nowait()] == [2, 3]
 
 
+def test_per_camera_queues_do_not_let_face_frames_starve_side() -> None:
+    frames = {
+        "face": queue.Queue(maxsize=1),
+        "side": queue.Queue(maxsize=1),
+    }
+    _put_latest(frames["face"], "face-1")
+    _put_latest(frames["side"], "side-1")
+
+    first, next_role = _get_fair_frame(frames, "face", 0.1)
+    _put_latest(frames["face"], "face-2")
+    second, next_role = _get_fair_frame(frames, next_role, 0.1)
+
+    assert first == "face-1"
+    assert second == "side-1"
+    assert next_role == "face"
+
+
 def test_camera_confirmation_tracker_uses_own_threshold_and_window() -> None:
     tracker = CameraConfirmationTracker(
         CameraDetectionConfig(
@@ -102,6 +120,7 @@ def test_identity_uses_per_camera_threshold_below_legacy_global_threshold() -> N
 
     attempt = _predict_identity_if_detected(
         frame,
+        frame,
         CatDetectionResult(
             confidence=confidence,
             detections=(
@@ -134,6 +153,7 @@ def test_identity_is_not_called_below_per_camera_threshold() -> None:
 
     attempt = _predict_identity_if_detected(
         np.zeros((360, 640, 3), dtype=np.uint8),
+        np.zeros((360, 640, 3), dtype=np.uint8),
         CatDetectionResult(
             confidence=0.29,
             detections=(
@@ -163,6 +183,7 @@ def test_identity_skips_missing_box_without_exception() -> None:
     model = RecordingIdentityModel()
 
     attempt = _predict_identity_if_detected(
+        np.zeros((360, 640, 3), dtype=np.uint8),
         np.zeros((360, 640, 3), dtype=np.uint8),
         CatDetectionResult(confidence=0.40, detections=()),
         config,

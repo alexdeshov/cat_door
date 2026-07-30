@@ -36,12 +36,15 @@ def detection_config() -> DetectionConfig:
             box_min_confidence=0.15,
             confirmation_frames=2,
             window_frames=5,
+            sample_fps=8.0,
+            roi={"x": 0.25, "y": 0.25, "width": 0.5, "height": 0.5},
         ),
         side=CameraDetectionConfig(
             confidence_threshold=0.55,
             box_min_confidence=0.20,
             confirmation_frames=2,
             window_frames=5,
+            sample_fps=3.0,
         ),
         candidate_timeout_seconds=3,
         absence_seconds=3,
@@ -140,7 +143,7 @@ def test_build_dataset_uses_selected_events_only(runtime_path: Path, monkeypatch
     }
     assert all(frame.shape == (320, 320, 3) for frame in detector.frames)
     with Image.open(destination / items[0].image_path) as crop:
-        assert crop.size == (448, 252)
+        assert crop.size == (224, 126)
 
 
 def test_build_dataset_reports_and_excludes_frames_without_cat_box(

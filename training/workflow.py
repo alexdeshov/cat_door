@@ -15,12 +15,17 @@ from sqlalchemy import select
 from src.common.database import Event, create_session_factory
 from src.common.detection_config import (
     DetectionConfig,
+    DetectorRoi,
     detection_config_path,
     load_detection_config,
 )
 from src.common.settings import Settings
 from src.inference.cat_detector import CatDetectionResult, OpenVinoCatDetector
-from src.inference.preprocessing import crop_strongest_cat, prepare_detector_frame
+from src.inference.preprocessing import (
+    crop_normalized_roi,
+    crop_strongest_cat,
+    prepare_detector_frame,
+)
 from training.dataset import DatasetItem, assign_splits, validate_manifest, write_manifest
 
 USABLE_LABELS = {"known_cat", "foreign_cat"}
@@ -77,17 +82,21 @@ def crop_extracted_frames(
     detector: CatDetector,
     *,
     confidence_threshold: float,
+    roi: DetectorRoi | None,
 ) -> tuple[list[Path], int]:
     accepted: list[Path] = []
     rejected = 0
     for frame_path in frames:
         with Image.open(frame_path) as image:
             frame = np.asarray(image.convert("RGB"), dtype=np.uint8)
-        detection = detector.detect(prepare_detector_frame(frame))
+        detector_frame = crop_normalized_roi(frame, roi)
+        detection = detector.detect(prepare_detector_frame(detector_frame))
         crop = crop_strongest_cat(
             frame,
             detection.detections,
             min_confidence=confidence_threshold,
+            detector_frame=detector_frame,
+            roi=roi,
         )
         if crop is None:
             frame_path.unlink(missing_ok=True)
@@ -170,6 +179,7 @@ def build_dataset(
                 frames,
                 active_detector,
                 confidence_threshold=camera_config.confidence_threshold,
+                roi=camera_config.roi,
             )
             view_report = crop_by_view[view]
             view_report["included"] += len(cropped_frames)
