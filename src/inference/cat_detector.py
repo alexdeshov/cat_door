@@ -76,7 +76,12 @@ class OpenVinoCatDetector:
         cat_indices = np.flatnonzero(labels == self.cat_class_id)
         detections = tuple(
             CatDetection(
-                box=tuple(float(value) for value in boxes[index]),
+                box=(
+                    float(boxes[index][0]),
+                    float(boxes[index][1]),
+                    float(boxes[index][2]),
+                    float(boxes[index][3]),
+                ),
                 confidence=float(scores[index]),
             )
             for index in cat_indices
