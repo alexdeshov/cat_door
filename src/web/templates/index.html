@@ -41,6 +41,23 @@
     .training-report { display: grid; gap: 10px; }
     .settings-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; }
     .settings-grid label { display: grid; gap: 6px; }
+    .setting-title { display: flex; align-items: center; gap: 6px; }
+    .setting-help {
+      position: relative; display: inline-grid; place-items: center; width: 18px; height: 18px;
+      flex: 0 0 18px; border: 1px solid #6b7280; border-radius: 50%; color: #bfdbfe;
+      font-size: 12px; font-weight: 700; line-height: 1; cursor: help;
+    }
+    .setting-help::after {
+      content: attr(data-tooltip); position: absolute; z-index: 20; left: 50%; bottom: calc(100% + 9px);
+      width: min(300px, 75vw); padding: 9px 11px; border: 1px solid #64748b; border-radius: 8px;
+      background: #020617; color: #e5e7eb; font-size: 13px; font-weight: 400; line-height: 1.35;
+      box-shadow: 0 8px 24px rgb(0 0 0 / .35); opacity: 0; pointer-events: none;
+      transform: translate(-50%, 4px); transition: opacity .12s, transform .12s;
+    }
+    .setting-help:hover::after, .setting-help:focus::after {
+      opacity: 1; transform: translate(-50%, 0);
+    }
+    .setting-help:focus { outline: 2px solid #60a5fa; outline-offset: 2px; }
     progress { width: 100%; height: 18px; }
     @media (max-width: 720px) { .event { grid-template-columns: 1fr; } }
   </style>
@@ -137,22 +154,42 @@
     {% set camera_config = detection_config[role] %}
     <h4>{{ title }}</h4>
     <div class="settings-grid">
-      <label>Рабочий confidence
+      <label>
+        <span class="setting-title">Рабочий confidence
+          <span class="setting-help" tabindex="0" role="note"
+            aria-label="Подсказка: рабочий confidence"
+            data-tooltip="Минимальная уверенность модели, при которой кадр считается обнаружением кота. Ниже — детекция быстрее и чаще, но больше ложных срабатываний. Выше — строже, но кот может быть пропущен.">?</span>
+        </span>
         <input id="detection-{{ role }}-confidence-threshold"
           type="number" min="0" max="1" step="0.01"
           value="{{ camera_config.confidence_threshold }}">
       </label>
-      <label>Минимум для рамки
+      <label>
+        <span class="setting-title">Минимум для рамки
+          <span class="setting-help" tabindex="0" role="note"
+            aria-label="Подсказка: минимум для рамки"
+            data-tooltip="Минимальная уверенность для показа цветной рамки на превью. На запуск события не влияет. Ниже — видно больше слабых гипотез модели, выше — только уверенные рамки.">?</span>
+        </span>
         <input id="detection-{{ role }}-box-min-confidence"
           type="number" min="0" max="1" step="0.01"
           value="{{ camera_config.box_min_confidence }}">
       </label>
-      <label>Подтверждений
+      <label>
+        <span class="setting-title">Подтверждений
+          <span class="setting-help" tabindex="0" role="note"
+            aria-label="Подсказка: число подтверждений"
+            data-tooltip="Сколько кадров в окне должны превысить рабочий confidence. Меньше — реакция быстрее, но чувствительнее к одиночным ошибкам. Больше — стабильнее, но детекция начинается позже.">?</span>
+        </span>
         <input id="detection-{{ role }}-confirmation-frames"
           type="number" min="1" max="20"
           value="{{ camera_config.confirmation_frames }}">
       </label>
-      <label>Размер окна кадров
+      <label>
+        <span class="setting-title">Размер окна кадров
+          <span class="setting-help" tabindex="0" role="note"
+            aria-label="Подсказка: размер окна кадров"
+            data-tooltip="Число последних обработанных кадров, среди которых ищутся подтверждения. Большее окно допускает паузы между удачными кадрами, но дольше помнит старые обнаружения. Окно не должно быть меньше числа подтверждений.">?</span>
+        </span>
         <input id="detection-{{ role }}-window-frames"
           type="number" min="1" max="30"
           value="{{ camera_config.window_frames }}">
@@ -161,19 +198,39 @@
     {% endfor %}
     <h4>Общие тайминги события</h4>
     <div class="settings-grid">
-      <label>Таймаут кандидата, сек.
+      <label>
+        <span class="setting-title">Таймаут кандидата, сек.
+          <span class="setting-help" tabindex="0" role="note"
+            aria-label="Подсказка: таймаут кандидата"
+            data-tooltip="Сколько времени после первого возможного обнаружения система ждёт остальные подтверждения. Больше — легче поймать быстро исчезающего или плохо видимого кота. Меньше — быстрее сбрасываются случайные гипотезы.">?</span>
+        </span>
         <input id="detection-candidate-timeout" type="number" min="0.1" max="30" step="0.1"
           value="{{ detection_config.candidate_timeout_seconds }}">
       </label>
-      <label>До потери кота, сек.
+      <label>
+        <span class="setting-title">До потери кота, сек.
+          <span class="setting-help" tabindex="0" role="note"
+            aria-label="Подсказка: время до потери кота"
+            data-tooltip="Сколько секунд без подтверждённого кота ждать перед завершением активной части события. Больше — терпимее к кратким пропаданиям из кадра, но запись получается длиннее.">?</span>
+        </span>
         <input id="detection-absence-seconds" type="number" min="0.1" max="60" step="0.1"
           value="{{ detection_config.absence_seconds }}">
       </label>
-      <label>Хвост события, сек.
+      <label>
+        <span class="setting-title">Хвост события, сек.
+          <span class="setting-help" tabindex="0" role="note"
+            aria-label="Подсказка: хвост события"
+            data-tooltip="Сколько видео сохранить после того, как отсутствие кота подтверждено. Большее значение лучше захватывает уход кота, но увеличивает длительность и размер записи.">?</span>
+        </span>
         <input id="detection-tail-seconds" type="number" min="0" max="60" step="0.1"
           value="{{ detection_config.tail_seconds }}">
       </label>
-      <label>Пауза после события, сек.
+      <label>
+        <span class="setting-title">Пауза после события, сек.
+          <span class="setting-help" tabindex="0" role="note"
+            aria-label="Подсказка: пауза после события"
+            data-tooltip="Период после завершения события, когда новые детекции не создают следующую запись. Больше — меньше дубликатов одного прохода, но можно пропустить следующий близкий проход.">?</span>
+        </span>
         <input id="detection-cooldown-seconds" type="number" min="0" max="300" step="0.1"
           value="{{ detection_config.cooldown_seconds }}">
       </label>

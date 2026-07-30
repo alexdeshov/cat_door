@@ -72,6 +72,11 @@ def test_capture_and_label_known_cat(runtime_path: Path, monkeypatch) -> None:
     assert "Настройки детекции" in page.text
     assert 'id="detection-face-confirmation-frames"' in page.text
     assert 'id="detection-side-confirmation-frames"' in page.text
+    assert page.text.count('class="setting-help"') == 12
+    assert 'aria-label="Подсказка: рабочий confidence"' in page.text
+    assert "На запуск события не влияет." in page.text
+    assert "Окно не должно быть меньше числа подтверждений." in page.text
+    assert 'class="setting-help" tabindex="0" role="note"' in page.text
     assert '<video preload="metadata"' in page.text
     assert "<video controls" not in page.text
     assert 'class="video-controls"' in page.text
