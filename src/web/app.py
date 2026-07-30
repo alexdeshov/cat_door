@@ -31,6 +31,7 @@ from src.common.detection_config import (
     save_detection_config,
 )
 from src.common.model_registry import register_model_version
+from src.common.online_metrics import build_online_metrics
 from src.common.settings import Settings
 from src.common.windows_power import SleepInhibitor
 from src.recorder.ffmpeg import RecorderError, record_clip
@@ -616,6 +617,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return {"run_id": run.id, "state": run.status}
         except (OSError, json.JSONDecodeError) as exc:
             raise HTTPException(500, "Не удалось прочитать статус оценки") from exc
+
+    @app.get("/api/metrics/online")
+    def online_metrics(
+        session: Annotated[Session, Depends(get_session)],
+    ) -> dict[str, object]:
+        return build_online_metrics(session)
 
     @app.get("/media/{event_id}/{view}")
     def media(
