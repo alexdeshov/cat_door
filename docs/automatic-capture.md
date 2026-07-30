@@ -91,6 +91,10 @@ RTSP-подключений. Количество открытых вкладо�
 `models/cat-detector.onnx` и manifest с SHA-256. Каталог `models/` исключён из
 Git.
 
+Поддерживаемые форматы кандидатов, их preprocessing и безопасный локальный
+экспорт описаны в `docs/detector-candidates.md`. Замена baseline не выполняется
+автоматически и допускается только после сравнения latency и offline-метрик.
+
 Размер входа не зашит в runtime: detector, preview, identity-crop, подготовка
 датасета и offline replay используют `manifest.input.shape`. FFmpeg по-прежнему
 выдаёт кадры `640×360`; увеличение входа модели до `416×416` не создаёт новых
