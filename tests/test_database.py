@@ -32,3 +32,19 @@ def test_initial_migration_is_applied_once() -> None:
     ]
     assert "events" in tables
     assert {"model_versions", "event_predictions", "evaluation_runs"} <= tables
+
+
+def test_sqlite_uses_wal_and_normal_synchronous_mode(runtime_path: Path) -> None:
+    database_path = runtime_path / "catdoor.sqlite3"
+
+    factory = create_session_factory(database_path)
+
+    with factory() as session:
+        connection = session.connection()
+        journal_mode = connection.exec_driver_sql("PRAGMA journal_mode").scalar_one()
+        synchronous = connection.exec_driver_sql("PRAGMA synchronous").scalar_one()
+        busy_timeout = connection.exec_driver_sql("PRAGMA busy_timeout").scalar_one()
+
+    assert journal_mode == "wal"
+    assert synchronous == 1
+    assert busy_timeout == 10_000

@@ -6,7 +6,7 @@ from pathlib import Path
 
 from training.dataset import load_manifest
 from training.train_classifier import train
-from training.workflow import build_dataset, write_status
+from training.workflow import StatusHeartbeat, build_dataset, write_status
 
 
 def run_job(
@@ -20,6 +20,8 @@ def run_job(
     epochs: int,
 ) -> None:
     status_path = output_dir / "status.json"
+    heartbeat = StatusHeartbeat(status_path)
+    heartbeat.start()
     try:
         write_status(status_path, state="preparing", message="Подготовка кадров")
         dataset_dir = output_dir / "dataset"
@@ -95,6 +97,8 @@ def run_job(
             message=str(exc),
             traceback=traceback.format_exc(),
         )
+    finally:
+        heartbeat.stop()
 
 
 def main() -> None:

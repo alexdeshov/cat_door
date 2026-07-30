@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import queue
+import sqlite3
 import threading
 import time
 from collections import deque
@@ -24,7 +25,6 @@ from src.common.model_registry import register_model_version
 from src.common.settings import Settings
 from src.inference.cat_detector import (
     CatDetectionResult,
-    DetectorError,
     OpenVinoCatDetector,
 )
 from src.inference.cat_identity import IdentityPrediction, OpenVinoCatIdentity
@@ -43,6 +43,10 @@ from src.recorder.events import (
 from src.recorder.frames import rgb_frame_stream
 from src.recorder.preview import annotate_detections, preview_path, publish_preview
 from src.recorder.status import write_recorder_status
+
+DATABASE_STARTUP_ATTEMPTS = 3
+DATABASE_STARTUP_RETRY_SECONDS = 1.0
+RECORDER_RETRY_SECONDS = 5.0
 
 
 def recorder_status_path(settings: Settings) -> Path:
@@ -163,7 +167,7 @@ def _predict_identity_if_detected(
     )
 
 
-def _register_loaded_models(
+def _register_loaded_models_once(
     settings: Settings,
     identity_models: dict[str, OpenVinoCatIdentity],
 ) -> dict[str, int]:
@@ -189,6 +193,20 @@ def _register_loaded_models(
             versions[role] = version.id
         session.commit()
     return versions
+
+
+def _register_loaded_models(
+    settings: Settings,
+    identity_models: dict[str, OpenVinoCatIdentity],
+) -> dict[str, int]:
+    for attempt in range(1, DATABASE_STARTUP_ATTEMPTS + 1):
+        try:
+            return _register_loaded_models_once(settings, identity_models)
+        except (sqlite3.OperationalError, SQLAlchemyError):
+            if attempt == DATABASE_STARTUP_ATTEMPTS:
+                raise
+            time.sleep(DATABASE_STARTUP_RETRY_SECONDS)
+    raise AssertionError("database startup retry loop ended unexpectedly")
 
 
 def _build_online_predictions(
@@ -623,7 +641,6 @@ def monitor_automatic(settings: Settings, duration_seconds: float | None) -> Non
         journal.write(
             "session_error",
             error_type=type(exc).__name__,
-            message=str(exc)[:500],
         )
         raise
     finally:
@@ -681,26 +698,51 @@ def run(*, once: bool = False, probe_seconds: float | None = None) -> None:
         settings.automatic_capture_dry_run = True
         monitor_automatic(settings, probe_seconds)
         return
+    consecutive_failures = 0
     while True:
         try:
             if settings.automatic_capture_enabled:
                 monitor_automatic(settings, None)
             else:
                 publish_heartbeat(settings)
-        except (DetectorError, RuntimeError, ValueError) as exc:
-            write_recorder_status(
-                recorder_status_path(settings),
-                process="CatDoorRecorder",
-                state="error",
-                message=str(exc),
-                automatic_capture_enabled=settings.automatic_capture_enabled,
-                dry_run=settings.automatic_capture_dry_run,
-                detector_connected=False,
-                **_detector_device_status(settings),
-            )
+            consecutive_failures = 0
+        except Exception as exc:  # noqa: BLE001 - recorder must survive component failures
+            consecutive_failures += 1
+            error_type = type(exc).__name__
+            try:
+                write_recorder_status(
+                    recorder_status_path(settings),
+                    process="CatDoorRecorder",
+                    state="retrying",
+                    message=f"Ошибка recorder ({error_type}), повторный запуск",
+                    error_type=error_type,
+                    retry_count=consecutive_failures,
+                    retry_in_seconds=RECORDER_RETRY_SECONDS,
+                    automatic_capture_enabled=settings.automatic_capture_enabled,
+                    dry_run=settings.automatic_capture_dry_run,
+                    detector_connected=False,
+                    **_detector_device_status(settings),
+                )
+            except Exception:  # noqa: BLE001,S110 - status failure must not stop recorder
+                pass
+            try:
+                journal = DetectionJournal(
+                    settings.data_dir / "runtime" / "detection.jsonl",
+                    max_bytes=settings.detection_log_max_bytes,
+                    backup_count=settings.detection_log_backup_count,
+                )
+                journal.write(
+                    "recorder_retry",
+                    error_type=error_type,
+                    retry_count=consecutive_failures,
+                    retry_in_seconds=RECORDER_RETRY_SECONDS,
+                )
+                journal.close()
+            except Exception:  # noqa: BLE001,S110 - journal failure must not stop recorder
+                pass
         if once:
             return
-        time.sleep(5)
+        time.sleep(RECORDER_RETRY_SECONDS)
 
 
 def main(argv: Sequence[str] | None = None) -> None:

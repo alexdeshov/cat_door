@@ -1,9 +1,11 @@
 import json
 import queue
+import sqlite3
 from pathlib import Path
 
 import numpy as np
 import pytest
+from sqlalchemy.exc import SQLAlchemyError
 
 from src.common.detection_config import CameraDetectionConfig
 from src.common.settings import Settings
@@ -14,9 +16,11 @@ from src.recorder.app import (
     _get_fair_frame,
     _predict_identity_if_detected,
     _put_latest,
+    _register_loaded_models,
     build_automatic_config,
     publish_heartbeat,
     recorder_status_path,
+    run,
 )
 
 
@@ -199,3 +203,60 @@ def test_identity_skips_missing_box_without_exception() -> None:
     assert attempt.prediction is None
     assert attempt.skipped_reason == "no_confident_box"
     assert model.calls == []
+
+
+@pytest.mark.parametrize("failure", [OSError("camera"), SQLAlchemyError("database")])
+def test_run_retries_unexpected_monitor_failures(
+    runtime_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: Exception,
+) -> None:
+    settings = Settings(data_dir=runtime_path, automatic_capture_enabled=True)
+    calls = 0
+
+    def monitor(_settings: Settings, _duration: float | None) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise failure
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("src.recorder.app.Settings", lambda: settings)
+    monkeypatch.setattr("src.recorder.app.monitor_automatic", monitor)
+    monkeypatch.setattr("src.recorder.app.time.sleep", lambda _seconds: None)
+
+    with pytest.raises(KeyboardInterrupt):
+        run()
+
+    payload = json.loads(recorder_status_path(settings).read_text(encoding="utf-8"))
+    journal = [
+        json.loads(line)
+        for line in (runtime_path / "runtime" / "detection.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert calls == 2
+    assert payload["state"] == "retrying"
+    assert payload["error_type"] == type(failure).__name__
+    assert payload["retry_count"] == 1
+    assert journal[-1]["event"] == "recorder_retry"
+    assert journal[-1]["error_type"] == type(failure).__name__
+
+
+def test_register_loaded_models_retries_database_startup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts = 0
+
+    def register(_settings: Settings, _models: object) -> dict[str, int]:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise sqlite3.OperationalError("database is locked")
+        return {"detector": 42}
+
+    monkeypatch.setattr("src.recorder.app._register_loaded_models_once", register)
+    monkeypatch.setattr("src.recorder.app.time.sleep", lambda _seconds: None)
+
+    assert _register_loaded_models(Settings(), {}) == {"detector": 42}
+    assert attempts == 3
