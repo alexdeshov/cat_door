@@ -26,13 +26,13 @@
       <label>Базовый:
         <select name="left" required>
           <option value="">Выберите</option>
-          {% for run in runs %}<option value="{{ run.id }}" {{ "selected" if left == run.id }}>#{{ run.id }} · {{ run.created_at }}</option>{% endfor %}
+          {% for run in runs %}<option value="{{ run.id }}" {{ "selected" if left == run.id }}>#{{ run.id }} · {{ run.run_kind }} · {{ run.created_at }}</option>{% endfor %}
         </select>
       </label>
       <label>Кандидат:
         <select name="right" required>
           <option value="">Выберите</option>
-          {% for run in runs %}<option value="{{ run.id }}" {{ "selected" if right == run.id }}>#{{ run.id }} · {{ run.created_at }}</option>{% endfor %}
+          {% for run in runs %}<option value="{{ run.id }}" {{ "selected" if right == run.id }}>#{{ run.id }} · {{ run.run_kind }} · {{ run.created_at }}</option>{% endfor %}
         </select>
       </label>
       <button type="submit">Сравнить</button>
@@ -40,7 +40,13 @@
   </section>
   {% if selected[0] and selected[1] %}
     <section class="panel">
-      <p>Сравнивается combined-метрика только на чистых событиях.</p>
+      {% if comparison_kind == "detector" %}
+        <p>Сравниваются miss rate, false trigger rate и latency на чистых событиях.</p>
+      {% elif comparison_kind == "identity" %}
+        <p>Сравнивается combined-метрика только на чистых событиях.</p>
+      {% else %}
+        <p class="bad">Можно сравнивать только два запуска одного типа.</p>
+      {% endif %}
       <table>
         <thead><tr><th>Метрика</th><th>#{{ selected[0].id }}</th><th>#{{ selected[1].id }}</th><th>Дельта</th></tr></thead>
         <tbody>

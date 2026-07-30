@@ -24,10 +24,14 @@ from src.common.detection_config import (
     load_detection_config,
 )
 from src.common.evaluation import (
+    DetectorViewEvaluation,
+    EvaluatedDetectorEvent,
     EvaluatedEvent,
     ViewEvaluation,
+    build_detector_evaluation_report,
     build_identity_evaluation_report,
     empty_view_evaluation,
+    evaluate_detector_frames,
     evaluate_view_frames,
 )
 from src.common.settings import Settings
@@ -115,6 +119,44 @@ def _save_prediction(
         session.commit()
 
 
+def _save_detector_prediction(
+    factory: Any,
+    *,
+    run_id: int,
+    event_id: int,
+    model_version_id: int,
+    view: str,
+    threshold: float,
+    result: DetectorViewEvaluation,
+) -> None:
+    with factory() as session:
+        session.add(
+            EventPrediction(
+                event_id=event_id,
+                model_version_id=model_version_id,
+                view=view,
+                origin="evaluation",
+                evaluation_run_id=run_id,
+                decision=(
+                    "detected"
+                    if result.max_detector_confidence >= threshold
+                    else "not_detected"
+                ),
+                predicted_name=None,
+                confidence=result.max_detector_confidence,
+                frames_used=result.frames_seen,
+                max_detector_confidence=result.max_detector_confidence,
+                mean_inference_ms=result.mean_detector_inference_ms,
+                raw_scores_json=json.dumps(
+                    list(result.frame_confidences),
+                    ensure_ascii=False,
+                ),
+                created_at=datetime.now(UTC),
+            )
+        )
+        session.commit()
+
+
 def asdict_score(score: Any) -> dict[str, object]:
     return {"name": score.name, "confidence": score.confidence}
 
@@ -129,6 +171,7 @@ def run_evaluation(
     *,
     identity_threshold: float,
     status_path: Path,
+    expected_run_kind: str | None = None,
 ) -> None:
     factory = create_session_factory(database_path)
     temporary_root = data_dir / "runtime" / "evaluations" / f"{run_id:08d}"
@@ -145,19 +188,32 @@ def run_evaluation(
                 "face": run.face_model_version_id,
                 "side": run.side_model_version_id,
             }
+            detector_model_version_id = run.detector_model_version_id
+            run_kind = run.run_kind
+        if expected_run_kind is not None and run_kind != expected_run_kind:
+            raise ValueError(
+                f"evaluation run kind is {run_kind}, expected {expected_run_kind}"
+            )
         if not events:
             raise ValueError("evaluation filter did not select any events")
+        if run_kind not in {"identity", "detector"}:
+            raise ValueError(f"unsupported evaluation run kind: {run_kind}")
+        if detector_model_version_id is None:
+            raise ValueError("evaluation run has no detector model version")
         detector = OpenVinoCatDetector(detector_model, "CPU")
         identities = {
             role: OpenVinoCatIdentity(path, "CPU")
             for role, path in identity_models.items()
         }
+        if run_kind == "identity" and not identities:
+            raise ValueError("identity evaluation has no identity models")
         defaults = DetectionConfig.from_settings(Settings(data_dir=data_dir))
         runtime_config = load_detection_config(
             detection_config_path(data_dir),
             defaults,
         )
-        results: list[EvaluatedEvent] = []
+        identity_results: list[EvaluatedEvent] = []
+        detector_results: list[EvaluatedDetectorEvent] = []
         root = data_dir.resolve()
         write_status(
             status_path,
@@ -169,56 +225,106 @@ def run_evaluation(
         )
         for index, event in enumerate(events, 1):
             event_directory = temporary_root / f"{event.id:08d}"
-            views: dict[str, ViewEvaluation] = {}
             try:
-                for role, model in identities.items():
-                    relative_media = (
-                        event.media_path if role == "face" else event.side_media_path
-                    )
-                    result = empty_view_evaluation()
-                    if relative_media:
-                        source = (root / relative_media).resolve()
-                        if root not in source.parents or not source.is_file():
-                            raise ValueError(
-                                f"unsafe or missing media for event {event.id}, view {role}"
-                            )
-                        frames = _load_frames(
-                            ffmpeg_path,
-                            source,
-                            event_directory / role,
+                if run_kind == "detector":
+                    detector_views: dict[str, DetectorViewEvaluation] = {}
+                    for role in ("face", "side"):
+                        relative_media = (
+                            event.media_path
+                            if role == "face"
+                            else event.side_media_path
                         )
-                        result = evaluate_view_frames(
+                        frames: list[np.ndarray] = []
+                        if relative_media:
+                            source = (root / relative_media).resolve()
+                            if root not in source.parents or not source.is_file():
+                                raise ValueError(
+                                    "unsafe or missing media for "
+                                    f"event {event.id}, view {role}"
+                                )
+                            frames = _load_frames(
+                                ffmpeg_path,
+                                source,
+                                event_directory / role,
+                            )
+                        camera_config = getattr(runtime_config, role)
+                        detector_result = evaluate_detector_frames(
                             frames,
                             detector,
-                            model,
-                            getattr(runtime_config, role),
-                            identity_threshold,
+                            camera_config,
                         )
-                    views[role] = result
-                    model_version_id = model_version_ids[role]
-                    if model_version_id is None:
-                        raise ValueError(f"missing model version for {role}")
-                    _save_prediction(
-                        factory,
-                        run_id=run_id,
-                        event_id=event.id,
-                        model_version_id=model_version_id,
-                        view=role,
-                        result=result,
+                        detector_views[role] = detector_result
+                        _save_detector_prediction(
+                            factory,
+                            run_id=run_id,
+                            event_id=event.id,
+                            model_version_id=detector_model_version_id,
+                            view=role,
+                            threshold=camera_config.confidence_threshold,
+                            result=detector_result,
+                        )
+                    detector_results.append(
+                        EvaluatedDetectorEvent(
+                            event_id=event.id,
+                            label=event.label,
+                            training_target=event.training_target,
+                            created_at=event.created_at,
+                            views=detector_views,
+                        )
+                    )
+                else:
+                    identity_views: dict[str, ViewEvaluation] = {}
+                    for role, model in identities.items():
+                        relative_media = (
+                            event.media_path
+                            if role == "face"
+                            else event.side_media_path
+                        )
+                        identity_result = empty_view_evaluation()
+                        if relative_media:
+                            source = (root / relative_media).resolve()
+                            if root not in source.parents or not source.is_file():
+                                raise ValueError(
+                                    "unsafe or missing media for "
+                                    f"event {event.id}, view {role}"
+                                )
+                            frames = _load_frames(
+                                ffmpeg_path,
+                                source,
+                                event_directory / role,
+                            )
+                            identity_result = evaluate_view_frames(
+                                frames,
+                                detector,
+                                model,
+                                getattr(runtime_config, role),
+                                identity_threshold,
+                            )
+                        identity_views[role] = identity_result
+                        model_version_id = model_version_ids[role]
+                        if model_version_id is None:
+                            raise ValueError(f"missing model version for {role}")
+                        _save_prediction(
+                            factory,
+                            run_id=run_id,
+                            event_id=event.id,
+                            model_version_id=model_version_id,
+                            view=role,
+                            result=identity_result,
+                        )
+                    identity_results.append(
+                        EvaluatedEvent(
+                            event_id=event.id,
+                            label=event.label,
+                            cat_name=event.cat_name,
+                            training_target=event.training_target,
+                            created_at=event.created_at,
+                            views=identity_views,
+                        )
                     )
             finally:
                 if event_directory.exists():
                     shutil.rmtree(event_directory)
-            results.append(
-                EvaluatedEvent(
-                    event_id=event.id,
-                    label=event.label,
-                    cat_name=event.cat_name,
-                    training_target=event.training_target,
-                    created_at=event.created_at,
-                    views=views,
-                )
-            )
             write_status(
                 status_path,
                 state="running",
@@ -227,16 +333,27 @@ def run_evaluation(
                 completed=index,
                 total=len(events),
             )
-        evaluated_views = list(identities)
-        metrics = build_identity_evaluation_report(
-            results,
-            evaluated_views,
-            {
-                role: getattr(runtime_config, role).confidence_threshold
-                for role in evaluated_views
-            },
-            identity_threshold=identity_threshold,
-        )
+        if run_kind == "detector":
+            evaluated_views = ["face", "side"]
+            metrics = build_detector_evaluation_report(
+                detector_results,
+                evaluated_views,
+                {
+                    role: getattr(runtime_config, role).confidence_threshold
+                    for role in evaluated_views
+                },
+            )
+        else:
+            evaluated_views = list(identities)
+            metrics = build_identity_evaluation_report(
+                identity_results,
+                evaluated_views,
+                {
+                    role: getattr(runtime_config, role).confidence_threshold
+                    for role in evaluated_views
+                },
+                identity_threshold=identity_threshold,
+            )
         with factory() as session:
             run = session.get(EvaluationRun, run_id)
             assert run is not None
@@ -284,6 +401,7 @@ def main() -> None:
     parser.add_argument("--face-model", type=Path)
     parser.add_argument("--side-model", type=Path)
     parser.add_argument("--identity-threshold", type=float, default=0.8)
+    parser.add_argument("--run-kind", choices=("identity", "detector"), default="identity")
     args = parser.parse_args()
     identities = {
         role: path
@@ -302,6 +420,7 @@ def main() -> None:
         identities,
         identity_threshold=args.identity_threshold,
         status_path=args.status_path,
+        expected_run_kind=args.run_kind,
     )
 
 

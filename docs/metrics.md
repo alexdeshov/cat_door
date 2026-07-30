@@ -105,6 +105,13 @@ Recorder и запуск оценки регистрируют модель ид
 7. Страница запуска показывает результат; два завершённых запуска можно
    сравнить на `/metrics/compare`.
 
+Для сравнения детекторов используется `run_kind=detector`. Такой запуск не
+требует identity-моделей, прогоняет обе камеры через выбранный detector ONNX и
+сохраняет event-level максимумы confidence в `event_predictions`. Отчёт
+показывает miss rate на `known_cat`/`foreign_cat`, false trigger rate на
+`not_visible`, median/p95 latency, распределения confidence, threshold sweep,
+чистый и ночной срезы. Модель автоматически не активируется.
+
 Статус и лог процесса находятся только локально в
 `CatDoorData/evaluations/<run-id>/` и не попадают в Git.
 

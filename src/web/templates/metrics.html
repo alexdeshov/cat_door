@@ -19,8 +19,8 @@
     .error { color: #fca5a5; }
     table { width: 100%; border-collapse: collapse; }
     th, td { padding: 9px; border-bottom: 1px solid #374151; text-align: left; }
-    input, button { font: inherit; border-radius: 8px; border: 1px solid #4b5563; padding: 9px 12px; }
-    input { background: #111827; color: #e5e7eb; }
+    input, select, button { font: inherit; border-radius: 8px; border: 1px solid #4b5563; padding: 9px 12px; }
+    input, select { background: #111827; color: #e5e7eb; }
     button { background: #2563eb; color: white; cursor: pointer; }
     .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 10px; }
   </style>
@@ -103,10 +103,18 @@
   <section class="panel">
     <h2>Новая офлайн-оценка</h2>
     <p class="muted">Последовательный replay выполняется отдельным процессом на OpenVINO CPU. Он ничего не активирует.</p>
-    {% if not detector_ready or not identity_ready %}
-      <p class="warning">Активные модели настроены не полностью. Укажите имена ONNX из локального каталога models ниже.</p>
+    {% if not detector_ready %}
+      <p class="warning">Detector не настроен. Укажите имя ONNX из локального каталога models ниже.</p>
+    {% elif not identity_ready %}
+      <p class="muted">Identity-модели не настроены; detector-only replay всё равно доступен.</p>
     {% endif %}
     <div class="form-grid">
+      <label>Режим
+        <select id="evaluation-kind">
+          <option value="identity">Identity + detector</option>
+          <option value="detector">Только сравнение detector</option>
+        </select>
+      </label>
       <label>С даты <input id="evaluation-from" type="datetime-local"></label>
       <label>По дату <input id="evaluation-to" type="datetime-local"></label>
       <label>Detector ONNX <input id="evaluation-detector" placeholder="текущая модель"></label>
@@ -137,6 +145,18 @@
   </section>
 </main>
 <script>
+  const evaluationKind = document.querySelector("#evaluation-kind");
+  const identityInputs = [
+    document.querySelector("#evaluation-face"),
+    document.querySelector("#evaluation-side")
+  ];
+  evaluationKind.addEventListener("change", () => {
+    const disabled = evaluationKind.value === "detector";
+    identityInputs.forEach(input => {
+      input.disabled = disabled;
+      if (disabled) input.value = "";
+    });
+  });
   document.querySelector("#start-evaluation").addEventListener("click", async () => {
     const button = document.querySelector("#start-evaluation");
     const status = document.querySelector("#evaluation-status");
@@ -147,9 +167,10 @@
       method: "POST",
       headers: {"Content-Type": "application/json"},
       body: JSON.stringify({
+        run_kind: evaluationKind.value,
         created_from: optionalValue("#evaluation-from"),
         created_to: optionalValue("#evaluation-to"),
-        labels: ["known_cat", "foreign_cat", "pending", "multiple_cats"],
+        labels: ["known_cat", "foreign_cat", "pending", "multiple_cats", "not_visible"],
         detector_model: optionalValue("#evaluation-detector"),
         face_model: optionalValue("#evaluation-face"),
         side_model: optionalValue("#evaluation-side")

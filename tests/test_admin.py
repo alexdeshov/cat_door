@@ -275,6 +275,61 @@ def test_starts_detached_offline_evaluation_on_cpu(
         assert run.side_model_version_id is None
 
 
+def test_starts_detector_only_evaluation_without_identity_models(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    models = runtime_path / "models"
+    models.mkdir()
+    detector = models / "candidate.onnx"
+    detector.write_bytes(b"candidate")
+    detector.with_suffix(".json").write_text(
+        '{"architecture":"yolox_nano","cat_class_id":15}',
+        encoding="utf-8",
+    )
+    launched: dict[str, object] = {}
+
+    class FakeProcess:
+        pid = 5432
+
+    def fake_popen(command: list[str], **kwargs: object) -> FakeProcess:
+        launched["command"] = command
+        return FakeProcess()
+
+    monkeypatch.setattr("src.web.app.subprocess.Popen", fake_popen)
+    client = TestClient(
+        create_app(
+            Settings(
+                data_dir=runtime_path,
+                database_path=runtime_path / "test.sqlite3",
+                detector_model_path=detector,
+            )
+        )
+    )
+
+    response = client.post(
+        "/api/evaluations",
+        json={
+            "run_kind": "detector",
+            "labels": ["known_cat", "foreign_cat", "not_visible"],
+        },
+    )
+
+    assert response.status_code == 202
+    command = launched["command"]
+    assert isinstance(command, list)
+    assert command[command.index("--run-kind") + 1] == "detector"
+    assert "--face-model" not in command
+    assert "--side-model" not in command
+    factory = create_session_factory(runtime_path / "test.sqlite3")
+    with factory() as session:
+        run = session.get(EvaluationRun, 1)
+        assert run is not None
+        assert run.run_kind == "detector"
+        assert run.detector_model_version_id is not None
+        assert run.face_model_version_id is None
+
+
 def test_evaluation_rejects_path_outside_models(
     runtime_path: Path,
     monkeypatch,
@@ -301,6 +356,7 @@ def test_metrics_page_shows_online_detection_and_evaluation_sections(
     assert "Последние 7 дней" in page.text
     assert "Детекция по камерам" in page.text
     assert "Новая офлайн-оценка" in page.text
+    assert 'option value="detector"' in page.text
     assert "Сравнить два завершённых запуска" in page.text
     assert client.get("/").text.count('href="/metrics"') == 1
 
@@ -356,6 +412,77 @@ def test_completed_evaluation_report_and_comparison_are_rendered(
     assert comparison.status_code == 200
     assert "Сравнивается combined-метрика" in comparison.text
     assert "-0.1000" in comparison.text
+
+
+def test_detector_evaluation_report_and_comparison_are_rendered(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    client = make_client(runtime_path, monkeypatch)
+    factory = create_session_factory(runtime_path / "test.sqlite3")
+
+    def report(miss_rate: float) -> dict[str, object]:
+        values = {
+            "events": 4,
+            "missing_media": 0,
+            "cat_events": 2,
+            "misses": int(miss_rate * 2),
+            "miss_rate": miss_rate,
+            "not_visible_events": 2,
+            "false_triggers": 0,
+            "false_trigger_rate": 0.0,
+            "threshold": 0.3,
+            "median_inference_ms": 50.0,
+            "p95_inference_ms": 60.0,
+            "confidence_distribution": {
+                group: {
+                    "samples": 2,
+                    "min": 0.1,
+                    "p25": 0.2,
+                    "median": 0.3,
+                    "p75": 0.4,
+                    "p95": 0.5,
+                    "max": 0.6,
+                }
+                for group in ("all", "cat", "not_visible")
+            },
+        }
+        return {
+            "run_kind": "detector",
+            "events_processed": 4,
+            "cat_events": 2,
+            "not_visible_events": 2,
+            "clean_events": 4,
+            "night_events": 1,
+            "sections": {
+                section: {"face": values, "side": values}
+                for section in ("all", "clean", "night")
+            },
+            "threshold_sweep": {"face": [], "side": []},
+        }
+
+    with factory() as session:
+        for miss_rate in (0.5, 0.0):
+            session.add(
+                EvaluationRun(
+                    run_kind="detector",
+                    filter_json="{}",
+                    status="completed",
+                    metrics_json=json.dumps(report(miss_rate)),
+                )
+            )
+        session.commit()
+
+    report_page = client.get("/metrics/runs/1")
+    comparison = client.get("/metrics/compare?left=1&right=2")
+
+    assert report_page.status_code == 200
+    assert "Сравнение детектора #1" in report_page.text
+    assert "False trigger" in report_page.text
+    assert comparison.status_code == 200
+    assert "Сравниваются miss rate" in comparison.text
+    assert "face: Miss rate" in comparison.text
+    assert "-0.5000" in comparison.text
 
 
 def test_detection_settings_can_be_updated(runtime_path: Path, monkeypatch) -> None:

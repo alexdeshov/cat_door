@@ -4,8 +4,11 @@ import numpy as np
 
 from src.common.detection_config import CameraDetectionConfig
 from src.common.evaluation import (
+    EvaluatedDetectorEvent,
     EvaluatedEvent,
+    build_detector_evaluation_report,
     build_identity_evaluation_report,
+    evaluate_detector_frames,
     evaluate_view_frames,
 )
 from src.inference.cat_detector import CatDetection, CatDetectionResult
@@ -123,3 +126,54 @@ def test_evaluation_report_separates_clean_and_training_seen_events() -> None:
     assert report["detection"]["face"]["misses"] == 1
     assert report["metrics"]["face"]["false_accept_rate"] == 0.0
     assert report["clean_metrics"]["face"]["false_accept_rate"] is None
+
+
+def test_detector_report_separates_misses_false_triggers_and_night() -> None:
+    config = CameraDetectionConfig(
+        confidence_threshold=0.30,
+        box_min_confidence=0.15,
+        confirmation_frames=2,
+        window_frames=5,
+    )
+    frame = np.full((360, 640, 3), 40, dtype=np.uint8)
+    cat_seen = evaluate_detector_frames([frame], FakeDetector([0.80]), config)
+    cat_missed = evaluate_detector_frames([frame], FakeDetector([0.20]), config)
+    false_trigger = evaluate_detector_frames([frame], FakeDetector([0.60]), config)
+    events = [
+        EvaluatedDetectorEvent(
+            event_id=1,
+            label="known_cat",
+            training_target="excluded",
+            created_at=datetime(2026, 7, 30, 12, tzinfo=UTC),
+            views={"face": cat_seen},
+        ),
+        EvaluatedDetectorEvent(
+            event_id=2,
+            label="foreign_cat",
+            training_target="excluded",
+            created_at=datetime(2026, 7, 30, 23, tzinfo=UTC),
+            views={"face": cat_missed},
+        ),
+        EvaluatedDetectorEvent(
+            event_id=3,
+            label="not_visible",
+            training_target="excluded",
+            created_at=datetime(2026, 7, 30, 23, tzinfo=UTC),
+            views={"face": false_trigger},
+        ),
+    ]
+
+    report = build_detector_evaluation_report(
+        events,
+        ["face"],
+        {"face": 0.30},
+    )
+    all_metrics = report["sections"]["all"]["face"]
+    night_metrics = report["sections"]["night"]["face"]
+
+    assert report["run_kind"] == "detector"
+    assert all_metrics["miss_rate"] == 0.5
+    assert all_metrics["false_trigger_rate"] == 1.0
+    assert all_metrics["confidence_distribution"]["cat"]["median"] == 0.5
+    assert night_metrics["miss_rate"] == 1.0
+    assert report["threshold_sweep"]["face"][5]["threshold"] == 0.3

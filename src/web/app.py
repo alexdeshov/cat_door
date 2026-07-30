@@ -6,7 +6,7 @@ from collections.abc import Generator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import uuid4
 
 import uvicorn
@@ -60,6 +60,7 @@ class BulkLabelPayload(LabelPayload):
 
 
 class EvaluationStartPayload(BaseModel):
+    run_kind: Literal["identity", "detector"] = "identity"
     created_from: datetime | None = None
     created_to: datetime | None = None
     labels: list[str] = Field(
@@ -68,6 +69,7 @@ class EvaluationStartPayload(BaseModel):
             "foreign_cat",
             "pending",
             "multiple_cats",
+            "not_visible",
         ]
     )
     training_targets: list[str] = Field(default_factory=list)
@@ -495,13 +497,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             settings.detector_model_path,
             payload.detector_model,
         )
-        face_path = resolve_evaluation_model(
-            settings.identity_face_model_path,
-            payload.face_model,
+        face_path = (
+            resolve_evaluation_model(
+                settings.identity_face_model_path,
+                payload.face_model,
+            )
+            if payload.run_kind == "identity"
+            else None
         )
-        side_path = resolve_evaluation_model(
-            settings.identity_side_model_path,
-            payload.side_model,
+        side_path = (
+            resolve_evaluation_model(
+                settings.identity_side_model_path,
+                payload.side_model,
+            )
+            if payload.run_kind == "identity"
+            else None
         )
         if detector_path is None or not detector_path.is_file():
             raise HTTPException(422, "Локальная detector-модель не найдена")
@@ -510,7 +520,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             for role, path in (("face", face_path), ("side", side_path))
             if path is not None and path.is_file()
         }
-        if not identity_paths:
+        if payload.run_kind == "identity" and not identity_paths:
             raise HTTPException(422, "Не установлена ни одна локальная identity-модель")
         try:
             detector_version = register_model_version(
@@ -537,7 +547,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "training_targets": payload.training_targets,
         }
         run = EvaluationRun(
-            run_kind="identity",
+            run_kind=payload.run_kind,
             filter_json=json.dumps(filter_value, ensure_ascii=False),
             detector_model_version_id=detector_version.id,
             face_model_version_id=(
@@ -571,6 +581,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             str(status_path.resolve()),
             "--identity-threshold",
             str(settings.identity_confidence_threshold),
+            "--run-kind",
+            payload.run_kind,
         ]
         for role in ("face", "side"):
             if role in identity_paths:
@@ -686,9 +698,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if version_ids
             else {}
         )
+        report_template = (
+            "metrics-detector-report.html"
+            if isinstance(report, dict) and report.get("run_kind") == "detector"
+            else "metrics-report.html"
+        )
         return templates.TemplateResponse(
             request=request,
-            name="metrics-report.html",
+            name=report_template,
             context={"run": run, "report": report, "versions": versions},
         )
 
@@ -716,6 +733,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 value = None
             reports.append(value if isinstance(value, dict) else None)
         metric_rows = _comparison_rows(reports[0], reports[1])
+        comparison_kind = (
+            selected[0].run_kind
+            if selected[0] is not None
+            and selected[1] is not None
+            and selected[0].run_kind == selected[1].run_kind
+            else None
+        )
         return templates.TemplateResponse(
             request=request,
             name="metrics-compare.html",
@@ -725,6 +749,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "right": right,
                 "selected": selected,
                 "metric_rows": metric_rows,
+                "comparison_kind": comparison_kind,
             },
         )
 
@@ -759,6 +784,12 @@ def _comparison_rows(
     left: dict[str, object] | None,
     right: dict[str, object] | None,
 ) -> list[dict[str, object]]:
+    left_kind = left.get("run_kind", "identity") if left else None
+    right_kind = right.get("run_kind", "identity") if right else None
+    if left_kind != right_kind:
+        return []
+    if left_kind == "detector":
+        return _detector_comparison_rows(left, right)
     names = (
         ("false_accept_rate", "FAR", False),
         ("false_reject_rate", "FRR", False),
@@ -798,6 +829,72 @@ def _comparison_rows(
             }
         )
     return rows
+
+
+def _detector_comparison_rows(
+    left: dict[str, object] | None,
+    right: dict[str, object] | None,
+) -> list[dict[str, object]]:
+    names = (
+        ("miss_rate", "Miss rate", False),
+        ("false_trigger_rate", "False trigger rate", False),
+        ("median_inference_ms", "Медиана inference, мс", False),
+        ("p95_inference_ms", "p95 inference, мс", False),
+    )
+    rows: list[dict[str, object]] = []
+    for view in ("face", "side"):
+        values = [
+            _detector_clean_metrics(report, view)
+            for report in (left, right)
+        ]
+        for key, label, higher_is_better in names:
+            left_value = values[0].get(key) if values[0] else None
+            right_value = values[1].get(key) if values[1] else None
+            delta = (
+                float(right_value) - float(left_value)
+                if isinstance(left_value, (int, float))
+                and not isinstance(left_value, bool)
+                and isinstance(right_value, (int, float))
+                and not isinstance(right_value, bool)
+                else None
+            )
+            favorable = (
+                delta is not None
+                and delta != 0
+                and ((delta > 0) if higher_is_better else (delta < 0))
+            )
+            rows.append(
+                {
+                    "label": f"{view}: {label}",
+                    "left": left_value,
+                    "right": right_value,
+                    "delta": delta,
+                    "delta_class": (
+                        "good"
+                        if favorable
+                        else "bad"
+                        if delta not in {None, 0}
+                        else ""
+                    ),
+                }
+            )
+    return rows
+
+
+def _detector_clean_metrics(
+    report: dict[str, object] | None,
+    view: str,
+) -> dict[str, object] | None:
+    if report is None:
+        return None
+    sections = report.get("sections")
+    if not isinstance(sections, dict):
+        return None
+    clean = sections.get("clean")
+    if not isinstance(clean, dict):
+        return None
+    values = clean.get(view)
+    return values if isinstance(values, dict) else None
 
 
 def _combined_clean_metrics(
