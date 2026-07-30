@@ -132,3 +132,32 @@
   начиналась, так как требует отдельного выбора модели и лицензии владельцем.
 - Следующий шаг: после отдельного согласования выбрать YOLOX/NanoDet либо
   AGPL-вариант для фазы 6 и оформить её отдельной веткой/PR.
+
+## 2026-07-30 — Метрики моделей и подготовка detector-кандидатов
+
+- Цель: реализовать новые промты `docs/codex-metrics-prompt.md` и
+  `docs/codex-detector-testing-prompt.md` для измеримого локального сравнения
+  моделей.
+- Сделано: добавлены реестр версий и evaluation runs, offline/online
+  identity-метрики и страницы `/metrics`; подготовлены manifest-driven
+  preprocessing и адаптеры SSDLite, NanoDet-Plus-m, YOLOX-Nano и YOLO11n;
+  добавлены явное скачивание с SHA-256, локальный ONNX-экспорт, bounded CPU
+  latency probe и detector-only replay с miss/false-trigger/confidence-метриками
+  по обеим камерам.
+- Решения: NanoDet использует официальный stretch/BGR-контракт, YOLOX —
+  top-left letterbox/BGR, YOLO11 — центрированный letterbox/RGB и NMS в графе;
+  runtime выбирает адаптер только по manifest. Кандидаты автоматически не
+  активируются, реальная дверь не управляется.
+- Изменённые файлы: миграция `005_model_metrics.sql`, `src/common/metrics.py`,
+  `src/common/evaluation.py`, `src/inference/detector_adapters.py`,
+  `scripts/prepare_detector_candidate.py`, `scripts/benchmark_detector.py`,
+  страницы метрик, профильная документация и тесты.
+- Проверки: Ruff и mypy успешны; полный pytest — 129 тестов; локальный baseline
+  SSDLite скомпилирован OpenVINO CPU и выполнил синтетический кадр через новый
+  адаптер.
+- Статус: программные фазы подготовки и измерения завершены в ветке
+  `feature/model-evaluation`; веса кандидатов не скачивались и в Git не
+  добавлялись.
+- Следующий шаг: после явного подтверждения скачать официальные веса с
+  проверенными SHA-256, экспортировать кандидатов, выполнить CPU probe и
+  detector replay; только по их результатам выбрать модель для INT8 NNCF.
