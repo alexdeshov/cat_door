@@ -24,7 +24,22 @@ def test_acceptance_requires_known_and_foreign_samples() -> None:
         max_frr=0.0,
     )
 
+    assert metrics.false_accept_rate is None
     assert metrics.passed is False
+
+
+def test_acceptance_counts_misidentified_known_separately() -> None:
+    metrics = calculate_metrics(
+        expected=["barsik", "murka", "__foreign__"],
+        predicted=["murka", "murka", None],
+        inference_ms=[10.0, 10.0, 10.0],
+        max_far=0.0,
+        max_frr=0.6,
+    )
+
+    assert metrics.false_rejects == 1
+    assert metrics.misidentified_known == 1
+    assert metrics.false_reject_rate == 0.5
 
 
 def test_acceptance_rejects_slow_model() -> None:
