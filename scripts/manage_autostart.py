@@ -12,6 +12,7 @@ TASKS = {
 }
 LEGACY_VALUES = ("CatDoorRecorderDryRun",)
 RUN_KEY = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run"
+WATCHDOG_TASK_NAME = "CatDoorWatchdog"
 
 
 def pythonw_path() -> Path:
@@ -31,9 +32,30 @@ def task_command(component: str) -> str:
     return f"{executable_text} {entry_text} {component}"
 
 
+def watchdog_task_command() -> str:
+    executable = pythonw_path()
+    entry = PROJECT_ROOT / "scripts" / "watchdog.py"
+    executable_text = f'"{executable}"' if " " in str(executable) else str(executable)
+    entry_text = f'"{entry}"' if " " in str(entry) else str(entry)
+    return f"{executable_text} {entry_text}"
+
+
 def run_registry(arguments: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["reg.exe", *arguments],
+        check=check,
+        text=True,
+        capture_output=True,
+    )
+
+
+def run_scheduler(
+    arguments: list[str],
+    *,
+    check: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["schtasks.exe", *arguments],
         check=check,
         text=True,
         capture_output=True,
@@ -48,6 +70,23 @@ def install() -> None:
             ["ADD", RUN_KEY, "/V", value_name, "/T", "REG_SZ", "/D", task_command(component), "/F"]
         )
         print(f"Установлено: {value_name}")
+    run_scheduler(
+        [
+            "/Create",
+            "/TN",
+            WATCHDOG_TASK_NAME,
+            "/SC",
+            "MINUTE",
+            "/MO",
+            "5",
+            "/TR",
+            watchdog_task_command(),
+            "/RL",
+            "LIMITED",
+            "/F",
+        ]
+    )
+    print(f"Установлено: {WATCHDOG_TASK_NAME}")
 
 
 def uninstall() -> None:
@@ -57,6 +96,14 @@ def uninstall() -> None:
             print(f"Удалено: {value_name}")
         else:
             print(f"Не найдено: {value_name}")
+    result = run_scheduler(
+        ["/Delete", "/TN", WATCHDOG_TASK_NAME, "/F"],
+        check=False,
+    )
+    if result.returncode == 0:
+        print(f"Удалено: {WATCHDOG_TASK_NAME}")
+    else:
+        print(f"Не найдено: {WATCHDOG_TASK_NAME}")
 
 
 def status() -> int:
@@ -66,6 +113,16 @@ def status() -> int:
         installed = result.returncode == 0
         print(f"{value_name}: {'установлено' if installed else 'не установлено'}")
         missing = missing or not installed
+    watchdog = run_scheduler(
+        ["/Query", "/TN", WATCHDOG_TASK_NAME],
+        check=False,
+    )
+    watchdog_installed = watchdog.returncode == 0
+    print(
+        f"{WATCHDOG_TASK_NAME}: "
+        f"{'установлено' if watchdog_installed else 'не установлено'}"
+    )
+    missing = missing or not watchdog_installed
     return 1 if missing else 0
 
 

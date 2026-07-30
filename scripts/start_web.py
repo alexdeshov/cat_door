@@ -8,7 +8,7 @@ from pathlib import Path
 from src.common.settings import Settings
 
 
-def main() -> None:
+def start_web() -> int:
     settings = Settings()
     log_dir = settings.data_dir / "runtime"
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -26,7 +26,11 @@ def main() -> None:
             creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS,
             close_fds=True,
         )
-    print(process.pid)
+    return process.pid
+
+
+def main() -> None:
+    print(start_web())
 
 
 if __name__ == "__main__":
