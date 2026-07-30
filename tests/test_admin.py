@@ -354,6 +354,7 @@ def test_metrics_page_shows_online_detection_and_evaluation_sections(
 
     assert page.status_code == 200
     assert "Последние 7 дней" in page.text
+    assert "Без предсказаний активной версии" in page.text
     assert "Детекция по камерам" in page.text
     assert "Новая офлайн-оценка" in page.text
     assert 'option value="detector"' in page.text

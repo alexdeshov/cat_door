@@ -39,6 +39,13 @@
       {% if metrics %}
         <div class="grid">
           <div class="card">
+            <strong>{{ window.coverage.with_active_model_predictions }} / {{ window.labelled_identity_events }}</strong>
+            <span>
+              покрытие активной версии · без предсказаний:
+              {{ window.coverage.without_active_model_predictions }}
+            </span>
+          </div>
+          <div class="card">
             <strong>{{ "%.2f%%"|format(metrics.false_accept_rate * 100) if metrics.false_accept_rate is not none else "—" }}</strong>
             <span>FAR · {{ metrics.false_accepts }} из {{ metrics.foreign_samples }}</span>
           </div>
@@ -57,6 +64,11 @@
         </div>
       {% else %}
         <p class="muted">Нет размеченных событий с online-предсказаниями.</p>
+        <p class="muted">
+          Без предсказаний активной версии:
+          {{ window.coverage.without_active_model_predictions }}
+          из {{ window.labelled_identity_events }} размеченных событий.
+        </p>
       {% endif %}
       <p class="muted">
         Всего событий: {{ window.events }} · ждут разметки: {{ window.pending }} ·
