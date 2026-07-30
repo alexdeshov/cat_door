@@ -1,0 +1,16 @@
+{
+  "package_format": 1,
+  "model_version": "face-2026.07.27-001",
+  "architecture": "mobilenet_v3_small",
+  "view": "face",
+  "labels": [
+    "cat-id-1",
+    "cat-id-2"
+  ],
+  "image_size": 224,
+  "normalization_mean": [0.485, 0.456, 0.406],
+  "normalization_std": [0.229, 0.224, 0.225],
+  "input_name": "image",
+  "output_name": "logits",
+  "onnx_file": "face_model.onnx"
+}

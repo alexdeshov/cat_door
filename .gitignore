@@ -1,7 +1,9 @@
 # Python
 __pycache__/
 *.py[cod]
+*.egg-info/
 .pytest_cache/
+.test-tmp/
 .mypy_cache/
 .ruff_cache/
 .venv/
@@ -35,6 +37,7 @@ backups/
 *.sqlite3
 
 # Models and archives
+models/
 *.onnx
 *.pt
 *.pth

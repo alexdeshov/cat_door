@@ -1,0 +1,713 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CatDoor AI</title>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, sans-serif; }
+    body { margin: 0; background: #111827; color: #e5e7eb; }
+    header, main { width: min(1100px, calc(100% - 32px)); margin: 24px auto; }
+    header { display: flex; justify-content: space-between; align-items: center; }
+    .badge { padding: 6px 10px; border-radius: 999px; background: #064e3b; color: #a7f3d0; }
+    .panel { background: #1f2937; border: 1px solid #374151; border-radius: 14px; padding: 18px; margin-bottom: 20px; }
+    .stream { width: 100%; aspect-ratio: 16/9; object-fit: contain; background: #030712; border-radius: 9px; }
+    .controls { display: flex; gap: 12px; align-items: center; margin-top: 14px; flex-wrap: wrap; }
+    button, select, input { font: inherit; border-radius: 8px; border: 1px solid #4b5563; padding: 9px 12px; }
+    button { background: #2563eb; color: white; cursor: pointer; }
+    button.danger { background: #991b1b; }
+    button:disabled { opacity: .55; cursor: wait; }
+    select, input { background: #111827; color: #e5e7eb; }
+    .events { display: grid; gap: 14px; }
+    .event { display: grid; grid-template-columns: minmax(220px, 360px) 1fr; gap: 16px; border-top: 1px solid #374151; padding-top: 14px; }
+    .camera-grid { grid-template-columns: minmax(0, 1fr) minmax(220px, 360px); }
+    video { width: 100%; border-radius: 8px; background: #030712; }
+    .event-player { margin: 6px 0 12px; }
+    .event-player video { display: block; }
+    .video-controls { display: grid; grid-template-columns: auto 1fr auto auto; gap: 8px; align-items: center; margin-top: 6px; }
+    .video-controls button { padding: 6px 10px; }
+    .video-controls input[type="range"] { width: 100%; min-width: 80px; padding: 0; }
+    .video-time { min-width: 82px; text-align: center; font-variant-numeric: tabular-nums; }
+    .muted { color: #9ca3af; }
+    .error { color: #fca5a5; }
+    .detector-alert { padding: 12px 14px; border-radius: 9px; background: #111827; border: 1px solid #4b5563; }
+    .detector-alert.idle { border-color: #047857; color: #a7f3d0; }
+    .detector-alert.candidate, .detector-alert.tail { border-color: #d97706; color: #fde68a; }
+    .detector-alert.active { border-color: #dc2626; background: #450a0a; color: #fecaca; }
+    .detector-alert.offline, .detector-alert.error { border-color: #dc2626; color: #fecaca; }
+    .summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; margin: 14px 0; }
+    .summary-card { padding: 12px; border-radius: 9px; background: #111827; border: 1px solid #374151; }
+    .summary-card strong { display: block; font-size: 1.6rem; }
+    .training-report { display: grid; gap: 10px; }
+    .settings-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; }
+    .settings-grid label { display: grid; gap: 6px; }
+    progress { width: 100%; height: 18px; }
+    @media (max-width: 720px) { .event { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+<header>
+  <h1>CatDoor AI</h1>
+  <span class="badge">Тестовый режим — дверь не управляется</span>
+</header>
+<main>
+  <section class="panel">
+    <h2>Автоматический сбор событий</h2>
+    <div class="summary-grid">
+      <div class="summary-card"><strong>{{ event_summary.total }}</strong><span class="muted">всего проходов</span></div>
+      <div class="summary-card"><strong>{{ event_summary.automatic }}</strong><span class="muted">записано автоматически</span></div>
+      <div class="summary-card"><strong>{{ event_summary.pending }}</strong><span class="muted">ждут разметки</span></div>
+      <div class="summary-card"><strong>{{ event_summary.known }}</strong><span class="muted">домашних проходов</span></div>
+      <div class="summary-card"><strong>{{ event_summary.foreign }}</strong><span class="muted">чужих котов</span></div>
+      <div class="summary-card"><strong>{{ event_summary.failed }}</strong><span class="muted">ошибок записи</span></div>
+    </div>
+    {% if known_cat_names %}
+      <p>Известные коты: <strong>{{ known_cat_names | join(", ") }}</strong></p>
+    {% else %}
+      <p class="muted">Имена котов пока не размечены.</p>
+    {% endif %}
+    <p id="detector-alert" class="detector-alert">
+      Получение состояния детектора…
+    </p>
+    {% if recorder_status %}
+      <p>
+        <strong>{{ recorder_status.message }}</strong>
+        <span class="muted">· heartbeat {{ recorder_status.updated_at }}</span>
+      </p>
+    {% else %}
+      <p class="muted">Независимый CatDoorRecorder ещё не запущен.</p>
+    {% endif %}
+    {% if recorder_status and recorder_status.detector_connected %}
+      <p class="muted">
+        Кадры face/side:
+        {{ recorder_status.frames_processed.face }}/{{ recorder_status.frames_processed.side }}.
+        Уверенность cat:
+        {{ recorder_status.confidences.face }}/{{ recorder_status.confidences.side }}.
+      </p>
+      {% if recorder_status.identity %}
+        <p>
+          Распознавание:
+          {% for view, prediction in recorder_status.identity.items() %}
+            <strong>{{ view }} — {{ prediction.name or "неизвестный кот" }}</strong>
+            ({{ prediction.confidence }})
+          {% endfor %}
+        </p>
+      {% endif %}
+    {% endif %}
+    <p class="muted">
+      Автосбор: {{ "включён" if automatic_capture_enabled else "выключен" }}.
+      Режим: {{ "только наблюдение, без автоматической записи" if automatic_capture_dry_run else "запись событий" }}.
+    </p>
+    <p id="detector-details" class="muted"></p>
+  </section>
+
+  <section class="panel">
+    <h2>Камеры</h2>
+    <div class="event camera-grid">
+      <div>
+        <h3 id="primary-camera-title">Основная камера — Cute 2</h3>
+        {% if face_configured %}
+          <img id="primary-camera-stream" class="stream"
+            src="/stream/face.mjpeg?v={{ stream_version }}" alt="Поток камеры Cute 2">
+          <button class="rotate-camera" data-slot="primary" type="button">
+            Повернуть на 90°
+          </button>
+        {% else %}<p class="error">Центральная камера не настроена.</p>{% endif %}
+      </div>
+      <div>
+        <h3 id="secondary-camera-title">Дополнительная камера — Ursa Minor</h3>
+        {% if side_configured %}
+          <img id="secondary-camera-stream" class="stream"
+            src="/stream/side.mjpeg?v={{ stream_version }}" alt="Поток камеры Ursa Minor">
+          <button class="rotate-camera" data-slot="secondary" type="button">
+            Повернуть на 90°
+          </button>
+        {% else %}<p class="muted">Дополнительная камера не настроена.</p>{% endif %}
+      </div>
+    </div>
+    <div class="controls">
+      <button id="swap-cameras" type="button"
+        {{ "disabled" if not face_configured or not side_configured }}>
+        Поменять камеры местами
+      </button>
+      <span id="camera-layout-status" class="muted"></span>
+    </div>
+    <h3>Настройки детекции</h3>
+    {% for role, title in [("face", "Cute 2"), ("side", "Широкоугольная камера")] %}
+    {% set camera_config = detection_config[role] %}
+    <h4>{{ title }}</h4>
+    <div class="settings-grid">
+      <label>Рабочий confidence
+        <input id="detection-{{ role }}-confidence-threshold"
+          type="number" min="0" max="1" step="0.01"
+          value="{{ camera_config.confidence_threshold }}">
+      </label>
+      <label>Минимум для рамки
+        <input id="detection-{{ role }}-box-min-confidence"
+          type="number" min="0" max="1" step="0.01"
+          value="{{ camera_config.box_min_confidence }}">
+      </label>
+      <label>Подтверждений
+        <input id="detection-{{ role }}-confirmation-frames"
+          type="number" min="1" max="20"
+          value="{{ camera_config.confirmation_frames }}">
+      </label>
+      <label>Размер окна кадров
+        <input id="detection-{{ role }}-window-frames"
+          type="number" min="1" max="30"
+          value="{{ camera_config.window_frames }}">
+      </label>
+    </div>
+    {% endfor %}
+    <h4>Общие тайминги события</h4>
+    <div class="settings-grid">
+      <label>Таймаут кандидата, сек.
+        <input id="detection-candidate-timeout" type="number" min="0.1" max="30" step="0.1"
+          value="{{ detection_config.candidate_timeout_seconds }}">
+      </label>
+      <label>До потери кота, сек.
+        <input id="detection-absence-seconds" type="number" min="0.1" max="60" step="0.1"
+          value="{{ detection_config.absence_seconds }}">
+      </label>
+      <label>Хвост события, сек.
+        <input id="detection-tail-seconds" type="number" min="0" max="60" step="0.1"
+          value="{{ detection_config.tail_seconds }}">
+      </label>
+      <label>Пауза после события, сек.
+        <input id="detection-cooldown-seconds" type="number" min="0" max="300" step="0.1"
+          value="{{ detection_config.cooldown_seconds }}">
+      </label>
+    </div>
+    <div class="controls">
+      <button id="save-detection-settings" type="button">Сохранить настройки детекции</button>
+      <span id="detection-settings-status" class="muted"></span>
+    </div>
+    {% if face_configured %}
+      <div class="controls">
+        <label>Длительность
+          <input id="duration" type="number" min="3" max="30" value="{{ default_duration }}"> сек.
+        </label>
+        <button id="capture">Сохранить проход сейчас</button>
+        <span id="capture-status" class="muted"></span>
+      </div>
+    {% else %}
+      <p class="error">Камера face не настроена. Задайте CATDOOR_CAMERA_FACE_RTSP.</p>
+    {% endif %}
+  </section>
+
+  <section class="panel">
+    <h2>Подготовка обучения</h2>
+    <p class="muted">
+      Для MacBook выбрано событий: {{ target_counts.macbook }}.
+      Для этого компьютера: {{ target_counts.local }}.
+    </p>
+    <div class="controls">
+      <a href="/api/training/macbook/export"><button>Скачать набор для MacBook</button></a>
+      <button id="start-local-training"
+        {{ "disabled" if local_status and local_status.state in ["starting", "preparing", "training"] }}>
+        Начать локальный эксперимент
+      </button>
+      <span id="training-status" class="muted">
+        {% if local_status %}{{ local_status.message }}{% else %}Обучение ещё не запускалось{% endif %}
+      </span>
+    </div>
+    <p class="muted">
+      Локальный запуск использует CPU и отделён от веб-интерфейса. По умолчанию
+      выполняются {{ local_training_epochs }} короткие эпохи.
+    </p>
+  </section>
+
+  <section class="panel">
+    <h2>Отчёт о процессе обучения</h2>
+    <div class="training-report">
+      <p id="training-report-state" class="detector-alert">
+        Обучение ещё не запускалось.
+      </p>
+      <progress id="training-progress" max="100" value="0"></progress>
+      <div id="training-report-details" class="muted"></div>
+      <div id="training-report-warnings"></div>
+    </div>
+    <p class="muted">
+      Малый набор пригоден только для проверки pipeline. Такая модель не должна
+      использоваться для принятия решений о двери.
+    </p>
+  </section>
+
+  <section class="panel">
+    <h2>Сохранённые события</h2>
+    <p class="muted">Отметьте проходы одного и того же кота и присвойте им общее имя.</p>
+    <div class="controls">
+      <input id="bulk-cat-name" placeholder="Имя кота">
+      <button id="bulk-label">Объединить выбранные для обучения</button>
+      <span id="bulk-label-status" class="muted"></span>
+    </div>
+    <div class="events">
+    {% for event in events %}
+      <article class="event" data-event="{{ event.id }}">
+        <div>
+          {% if event.status in ["ready", "partial"] and event.media_path %}
+            <div class="event-media">
+              <div class="event-recording" data-camera-role="face">
+                <strong class="event-camera-title">Центральная камера — Cute 2</strong>
+                <div class="event-player">
+                  <video preload="metadata" src="/media/{{ event.id }}/face"></video>
+                  <div class="video-controls">
+                    <button class="video-play" type="button" aria-label="Воспроизвести">▶</button>
+                    <input class="video-seek" type="range" min="0" max="1000" value="0"
+                      aria-label="Позиция видео">
+                    <span class="video-time">0:00 / 0:00</span>
+                    <button class="video-fullscreen" type="button" aria-label="На весь экран">⛶</button>
+                  </div>
+                </div>
+              </div>
+              {% if event.side_media_path %}
+                <div class="event-recording" data-camera-role="side">
+                  <strong class="event-camera-title">Дополнительная камера — Ursa Minor</strong>
+                  <div class="event-player">
+                    <video preload="metadata" src="/media/{{ event.id }}/side"></video>
+                    <div class="video-controls">
+                      <button class="video-play" type="button" aria-label="Воспроизвести">▶</button>
+                      <input class="video-seek" type="range" min="0" max="1000" value="0"
+                        aria-label="Позиция видео">
+                      <span class="video-time">0:00 / 0:00</span>
+                      <button class="video-fullscreen" type="button" aria-label="На весь экран">⛶</button>
+                    </div>
+                  </div>
+                </div>
+              {% endif %}
+            </div>
+          {% else %}
+            <p class="error">Запись не готова: {{ event.error_code or event.status }}</p>
+          {% endif %}
+        </div>
+        <div>
+          <label><input class="event-selector" type="checkbox"> Один и тот же кот</label>
+          <strong>Событие #{{ event.id }}</strong>
+          <p class="muted">
+            {{ event.created_at }} · {{ event.duration_seconds }} сек. ·
+            {{ "автоматическое" if event.trigger_source == "automatic" else "ручное" }}
+          </p>
+          <div class="controls">
+            <select class="label">
+              <option value="pending" {{ "selected" if event.label == "pending" }}>Не размечено</option>
+              <option value="known_cat" {{ "selected" if event.label == "known_cat" }}>Домашний кот</option>
+              <option value="foreign_cat" {{ "selected" if event.label == "foreign_cat" }}>Чужой кот</option>
+              <option value="not_visible" {{ "selected" if event.label == "not_visible" }}>Кота не видно</option>
+              <option value="multiple_cats" {{ "selected" if event.label == "multiple_cats" }}>Несколько котов</option>
+            </select>
+            <input class="cat-name" placeholder="Имя домашнего кота" value="{{ event.cat_name or '' }}">
+            <select class="training-target" aria-label="Назначение для обучения">
+              <option value="excluded" {{ "selected" if event.training_target == "excluded" }}>Не использовать для обучения</option>
+              <option value="macbook" {{ "selected" if event.training_target == "macbook" }}>Отправить на MacBook</option>
+              <option value="local" {{ "selected" if event.training_target == "local" }}>Обучать на этом компьютере</option>
+            </select>
+            <button class="save-label">Сохранить разметку</button>
+            <button class="delete-event danger">Удалить проход</button>
+            <span class="label-status muted"></span>
+          </div>
+        </div>
+      </article>
+    {% else %}
+      <p class="muted">Событий пока нет.</p>
+    {% endfor %}
+    </div>
+  </section>
+</main>
+<script>
+  function formatVideoTime(seconds) {
+    if (!Number.isFinite(seconds)) return "0:00";
+    const minutes = Math.floor(seconds / 60);
+    return `${minutes}:${String(Math.floor(seconds % 60)).padStart(2, "0")}`;
+  }
+
+  document.querySelectorAll(".event-player").forEach(player => {
+    const video = player.querySelector("video");
+    const play = player.querySelector(".video-play");
+    const seek = player.querySelector(".video-seek");
+    const time = player.querySelector(".video-time");
+
+    const refresh = () => {
+      seek.value = video.duration ? Math.round(video.currentTime / video.duration * 1000) : 0;
+      time.textContent = `${formatVideoTime(video.currentTime)} / ${formatVideoTime(video.duration)}`;
+      play.textContent = video.paused ? "▶" : "❚❚";
+      play.setAttribute("aria-label", video.paused ? "Воспроизвести" : "Пауза");
+    };
+    play.addEventListener("click", () => video.paused ? video.play() : video.pause());
+    video.addEventListener("click", () => video.paused ? video.play() : video.pause());
+    video.addEventListener("loadedmetadata", refresh);
+    video.addEventListener("timeupdate", refresh);
+    video.addEventListener("play", refresh);
+    video.addEventListener("pause", refresh);
+    seek.addEventListener("input", () => {
+      if (video.duration) video.currentTime = Number(seek.value) / 1000 * video.duration;
+    });
+    player.querySelector(".video-fullscreen").addEventListener("click", () => {
+      if (player.requestFullscreen) player.requestFullscreen();
+    });
+  });
+
+  const cameraLayoutKey = "catdoor-camera-layout";
+  const cameraRotationKey = "catdoor-camera-rotations-v2";
+  const streamVersion = "{{ stream_version }}";
+  const primaryCamera = document.querySelector("#primary-camera-stream");
+  const secondaryCamera = document.querySelector("#secondary-camera-stream");
+  const swapCamerasButton = document.querySelector("#swap-cameras");
+  let cameraRotations = {face: 0, side: 0};
+
+  try {
+    const savedRotations = JSON.parse(localStorage.getItem(cameraRotationKey) || "{}");
+    for (const role of ["face", "side"]) {
+      if ([0, 90, 180, 270].includes(savedRotations[role])) {
+        cameraRotations[role] = savedRotations[role];
+      }
+    }
+  } catch (error) {
+    console.warn("Не удалось прочитать настройки поворота камер", error);
+  }
+
+  function applyCameraRotation(camera) {
+    if (!camera) return;
+    const angle = cameraRotations[camera.dataset.cameraRole];
+    const scale = angle % 180 === 0 ? 1 : 0.5625;
+    camera.style.transform = `rotate(${angle}deg) scale(${scale})`;
+  }
+
+  function setCameraSource(camera, source) {
+    if (camera.getAttribute("src") !== source) {
+      camera.src = source;
+    }
+  }
+
+  function streamUrl(role) {
+    return `/stream/${role}.mjpeg?v=${streamVersion}`;
+  }
+
+  function applyEventVideoRotations() {
+    document.querySelectorAll(".event-recording").forEach(recording => {
+      const role = recording.dataset.cameraRole;
+      const video = recording.querySelector("video");
+      video.style.transform = `rotate(${(180 + cameraRotations[role]) % 360}deg)`;
+    });
+  }
+
+  function applyEventMediaLayout(swapped) {
+    document.querySelectorAll(".event-media").forEach(media => {
+      const face = media.querySelector('[data-camera-role="face"]');
+      const side = media.querySelector('[data-camera-role="side"]');
+      if (!face) return;
+      face.querySelector(".event-camera-title").textContent =
+        `${swapped ? "Дополнительная" : "Центральная"} камера — Cute 2`;
+      if (!side) return;
+      side.querySelector(".event-camera-title").textContent =
+        `${swapped ? "Центральная" : "Дополнительная"} камера — Ursa Minor`;
+      media.replaceChildren(...(swapped ? [side, face] : [face, side]));
+    });
+    applyEventVideoRotations();
+  }
+
+  function applyCameraLayout(swapped) {
+    applyEventMediaLayout(swapped);
+    if (!primaryCamera || !secondaryCamera) return;
+    primaryCamera.dataset.cameraRole = swapped ? "side" : "face";
+    setCameraSource(primaryCamera, streamUrl(swapped ? "side" : "face"));
+    primaryCamera.alt = swapped ? "Поток камеры Ursa Minor" : "Поток камеры Cute 2";
+    secondaryCamera.dataset.cameraRole = swapped ? "face" : "side";
+    setCameraSource(secondaryCamera, streamUrl(swapped ? "face" : "side"));
+    secondaryCamera.alt = swapped ? "Поток камеры Cute 2" : "Поток камеры Ursa Minor";
+    applyCameraRotation(primaryCamera);
+    applyCameraRotation(secondaryCamera);
+    document.querySelector("#primary-camera-title").textContent =
+      `Основная камера — ${swapped ? "Ursa Minor" : "Cute 2"}`;
+    document.querySelector("#secondary-camera-title").textContent =
+      `Дополнительная камера — ${swapped ? "Cute 2" : "Ursa Minor"}`;
+    document.querySelector("#camera-layout-status").textContent =
+      swapped ? "Основная: Ursa Minor" : "Основная: Cute 2";
+    swapCamerasButton.dataset.swapped = String(swapped);
+  }
+
+  if (primaryCamera && secondaryCamera) {
+    let savedLayout = false;
+    try {
+      savedLayout = localStorage.getItem(cameraLayoutKey) === "swapped";
+    } catch (error) {
+      console.warn("Не удалось прочитать настройку расположения камер", error);
+    }
+    applyCameraLayout(savedLayout);
+  }
+
+  swapCamerasButton?.addEventListener("click", () => {
+    const swapped = swapCamerasButton.dataset.swapped !== "true";
+    applyCameraLayout(swapped);
+    try {
+      localStorage.setItem(cameraLayoutKey, swapped ? "swapped" : "default");
+    } catch (error) {
+      console.warn("Не удалось сохранить настройку расположения камер", error);
+    }
+  });
+
+  document.querySelector("#save-detection-settings")?.addEventListener("click", async event => {
+    const button = event.currentTarget;
+    const status = document.querySelector("#detection-settings-status");
+    const number = id => Number(document.querySelector(id).value);
+    const cameraSettings = role => ({
+      confidence_threshold: number(`#detection-${role}-confidence-threshold`),
+      box_min_confidence: number(`#detection-${role}-box-min-confidence`),
+      confirmation_frames: number(`#detection-${role}-confirmation-frames`),
+      window_frames: number(`#detection-${role}-window-frames`)
+    });
+    const payload = {
+      face: cameraSettings("face"),
+      side: cameraSettings("side"),
+      candidate_timeout_seconds: number("#detection-candidate-timeout"),
+      absence_seconds: number("#detection-absence-seconds"),
+      tail_seconds: number("#detection-tail-seconds"),
+      cooldown_seconds: number("#detection-cooldown-seconds")
+    };
+    button.disabled = true;
+    try {
+      const response = await fetch("/api/detection/settings", {
+        method: "PUT",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(payload)
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.detail || "ошибка проверки");
+      status.textContent = "Сохранено — recorder применит настройки в состоянии idle";
+    } catch (error) {
+      status.textContent = `Ошибка: ${error.message}`;
+    } finally {
+      button.disabled = false;
+    }
+  });
+
+  document.querySelectorAll(".rotate-camera").forEach(button => {
+    button.addEventListener("click", () => {
+      const camera = button.dataset.slot === "primary" ? primaryCamera : secondaryCamera;
+      if (!camera) return;
+      const role = camera.dataset.cameraRole;
+      cameraRotations[role] = (cameraRotations[role] + 90) % 360;
+      applyCameraRotation(camera);
+      applyEventVideoRotations();
+      try {
+        localStorage.setItem(cameraRotationKey, JSON.stringify(cameraRotations));
+      } catch (error) {
+        console.warn("Не удалось сохранить настройки поворота камер", error);
+      }
+    });
+  });
+
+  const captureButton = document.querySelector("#capture");
+  captureButton?.addEventListener("click", async () => {
+    const status = document.querySelector("#capture-status");
+    captureButton.disabled = true;
+    status.textContent = "Идёт запись…";
+    try {
+      const response = await fetch("/api/events", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({duration_seconds: Number(document.querySelector("#duration").value)})
+      });
+      const result = await response.json();
+      if (!response.ok || result.status !== "ready") throw new Error(result.detail || result.status);
+      status.textContent = "Событие сохранено";
+      location.reload();
+    } catch (error) {
+      status.textContent = `Ошибка: ${error.message}`;
+    } finally {
+      captureButton.disabled = false;
+    }
+  });
+
+  document.querySelectorAll(".save-label").forEach(button => {
+    button.addEventListener("click", async () => {
+      const event = button.closest(".event");
+      const status = event.querySelector(".label-status");
+      const payload = {
+        label: event.querySelector(".label").value,
+        cat_name: event.querySelector(".cat-name").value || null,
+        training_target: event.querySelector(".training-target").value
+      };
+      const response = await fetch(`/api/events/${event.dataset.event}/label`, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(payload)
+      });
+      const result = await response.json();
+      status.textContent = response.ok ? "Сохранено" : `Ошибка: ${result.detail}`;
+    });
+  });
+
+  document.querySelector("#bulk-label")?.addEventListener("click", async () => {
+    const selected = [...document.querySelectorAll(".event-selector:checked")]
+      .map(input => Number(input.closest(".event").dataset.event));
+    const catName = document.querySelector("#bulk-cat-name").value.trim();
+    const status = document.querySelector("#bulk-label-status");
+    if (!selected.length || !catName) {
+      status.textContent = "Выберите события и укажите имя";
+      return;
+    }
+    const response = await fetch("/api/events/bulk-label", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        event_ids: selected,
+        label: "known_cat",
+        cat_name: catName,
+        training_target: "macbook"
+      })
+    });
+    const result = await response.json();
+    status.textContent = response.ok
+      ? `Объединено событий: ${result.updated}`
+      : `Ошибка: ${result.detail}`;
+    if (response.ok) location.reload();
+  });
+
+  document.querySelectorAll(".delete-event").forEach(button => {
+    button.addEventListener("click", async () => {
+      const event = button.closest(".event");
+      if (!confirm(`Удалить событие #${event.dataset.event} и его видео без возможности восстановления?`)) {
+        return;
+      }
+      button.disabled = true;
+      const response = await fetch(`/api/events/${event.dataset.event}`, {method: "DELETE"});
+      if (response.ok) {
+        event.remove();
+        return;
+      }
+      const result = await response.json();
+      alert(`Не удалось удалить событие: ${result.detail}`);
+      button.disabled = false;
+    });
+  });
+
+  const trainingButton = document.querySelector("#start-local-training");
+  trainingButton?.addEventListener("click", async () => {
+    const status = document.querySelector("#training-status");
+    trainingButton.disabled = true;
+    const response = await fetch("/api/training/local/start", {method: "POST"});
+    const result = await response.json();
+    status.textContent = response.ok
+      ? `Процесс запущен, PID ${result.pid}`
+      : `Ошибка: ${result.detail}`;
+    if (!response.ok) {
+      trainingButton.disabled = false;
+    } else {
+      setTimeout(refreshTrainingStatus, 500);
+    }
+  });
+
+  function renderTrainingReport(result) {
+    const state = document.querySelector("#training-report-state");
+    const progress = document.querySelector("#training-progress");
+    const details = document.querySelector("#training-report-details");
+    const warnings = document.querySelector("#training-report-warnings");
+    state.textContent = result.message || result.state;
+    state.className = `detector-alert ${result.state === "failed" ? "error" : "idle"}`;
+    const epoch = Number(result.epoch || 0);
+    const epochs = Number(result.epochs || 0);
+    progress.value = epochs ? Math.round(epoch / epochs * 100) : (
+      result.state === "completed" ? 100 : 0
+    );
+    const report = result.report || {};
+    const labels = Object.entries(report.events_per_label || {})
+      .map(([name, count]) => `${name === "__foreign__" ? "чужие коты" : name}: ${count}`)
+      .join(", ");
+    const views = Object.entries(report.views || {})
+      .map(([name, count]) => `${name}: ${count} кадров`)
+      .join(", ");
+    const parts = [];
+    if (report.events != null) parts.push(`Проходов: ${report.events}`);
+    if (labels) parts.push(`По котам: ${labels}`);
+    if (views) parts.push(`Ракурсы: ${views}`);
+    if (epochs) parts.push(`Эпоха: ${epoch}/${epochs}`);
+    if (result.loss != null) parts.push(`Loss: ${result.loss}`);
+    if (result.metrics) {
+      for (const [view, metric] of Object.entries(result.metrics)) {
+        if (metric.validation_accuracy != null) {
+          parts.push(
+            `${view} validation accuracy: ${(metric.validation_accuracy * 100).toFixed(1)}%`
+          );
+        }
+      }
+    }
+    details.textContent = parts.join(" · ") || "Данные появятся после подготовки датасета.";
+    warnings.replaceChildren();
+    for (const warning of report.warnings || []) {
+      const row = document.createElement("p");
+      row.className = "error";
+      row.textContent = `Предупреждение: ${warning}`;
+      warnings.appendChild(row);
+    }
+  }
+
+  async function refreshTrainingStatus() {
+    const response = await fetch("/api/training/local/status");
+    if (!response.ok) return;
+    const result = await response.json();
+    document.querySelector("#training-status").textContent = result.message;
+    renderTrainingReport(result);
+    if (["completed", "failed", "idle"].includes(result.state)) {
+      trainingButton.disabled = false;
+      return;
+    }
+    trainingButton.disabled = true;
+    setTimeout(refreshTrainingStatus, 3000);
+  }
+  refreshTrainingStatus();
+
+  const detectorStateLabels = {
+    idle: "Кот не обнаружен",
+    candidate: "Возможный кот — ожидается подтверждение",
+    active: "Кот обнаружен — система начала бы запись",
+    tail: "Кот вышел из кадра — продолжается хвост события",
+    cooldown: "Событие завершено — защита от повторного запуска",
+    waiting_for_frames: "Детектор ожидает кадры камер",
+    probe_completed: "Проверка детектора завершена",
+    disabled: "Автоматический сбор выключен",
+    error: "Ошибка детектора",
+    offline: "Recorder не отвечает"
+  };
+
+  async function refreshDetectorStatus() {
+    const alert = document.querySelector("#detector-alert");
+    const details = document.querySelector("#detector-details");
+    try {
+      const response = await fetch("/api/recorder/status");
+      const result = await response.json();
+      const state = result.stale ? "offline" : result.state;
+      alert.className = `detector-alert ${state}`;
+      alert.textContent = result.stale
+        ? "Recorder не отвечает: heartbeat устарел"
+        : state === "active" && !result.dry_run
+          ? "Кот обнаружен — запись события идёт"
+          : detectorStateLabels[state] || result.message || state;
+      const frames = result.frames_processed || {};
+      const confidences = result.confidences || {};
+      const camera = result.initiating_camera
+        ? ` · камера: ${result.initiating_camera}`
+        : "";
+      details.textContent =
+        `Кадры face/side: ${frames.face ?? 0}/${frames.side ?? 0}` +
+        ` · confidence: ${confidences.face ?? 0}/${confidences.side ?? 0}${camera}`;
+      const identities = Object.values(result.identity || {});
+      if (!result.stale && identities.length) {
+        const known = identities
+          .filter(item => item.name)
+          .sort((left, right) => right.confidence - left.confidence)[0];
+        alert.textContent = known
+          ? `Распознан кот: ${known.name} (${known.confidence})`
+          : "Кот обнаружен, но личность не распознана";
+      }
+    } catch (error) {
+      alert.className = "detector-alert offline";
+      alert.textContent = "Не удалось получить состояние детектора";
+      details.textContent = "";
+    } finally {
+      setTimeout(refreshDetectorStatus, 1000);
+    }
+  }
+  refreshDetectorStatus();
+</script>
+</body>
+</html>
