@@ -17,7 +17,12 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from src.common.database import Event, create_session_factory, session_dependency
+from src.common.database import (
+    Event,
+    EventPrediction,
+    create_session_factory,
+    session_dependency,
+)
 from src.common.detection_config import (
     DetectionConfig,
     detection_config_path,
@@ -74,6 +79,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         session: Annotated[Session, Depends(get_session)],
     ) -> HTMLResponse:
         events = session.scalars(select(Event).order_by(Event.created_at.desc()).limit(100)).all()
+        event_ids = [event.id for event in events]
+        prediction_rows = (
+            session.scalars(
+                select(EventPrediction)
+                .where(
+                    EventPrediction.event_id.in_(event_ids),
+                    EventPrediction.origin == "online",
+                )
+                .order_by(EventPrediction.created_at.desc(), EventPrediction.id.desc())
+            ).all()
+            if event_ids
+            else []
+        )
+        event_predictions: dict[int, dict[str, EventPrediction]] = {}
+        for prediction in prediction_rows:
+            by_view = event_predictions.setdefault(prediction.event_id, {})
+            by_view.setdefault(prediction.view, prediction)
         summary_row = session.execute(
             select(
                 func.count(Event.id),
@@ -128,6 +150,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             name="index.html",
             context={
                 "events": events,
+                "event_predictions": event_predictions,
                 "face_configured": bool(settings.camera_face_rtsp),
                 "side_configured": bool(settings.camera_side_rtsp),
                 "default_duration": settings.capture_duration_seconds,

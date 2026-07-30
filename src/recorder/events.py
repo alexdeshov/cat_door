@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 import math
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
-from src.common.database import Event, create_session_factory
+from src.common.database import Event, EventPrediction, create_session_factory
 from src.recorder.ffmpeg import RecorderError
 from src.recorder.ring import concatenate_segments, select_segments
 
@@ -16,6 +18,20 @@ class AutomaticEventRequest:
     initiating_camera: str | None
     confidence_face: float
     confidence_side: float
+    predictions: tuple[AutomaticEventPrediction, ...] = ()
+
+
+@dataclass(frozen=True)
+class AutomaticEventPrediction:
+    model_version_id: int
+    view: str
+    decision: str
+    predicted_name: str | None
+    confidence: float | None
+    frames_used: int
+    max_detector_confidence: float
+    mean_inference_ms: float | None
+    raw_scores: tuple[tuple[str, float], ...]
 
 
 def persist_automatic_event(
@@ -71,6 +87,30 @@ def persist_automatic_event(
         stored_event.error_code = (
             f"automatic_capture_failed:{','.join(errors)}" if errors else None
         )
+        for prediction in request.predictions:
+            session.add(
+                EventPrediction(
+                    event_id=stored_event.id,
+                    model_version_id=prediction.model_version_id,
+                    view=prediction.view,
+                    origin="online",
+                    evaluation_run_id=None,
+                    decision=prediction.decision,
+                    predicted_name=prediction.predicted_name,
+                    confidence=prediction.confidence,
+                    frames_used=prediction.frames_used,
+                    max_detector_confidence=prediction.max_detector_confidence,
+                    mean_inference_ms=prediction.mean_inference_ms,
+                    raw_scores_json=json.dumps(
+                        [
+                            {"name": name, "confidence": confidence}
+                            for name, confidence in prediction.raw_scores
+                        ],
+                        ensure_ascii=False,
+                    ),
+                    created_at=datetime.now(UTC),
+                )
+            )
         session.commit()
         session.refresh(stored_event)
         return stored_event

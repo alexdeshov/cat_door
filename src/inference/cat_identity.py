@@ -19,6 +19,7 @@ from src.inference.preprocessing import (
 class IdentityPrediction:
     name: str | None
     confidence: float
+    candidate_name: str | None = None
 
 
 class OpenVinoCatIdentity:
@@ -58,7 +59,9 @@ class OpenVinoCatIdentity:
         probabilities = np.exp(shifted) / np.exp(shifted).sum()
         index = int(probabilities.argmax())
         confidence = float(probabilities[index])
+        candidate_name = self.labels[index]
         return IdentityPrediction(
-            name=self.labels[index] if confidence >= threshold else None,
+            name=candidate_name if confidence >= threshold else None,
             confidence=confidence,
+            candidate_name=candidate_name,
         )
