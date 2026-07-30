@@ -21,6 +21,7 @@ from src.common.database import (
     EvaluationRun,
     Event,
     EventPrediction,
+    ModelVersion,
     create_session_factory,
     session_dependency,
 )
@@ -30,6 +31,7 @@ from src.common.detection_config import (
     load_detection_config,
     save_detection_config,
 )
+from src.common.detection_stats import read_detection_stats
 from src.common.model_registry import register_model_version
 from src.common.online_metrics import build_online_metrics
 from src.common.settings import Settings
@@ -624,6 +626,108 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ) -> dict[str, object]:
         return build_online_metrics(session)
 
+    @app.get("/metrics", response_class=HTMLResponse)
+    def metrics_page(
+        request: Request,
+        session: Annotated[Session, Depends(get_session)],
+    ) -> HTMLResponse:
+        runs = session.scalars(
+            select(EvaluationRun).order_by(EvaluationRun.created_at.desc())
+        ).all()
+        return templates.TemplateResponse(
+            request=request,
+            name="metrics.html",
+            context={
+                "online": build_online_metrics(session),
+                "detection": read_detection_stats(
+                    settings.data_dir / "runtime" / "detection.jsonl"
+                ),
+                "runs": runs,
+                "detector_ready": settings.detector_model_path.is_file(),
+                "identity_ready": any(
+                    path is not None and path.is_file()
+                    for path in (
+                        settings.identity_face_model_path,
+                        settings.identity_side_model_path,
+                    )
+                ),
+            },
+        )
+
+    @app.get("/metrics/runs/{run_id}", response_class=HTMLResponse)
+    def evaluation_report_page(
+        request: Request,
+        run_id: int,
+        session: Annotated[Session, Depends(get_session)],
+    ) -> HTMLResponse:
+        run = session.get(EvaluationRun, run_id)
+        if run is None:
+            raise HTTPException(404, "Запуск оценки не найден")
+        try:
+            report = json.loads(run.metrics_json) if run.metrics_json else None
+        except json.JSONDecodeError:
+            report = None
+        version_ids = {
+            version_id
+            for version_id in (
+                run.detector_model_version_id,
+                run.face_model_version_id,
+                run.side_model_version_id,
+            )
+            if version_id is not None
+        }
+        versions = (
+            {
+                version.id: version
+                for version in session.scalars(
+                    select(ModelVersion).where(ModelVersion.id.in_(version_ids))
+                ).all()
+            }
+            if version_ids
+            else {}
+        )
+        return templates.TemplateResponse(
+            request=request,
+            name="metrics-report.html",
+            context={"run": run, "report": report, "versions": versions},
+        )
+
+    @app.get("/metrics/compare", response_class=HTMLResponse)
+    def comparison_page(
+        request: Request,
+        session: Annotated[Session, Depends(get_session)],
+        left: int | None = None,
+        right: int | None = None,
+    ) -> HTMLResponse:
+        runs = session.scalars(
+            select(EvaluationRun)
+            .where(EvaluationRun.status == "completed")
+            .order_by(EvaluationRun.created_at.desc())
+        ).all()
+        selected: list[EvaluationRun | None] = [
+            session.get(EvaluationRun, run_id) if run_id is not None else None
+            for run_id in (left, right)
+        ]
+        reports: list[dict[str, object] | None] = []
+        for run in selected:
+            try:
+                value = json.loads(run.metrics_json) if run and run.metrics_json else None
+            except json.JSONDecodeError:
+                value = None
+            reports.append(value if isinstance(value, dict) else None)
+        metric_rows = _comparison_rows(reports[0], reports[1])
+        return templates.TemplateResponse(
+            request=request,
+            name="metrics-compare.html",
+            context={
+                "runs": runs,
+                "left": left,
+                "right": right,
+                "selected": selected,
+                "metric_rows": metric_rows,
+            },
+        )
+
     @app.get("/media/{event_id}/{view}")
     def media(
         event_id: int,
@@ -649,6 +753,63 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
 
     return app
+
+
+def _comparison_rows(
+    left: dict[str, object] | None,
+    right: dict[str, object] | None,
+) -> list[dict[str, object]]:
+    names = (
+        ("false_accept_rate", "FAR", False),
+        ("false_reject_rate", "FRR", False),
+        ("misidentified_known", "Ошибочных имён", False),
+        ("uncertain_rate", "Uncertain", False),
+        ("accuracy", "Accuracy", True),
+        ("mean_inference_ms", "Средний inference, мс", False),
+    )
+    values = [
+        _combined_clean_metrics(report)
+        for report in (left, right)
+    ]
+    rows: list[dict[str, object]] = []
+    for key, label, higher_is_better in names:
+        left_value = values[0].get(key) if values[0] else None
+        right_value = values[1].get(key) if values[1] else None
+        delta = (
+            float(right_value) - float(left_value)
+            if isinstance(left_value, (int, float))
+            and isinstance(right_value, (int, float))
+            else None
+        )
+        favorable = (
+            delta is not None
+            and delta != 0
+            and ((delta > 0) if higher_is_better else (delta < 0))
+        )
+        rows.append(
+            {
+                "label": label,
+                "left": left_value,
+                "right": right_value,
+                "delta": delta,
+                "delta_class": (
+                    "good" if favorable else "bad" if delta not in {None, 0} else ""
+                ),
+            }
+        )
+    return rows
+
+
+def _combined_clean_metrics(
+    report: dict[str, object] | None,
+) -> dict[str, object] | None:
+    if report is None:
+        return None
+    clean = report.get("clean_metrics")
+    if not isinstance(clean, dict):
+        return None
+    combined = clean.get("combined")
+    return combined if isinstance(combined, dict) else None
 
 
 def run() -> None:

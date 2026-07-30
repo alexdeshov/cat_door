@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -286,6 +287,75 @@ def test_evaluation_rejects_path_outside_models(
     )
 
     assert response.status_code == 422
+
+
+def test_metrics_page_shows_online_detection_and_evaluation_sections(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    client = make_client(runtime_path, monkeypatch)
+
+    page = client.get("/metrics")
+
+    assert page.status_code == 200
+    assert "Последние 7 дней" in page.text
+    assert "Детекция по камерам" in page.text
+    assert "Новая офлайн-оценка" in page.text
+    assert "Сравнить два завершённых запуска" in page.text
+    assert client.get("/").text.count('href="/metrics"') == 1
+
+
+def test_completed_evaluation_report_and_comparison_are_rendered(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    client = make_client(runtime_path, monkeypatch)
+    factory = create_session_factory(runtime_path / "test.sqlite3")
+    reports = [
+        {
+            "events_processed": 10,
+            "identity_events": 8,
+            "clean_events": 8,
+            "training_seen_events": 2,
+            "metrics": {"combined": None},
+            "night_metrics": {"combined": None},
+            "detection": {},
+            "clean_metrics": {
+                "combined": {
+                    "false_accept_rate": far,
+                    "false_reject_rate": 0.2,
+                    "misidentified_known": 1,
+                    "uncertain_rate": 0.1,
+                    "accuracy": 0.8,
+                    "mean_inference_ms": 12.0,
+                    "threshold_sweep": [],
+                    "confusion": {},
+                }
+            },
+        }
+        for far in (0.2, 0.1)
+    ]
+    with factory() as session:
+        for report in reports:
+            session.add(
+                EvaluationRun(
+                    run_kind="identity",
+                    filter_json="{}",
+                    status="completed",
+                    metrics_json=json.dumps(report),
+                )
+            )
+        session.commit()
+
+    report_page = client.get("/metrics/runs/1")
+    comparison = client.get("/metrics/compare?left=1&right=2")
+
+    assert report_page.status_code == 200
+    assert "Чистые события" in report_page.text
+    assert "Охват" in report_page.text
+    assert comparison.status_code == 200
+    assert "Сравнивается combined-метрика" in comparison.text
+    assert "-0.1000" in comparison.text
 
 
 def test_detection_settings_can_be_updated(runtime_path: Path, monkeypatch) -> None:
