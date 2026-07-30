@@ -7,6 +7,7 @@ from src.inference.preprocessing import (
     crop_strongest_cat,
     map_detector_box_to_frame,
     map_detector_box_to_source,
+    prepare_detector_frame,
     prepare_identity_tensor,
 )
 
@@ -18,6 +19,21 @@ def test_detector_box_maps_out_of_letterbox_coordinates() -> None:
         360,
     )
 
+    assert coordinates == (160.0, 90.0, 480.0, 270.0)
+
+
+def test_detector_preprocessing_and_mapping_support_416_input() -> None:
+    frame = np.full((360, 640, 3), 100, dtype=np.uint8)
+
+    detector_frame = prepare_detector_frame(frame, 416)
+    coordinates = map_detector_box_to_frame(
+        (104.0, 149.5, 312.0, 266.5),
+        640,
+        360,
+        416,
+    )
+
+    assert detector_frame.shape == (416, 416, 3)
     assert coordinates == (160.0, 90.0, 480.0, 270.0)
 
 

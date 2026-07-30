@@ -21,6 +21,7 @@ from src.common.metrics import (
 from src.inference.cat_detector import CatDetectionResult
 from src.inference.cat_identity import IdentityPrediction
 from src.inference.preprocessing import (
+    DETECTOR_INPUT_SIZE,
     crop_normalized_roi,
     crop_strongest_cat,
     prepare_detector_frame,
@@ -93,9 +94,15 @@ def evaluate_view_frames(
     detector_timings: list[float] = []
     identity_timings: list[float] = []
     max_detector_confidence = 0.0
+    detector_input_size = int(
+        getattr(detector, "input_size", DETECTOR_INPUT_SIZE)
+    )
     for frame in frames:
         detector_source = crop_normalized_roi(frame, camera_config.roi)
-        detector_frame = prepare_detector_frame(detector_source)
+        detector_frame = prepare_detector_frame(
+            detector_source,
+            detector_input_size,
+        )
         started_at = time.perf_counter()
         detection = detector.detect(detector_frame)
         detector_timings.append((time.perf_counter() - started_at) * 1000)
@@ -109,6 +116,7 @@ def evaluate_view_frames(
             min_confidence=camera_config.confidence_threshold,
             detector_frame=detector_source,
             roi=camera_config.roi,
+            input_size=detector_input_size,
         )
         if crop is None:
             continue

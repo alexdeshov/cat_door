@@ -22,6 +22,7 @@ from src.common.detection_config import (
 from src.common.settings import Settings
 from src.inference.cat_detector import CatDetectionResult, OpenVinoCatDetector
 from src.inference.preprocessing import (
+    DETECTOR_INPUT_SIZE,
     crop_normalized_roi,
     crop_strongest_cat,
     prepare_detector_frame,
@@ -86,17 +87,23 @@ def crop_extracted_frames(
 ) -> tuple[list[Path], int]:
     accepted: list[Path] = []
     rejected = 0
+    detector_input_size = int(
+        getattr(detector, "input_size", DETECTOR_INPUT_SIZE)
+    )
     for frame_path in frames:
         with Image.open(frame_path) as image:
             frame = np.asarray(image.convert("RGB"), dtype=np.uint8)
         detector_frame = crop_normalized_roi(frame, roi)
-        detection = detector.detect(prepare_detector_frame(detector_frame))
+        detection = detector.detect(
+            prepare_detector_frame(detector_frame, detector_input_size)
+        )
         crop = crop_strongest_cat(
             frame,
             detection.detections,
             min_confidence=confidence_threshold,
             detector_frame=detector_frame,
             roi=roi,
+            input_size=detector_input_size,
         )
         if crop is None:
             frame_path.unlink(missing_ok=True)

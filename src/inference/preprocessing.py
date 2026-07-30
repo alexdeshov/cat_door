@@ -52,18 +52,23 @@ def crop_normalized_roi(
     return np.ascontiguousarray(source[top:bottom, left:right])
 
 
-def prepare_detector_frame(frame: np.ndarray) -> np.ndarray:
+def prepare_detector_frame(
+    frame: np.ndarray,
+    input_size: int = DETECTOR_INPUT_SIZE,
+) -> np.ndarray:
+    if input_size <= 0:
+        raise ValueError("detector input size must be positive")
     image = Image.fromarray(crop_frame_padding(frame), mode="RGB")
     image.thumbnail(
-        (DETECTOR_INPUT_SIZE, DETECTOR_INPUT_SIZE),
+        (input_size, input_size),
         Image.Resampling.BILINEAR,
     )
-    detector_image = Image.new("RGB", (DETECTOR_INPUT_SIZE, DETECTOR_INPUT_SIZE))
+    detector_image = Image.new("RGB", (input_size, input_size))
     detector_image.paste(
         image,
         (
-            (DETECTOR_INPUT_SIZE - image.width) // 2,
-            (DETECTOR_INPUT_SIZE - image.height) // 2,
+            (input_size - image.width) // 2,
+            (input_size - image.height) // 2,
         ),
     )
     return np.asarray(detector_image, dtype=np.uint8)
@@ -73,13 +78,14 @@ def map_detector_box_to_frame(
     box: tuple[float, float, float, float],
     frame_width: int,
     frame_height: int,
+    input_size: int = DETECTOR_INPUT_SIZE,
 ) -> tuple[float, float, float, float]:
     scale = min(
-        DETECTOR_INPUT_SIZE / frame_width,
-        DETECTOR_INPUT_SIZE / frame_height,
+        input_size / frame_width,
+        input_size / frame_height,
     )
-    offset_x = (DETECTOR_INPUT_SIZE - frame_width * scale) / 2
-    offset_y = (DETECTOR_INPUT_SIZE - frame_height * scale) / 2
+    offset_x = (input_size - frame_width * scale) / 2
+    offset_y = (input_size - frame_height * scale) / 2
     x1, y1, x2, y2 = box
     return (
         max(0.0, min(float(frame_width), (x1 - offset_x) / scale)),
@@ -97,11 +103,13 @@ def map_detector_box_to_source(
     detector_frame_height: int,
     *,
     roi: NormalizedRoi | None,
+    input_size: int = DETECTOR_INPUT_SIZE,
 ) -> tuple[float, float, float, float]:
     detector_coordinates = map_detector_box_to_frame(
         box,
         detector_frame_width,
         detector_frame_height,
+        input_size,
     )
     roi_x = roi.x if roi is not None else 0.0
     roi_y = roi.y if roi is not None else 0.0
@@ -127,6 +135,7 @@ def crop_strongest_cat(
     expansion: float = IDENTITY_CROP_EXPANSION,
     detector_frame: np.ndarray | None = None,
     roi: NormalizedRoi | None = None,
+    input_size: int = DETECTOR_INPUT_SIZE,
 ) -> np.ndarray | None:
     eligible = tuple(
         detection
@@ -147,6 +156,7 @@ def crop_strongest_cat(
         detector_source.shape[1],
         detector_source.shape[0],
         roi=roi,
+        input_size=input_size,
     )
     width = x2 - x1
     height = y2 - y1

@@ -28,7 +28,11 @@ from src.inference.cat_detector import (
     OpenVinoCatDetector,
 )
 from src.inference.cat_identity import IdentityPrediction, OpenVinoCatIdentity
-from src.inference.preprocessing import crop_strongest_cat, prepare_detector_frame
+from src.inference.preprocessing import (
+    DETECTOR_INPUT_SIZE,
+    crop_strongest_cat,
+    prepare_detector_frame,
+)
 from src.recorder.automatic import AutomaticEventConfig, AutomaticEventMachine
 from src.recorder.detection_journal import DetectionJournal
 from src.recorder.events import (
@@ -130,6 +134,7 @@ def _predict_identity_if_detected(
     camera_config: CameraDetectionConfig,
     model: IdentityModel | None,
     identity_threshold: float,
+    detector_input_size: int = DETECTOR_INPUT_SIZE,
 ) -> IdentityAttempt:
     if model is None:
         return IdentityAttempt(None, "model_unavailable")
@@ -141,6 +146,7 @@ def _predict_identity_if_detected(
         min_confidence=camera_config.confidence_threshold,
         detector_frame=detector_frame,
         roi=camera_config.roi,
+        input_size=detector_input_size,
     )
     if cat_crop is None:
         return IdentityAttempt(None, "no_confident_box")
@@ -242,6 +248,7 @@ def _frame_worker(
     config_lock: threading.Lock,
     reload_stream: threading.Event,
     stop: threading.Event,
+    detector_input_size: int,
 ) -> None:
     url = settings.camera_face_rtsp if role == "face" else settings.camera_side_rtsp
     if not url:
@@ -266,7 +273,7 @@ def _frame_worker(
                     break
                 item = (
                     role,
-                    prepare_detector_frame(sample.detector),
+                    prepare_detector_frame(sample.detector, detector_input_size),
                     sample.preview,
                     sample.detector,
                     time.monotonic(),
@@ -330,6 +337,7 @@ def monitor_automatic(settings: Settings, duration_seconds: float | None) -> Non
                 config_lock,
                 reload_events[role],
                 stop,
+                detector.input_size,
             ),
             daemon=True,
             name=f"catdoor-{role}-frames",
@@ -446,6 +454,7 @@ def monitor_automatic(settings: Settings, duration_seconds: float | None) -> Non
                     box_min_confidence=camera_config.box_min_confidence,
                     detector_frame=detector_frame,
                     roi=camera_config.roi,
+                    detector_input_size=detector.input_size,
                 )
                 publish_preview(preview_path(settings.data_dir, role), annotated_frame)
             except OSError:
@@ -459,6 +468,7 @@ def monitor_automatic(settings: Settings, duration_seconds: float | None) -> Non
                 camera_config,
                 identity_models.get(role),
                 settings.identity_confidence_threshold,
+                detector.input_size,
             )
             if prediction.skipped_reason == "no_confident_box":
                 journal.write(

@@ -45,6 +45,20 @@ class OpenVinoCatDetector:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             expected_hash = str(manifest["sha256"])
             self.cat_class_id = int(manifest["cat_class_id"])
+            self.architecture = str(manifest["architecture"])
+            input_shape = manifest["input"]["shape"]
+            if (
+                not isinstance(input_shape, list)
+                or len(input_shape) != 4
+                or input_shape[0] != 1
+                or input_shape[1] != 3
+                or not isinstance(input_shape[2], int)
+                or isinstance(input_shape[2], bool)
+                or input_shape[2] != input_shape[3]
+                or input_shape[2] <= 0
+            ):
+                raise ValueError("detector input shape must be [1, 3, size, size]")
+            self.input_size = input_shape[2]
         except (FileNotFoundError, OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise DetectorError("detector_manifest_invalid") from exc
         if _sha256(model_path) != expected_hash:
@@ -81,8 +95,9 @@ class OpenVinoCatDetector:
         self._scores = self._compiled.output("scores")
 
     def detect(self, rgb_frame: np.ndarray) -> CatDetectionResult:
-        if rgb_frame.shape != (320, 320, 3):
-            raise ValueError("detector frame must have shape (320, 320, 3)")
+        expected_shape = (self.input_size, self.input_size, 3)
+        if rgb_frame.shape != expected_shape:
+            raise ValueError(f"detector frame must have shape {expected_shape}")
         tensor = np.transpose(rgb_frame, (2, 0, 1))[None].astype(np.float32) / 255.0
         result = self._compiled({self._input: tensor})
         boxes = np.asarray(result[self._boxes])
