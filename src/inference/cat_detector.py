@@ -8,6 +8,12 @@ from typing import Any
 
 import numpy as np
 
+from src.inference.detector_adapters import (
+    DetectorOutputAdapter,
+    DetectorOutputError,
+    create_output_adapter,
+)
+
 
 class DetectorError(RuntimeError):
     pass
@@ -59,7 +65,48 @@ class OpenVinoCatDetector:
             ):
                 raise ValueError("detector input shape must be [1, 3, size, size]")
             self.input_size = input_shape[2]
-        except (FileNotFoundError, OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            self._adapter: DetectorOutputAdapter = create_output_adapter(
+                manifest,
+                self.input_size,
+            )
+            input_manifest = manifest["input"]
+            self.input_name = str(input_manifest.get("name", "images"))
+            self.letterbox_value = int(input_manifest.get("letterbox_value", 0))
+            self.resize_mode = str(input_manifest.get("resize_mode", "letterbox"))
+            self.letterbox_alignment = str(
+                input_manifest.get("letterbox_alignment", "center")
+            )
+            self.channel_order = str(input_manifest.get("channel_order", "rgb"))
+            self.input_scale = float(input_manifest.get("scale", 1.0 / 255.0))
+            self.input_mean = np.asarray(
+                input_manifest.get("mean", [0.0, 0.0, 0.0]),
+                dtype=np.float32,
+            )
+            self.input_std = np.asarray(
+                input_manifest.get("std", [1.0, 1.0, 1.0]),
+                dtype=np.float32,
+            )
+            if not 0 <= self.letterbox_value <= 255:
+                raise ValueError("letterbox value must be between 0 and 255")
+            if self.resize_mode not in {"letterbox", "stretch"}:
+                raise ValueError("resize mode must be letterbox or stretch")
+            if self.letterbox_alignment not in {"center", "top_left"}:
+                raise ValueError("letterbox alignment must be center or top_left")
+            if self.channel_order not in {"rgb", "bgr"}:
+                raise ValueError("channel order must be rgb or bgr")
+            if self.input_mean.shape != (3,) or self.input_std.shape != (3,):
+                raise ValueError("input mean and std must have three values")
+            if np.any(self.input_std == 0):
+                raise ValueError("input std values must be non-zero")
+        except (
+            DetectorOutputError,
+            FileNotFoundError,
+            OSError,
+            KeyError,
+            TypeError,
+            ValueError,
+            json.JSONDecodeError,
+        ) as exc:
             raise DetectorError("detector_manifest_invalid") from exc
         if _sha256(model_path) != expected_hash:
             raise DetectorError("detector_checksum_mismatch")
@@ -89,32 +136,39 @@ class OpenVinoCatDetector:
             self.device = ",".join(self.execution_devices)
         except Exception as exc:
             raise DetectorError("detector_compile_failed") from exc
-        self._input = self._compiled.input("images")
-        self._boxes = self._compiled.output("boxes")
-        self._labels = self._compiled.output("labels")
-        self._scores = self._compiled.output("scores")
+        self._input = self._compiled.input(self.input_name)
+        self._outputs = {
+            name: self._compiled.output(name)
+            for name in manifest["outputs"]
+        }
 
     def detect(self, rgb_frame: np.ndarray) -> CatDetectionResult:
         expected_shape = (self.input_size, self.input_size, 3)
         if rgb_frame.shape != expected_shape:
             raise ValueError(f"detector frame must have shape {expected_shape}")
-        tensor = np.transpose(rgb_frame, (2, 0, 1))[None].astype(np.float32) / 255.0
+        ordered_frame = (
+            rgb_frame
+            if self.channel_order == "rgb"
+            else rgb_frame[:, :, ::-1]
+        )
+        tensor = np.transpose(ordered_frame, (2, 0, 1))[None].astype(np.float32)
+        tensor = tensor * self.input_scale
+        tensor = (
+            tensor - self.input_mean.reshape(1, 3, 1, 1)
+        ) / self.input_std.reshape(1, 3, 1, 1)
         result = self._compiled({self._input: tensor})
-        boxes = np.asarray(result[self._boxes])
-        labels = np.asarray(result[self._labels])
-        scores = np.asarray(result[self._scores])
-        cat_indices = np.flatnonzero(labels == self.cat_class_id)
+        parsed = self._adapter.parse(
+            {
+                name: np.asarray(result[output])
+                for name, output in self._outputs.items()
+            }
+        )
         detections = tuple(
             CatDetection(
-                box=(
-                    float(boxes[index][0]),
-                    float(boxes[index][1]),
-                    float(boxes[index][2]),
-                    float(boxes[index][3]),
-                ),
-                confidence=float(scores[index]),
+                box=detection.box,
+                confidence=detection.confidence,
             )
-            for index in cat_indices
+            for detection in parsed
         )
         confidence = max((detection.confidence for detection in detections), default=0.0)
         return CatDetectionResult(confidence=confidence, detections=detections)

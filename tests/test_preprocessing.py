@@ -37,6 +37,56 @@ def test_detector_preprocessing_and_mapping_support_416_input() -> None:
     assert coordinates == (160.0, 90.0, 480.0, 270.0)
 
 
+def test_detector_preprocessing_uses_model_letterbox_value() -> None:
+    frame = np.full((100, 200, 3), 50, dtype=np.uint8)
+
+    detector_frame = prepare_detector_frame(frame, 416, 114)
+
+    assert np.all(detector_frame[0] == 114)
+    assert np.all(detector_frame[208, 208] == 50)
+
+
+def test_top_left_letterbox_mapping_matches_yolox_preprocessing() -> None:
+    frame = np.full((360, 640, 3), 50, dtype=np.uint8)
+
+    detector_frame = prepare_detector_frame(
+        frame,
+        416,
+        114,
+        "letterbox",
+        "top_left",
+    )
+    coordinates = map_detector_box_to_frame(
+        (104.0, 58.5, 312.0, 175.5),
+        640,
+        360,
+        416,
+        "letterbox",
+        "top_left",
+    )
+
+    assert np.all(detector_frame[0, 0] == 50)
+    assert np.all(detector_frame[-1] == 114)
+    assert coordinates == (160.0, 90.0, 480.0, 270.0)
+
+
+def test_stretch_mapping_matches_nanodet_preprocessing() -> None:
+    frame = np.full((360, 640, 3), 50, dtype=np.uint8)
+
+    detector_frame = prepare_detector_frame(frame, 416, 0, "stretch")
+    coordinates = map_detector_box_to_frame(
+        (104.0, 104.0, 312.0, 312.0),
+        640,
+        360,
+        416,
+        "stretch",
+    )
+
+    assert detector_frame.shape == (416, 416, 3)
+    assert np.all(detector_frame == 50)
+    assert coordinates == (160.0, 90.0, 480.0, 270.0)
+
+
 def test_identity_crop_uses_strongest_box_and_twenty_percent_expansion() -> None:
     frame = np.full((360, 640, 3), 100, dtype=np.uint8)
     detections = (

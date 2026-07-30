@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 from src.inference.cat_detector import DetectorError, OpenVinoCatDetector
+from src.inference.detector_adapters import SsdLiteOutputAdapter
 
 
 class DeviceReportingCompiled:
@@ -37,9 +38,10 @@ def test_detector_rejects_checksum_mismatch(runtime_path: Path) -> None:
         json.dumps(
             {
                 "sha256": "wrong",
-                "architecture": "test",
+                "architecture": "ssdlite320_mobilenet_v3_large",
                 "cat_class_id": 17,
                 "input": {"shape": [1, 3, 320, 320]},
+                "outputs": ["boxes", "labels", "scores"],
             }
         ),
         encoding="utf-8",
@@ -61,10 +63,22 @@ def test_detector_returns_cat_boxes_and_maximum_confidence() -> None:
     detector = object.__new__(OpenVinoCatDetector)
     detector.cat_class_id = 17
     detector.input_size = 320
+    detector.channel_order = "rgb"
+    detector.input_scale = 1.0 / 255.0
+    detector.input_mean = np.zeros(3, dtype=np.float32)
+    detector.input_std = np.ones(3, dtype=np.float32)
     detector._input = "images"
-    detector._boxes = "boxes"
-    detector._labels = "labels"
-    detector._scores = "scores"
+    detector._outputs = {
+        "boxes": "boxes",
+        "labels": "labels",
+        "scores": "scores",
+    }
+    detector._adapter = SsdLiteOutputAdapter(
+        17,
+        320,
+        ("boxes", "labels", "scores"),
+        0.01,
+    )
     detector._compiled = lambda inputs: {
         "boxes": np.asarray([[10, 20, 100, 120], [1, 2, 3, 4], [30, 40, 200, 220]]),
         "labels": np.asarray([17, 1, 17]),
@@ -92,6 +106,7 @@ def test_detector_reports_actual_openvino_execution_device(
                 "architecture": "test",
                 "cat_class_id": 17,
                 "input": {"shape": [1, 3, 416, 416]},
+                "outputs": ["boxes", "labels", "scores"],
             }
         ),
         encoding="utf-8",
@@ -106,11 +121,18 @@ def test_detector_reports_actual_openvino_execution_device(
     )
     monkeypatch.setitem(sys.modules, "openvino", SimpleNamespace(Core=lambda: core))
 
+    manifest_path = model.with_suffix(".json")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["architecture"] = "ssdlite320_mobilenet_v3_large"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
     detector = OpenVinoCatDetector(model, "GPU")
 
     assert detector.execution_devices == ("GPU.0",)
     assert detector.device == "GPU.0"
     assert detector.input_size == 416
+    assert detector.resize_mode == "letterbox"
+    assert detector.letterbox_alignment == "center"
     assert compile_calls[0][1:] == (
         "GPU",
         {
@@ -124,10 +146,22 @@ def test_detector_accepts_manifest_declared_416_frame() -> None:
     detector = object.__new__(OpenVinoCatDetector)
     detector.cat_class_id = 17
     detector.input_size = 416
+    detector.channel_order = "rgb"
+    detector.input_scale = 1.0 / 255.0
+    detector.input_mean = np.zeros(3, dtype=np.float32)
+    detector.input_std = np.ones(3, dtype=np.float32)
     detector._input = "images"
-    detector._boxes = "boxes"
-    detector._labels = "labels"
-    detector._scores = "scores"
+    detector._outputs = {
+        "boxes": "boxes",
+        "labels": "labels",
+        "scores": "scores",
+    }
+    detector._adapter = SsdLiteOutputAdapter(
+        17,
+        416,
+        ("boxes", "labels", "scores"),
+        0.01,
+    )
     detector._compiled = lambda inputs: {
         "boxes": np.asarray([[10, 20, 100, 120]]),
         "labels": np.asarray([17]),

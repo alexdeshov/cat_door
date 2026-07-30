@@ -33,6 +33,8 @@ def annotate_detections(
     detector_frame: np.ndarray | None = None,
     roi: NormalizedRoi | None = None,
     detector_input_size: int = DETECTOR_INPUT_SIZE,
+    detector_resize_mode: str = "letterbox",
+    detector_letterbox_alignment: str = "center",
 ) -> np.ndarray:
     image = Image.fromarray(crop_frame_padding(frame), mode="RGB")
     detector_source = crop_frame_padding(
@@ -50,6 +52,8 @@ def annotate_detections(
             detector_source.shape[0],
             roi=roi,
             input_size=detector_input_size,
+            resize_mode=detector_resize_mode,
+            letterbox_alignment=detector_letterbox_alignment,
         )
         color = "#22c55e" if detection.confidence >= event_threshold else "#f59e0b"
         draw.rectangle(coordinates, outline=color, width=3)
