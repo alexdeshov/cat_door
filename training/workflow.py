@@ -1,6 +1,7 @@
 import json
 import shutil
 import subprocess
+import threading
 from collections import defaultdict
 from collections.abc import Sequence
 from datetime import UTC, datetime
@@ -30,6 +31,7 @@ from src.inference.preprocessing import (
 from training.dataset import DatasetItem, assign_splits, validate_manifest, write_manifest
 
 USABLE_LABELS = {"known_cat", "foreign_cat"}
+_STATUS_LOCK = threading.RLock()
 
 
 class CatDetector(Protocol):
@@ -303,7 +305,7 @@ def create_macbook_export(
     return archive
 
 
-def write_status(path: Path, **values: object) -> None:
+def _write_status_unlocked(path: Path, values: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {"updated_at": datetime.now(UTC).isoformat(), **values}
     temporary = path.with_suffix(".tmp")
@@ -312,3 +314,46 @@ def write_status(path: Path, **values: object) -> None:
         encoding="utf-8",
     )
     temporary.replace(path)
+
+
+def write_status(path: Path, **values: object) -> None:
+    with _STATUS_LOCK:
+        _write_status_unlocked(path, values)
+
+
+class StatusHeartbeat:
+    def __init__(self, path: Path, *, interval_seconds: float = 30.0) -> None:
+        self._path = path
+        self._interval_seconds = interval_seconds
+        self._stop = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run,
+            daemon=True,
+            name=f"catdoor-status-heartbeat-{path.parent.name}",
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join()
+
+    def _run(self) -> None:
+        while not self._stop.wait(self._interval_seconds):
+            self.refresh()
+
+    def refresh(self) -> None:
+        with _STATUS_LOCK:
+            try:
+                payload = json.loads(self._path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                return
+            if not isinstance(payload, dict):
+                return
+            values = {
+                str(key): value
+                for key, value in payload.items()
+                if key != "updated_at"
+            }
+            _write_status_unlocked(self._path, values)

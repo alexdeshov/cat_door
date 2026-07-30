@@ -1,4 +1,5 @@
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -330,6 +331,72 @@ def test_starts_detector_only_evaluation_without_identity_models(
         assert run.face_model_version_id is None
 
 
+def test_stale_evaluation_is_failed_and_does_not_block_new_run(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    models = runtime_path / "models"
+    models.mkdir()
+    detector = models / "candidate.onnx"
+    detector.write_bytes(b"candidate")
+    detector.with_suffix(".json").write_text(
+        '{"architecture":"test","cat_class_id":15}',
+        encoding="utf-8",
+    )
+
+    class FakeProcess:
+        pid = 5432
+
+    monkeypatch.setattr(
+        "src.web.app.subprocess.Popen",
+        lambda *args, **kwargs: FakeProcess(),
+    )
+    settings = Settings(
+        data_dir=runtime_path,
+        database_path=runtime_path / "test.sqlite3",
+        detector_model_path=detector,
+    )
+    client = TestClient(create_app(settings))
+    old_heartbeat = datetime.now(UTC) - timedelta(minutes=11)
+    factory = client.app.state.session_factory
+    with factory() as session:
+        session.add(
+            EvaluationRun(
+                created_at=old_heartbeat,
+                run_kind="detector",
+                filter_json="{}",
+                status="running",
+            )
+        )
+        session.commit()
+    old_status = runtime_path / "evaluations" / "00000001" / "status.json"
+    old_status.parent.mkdir(parents=True)
+    old_status.write_text(
+        json.dumps(
+            {
+                "updated_at": old_heartbeat.isoformat(),
+                "state": "running",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    response = client.post(
+        "/api/evaluations",
+        json={"run_kind": "detector", "labels": ["known_cat"]},
+    )
+
+    assert response.status_code == 202
+    assert response.json()["run_id"] == 2
+    with factory() as session:
+        stale_run = session.get(EvaluationRun, 1)
+        assert stale_run is not None
+        assert stale_run.status == "failed"
+        assert stale_run.completed_at is not None
+        assert "Прерван без завершения" in str(stale_run.error_message)
+    assert json.loads(old_status.read_text(encoding="utf-8"))["state"] == "failed"
+
+
 def test_evaluation_rejects_path_outside_models(
     runtime_path: Path,
     monkeypatch,
@@ -633,6 +700,47 @@ def test_start_local_training_is_detached(runtime_path: Path, monkeypatch) -> No
     assert response.json()["pid"] == 4321
     status = client.get("/api/training/local/status")
     assert status.json()["state"] == "starting"
+
+
+def test_stale_local_training_does_not_block_new_run(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    client = make_client(runtime_path, monkeypatch)
+    stale_status = (
+        runtime_path
+        / "training"
+        / "local"
+        / "20000101-000000-stale"
+        / "status.json"
+    )
+    stale_status.parent.mkdir(parents=True)
+    stale_status.write_text(
+        json.dumps(
+            {
+                "updated_at": (
+                    datetime.now(UTC) - timedelta(minutes=11)
+                ).isoformat(),
+                "state": "training",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class FakeProcess:
+        pid = 4321
+
+    monkeypatch.setattr(
+        "src.web.app.subprocess.Popen",
+        lambda *args, **kwargs: FakeProcess(),
+    )
+
+    response = client.post("/api/training/local/start")
+
+    assert response.status_code == 202
+    stale_payload = json.loads(stale_status.read_text(encoding="utf-8"))
+    assert stale_payload["state"] == "failed"
+    assert "Прерван без завершения" in stale_payload["message"]
 
 
 def test_media_path_cannot_escape_data_root(runtime_path: Path, monkeypatch) -> None:
