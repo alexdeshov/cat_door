@@ -1,0 +1,3 @@
+{"event_id":"event-001","captured_at":"2026-07-27T10:00:00+03:00","view":"face","image_path":"event-001/face_best_01.jpg","label":"cat-id-1","split":null}
+{"event_id":"event-001","captured_at":"2026-07-27T10:00:00+03:00","view":"face","image_path":"event-001/face_best_02.jpg","label":"cat-id-1","split":null}
+{"event_id":"event-002","captured_at":"2026-07-28T11:00:00+03:00","view":"face","image_path":"event-002/face_best_01.jpg","label":"__foreign__","split":null}
