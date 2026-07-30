@@ -6,8 +6,10 @@ import pytest
 
 from src.common.detection_config import CameraDetectionConfig
 from src.common.settings import Settings
+from src.inference.cat_identity import IdentityPrediction
 from src.recorder.app import (
     CameraConfirmationTracker,
+    _predict_identity_if_detected,
     _put_latest,
     build_automatic_config,
     publish_heartbeat,
@@ -73,3 +75,45 @@ def test_camera_confirmation_tracker_uses_own_threshold_and_window() -> None:
     assert tracker.observe(0.31) is False
     assert tracker.observe(0.10) is False
     assert tracker.observe(0.40) is True
+
+
+class RecordingIdentityModel:
+    def __init__(self) -> None:
+        self.calls: list[tuple[object, float]] = []
+
+    def predict(self, frame: object, threshold: float) -> IdentityPrediction:
+        self.calls.append((frame, threshold))
+        return IdentityPrediction(name="Барсик", confidence=0.91)
+
+
+def test_identity_uses_per_camera_threshold_below_legacy_global_threshold() -> None:
+    config = CameraDetectionConfig(
+        confidence_threshold=0.30,
+        box_min_confidence=0.15,
+        confirmation_frames=2,
+        window_frames=5,
+    )
+    model = RecordingIdentityModel()
+    frame = object()
+    confidence = 0.40
+    assert confidence < Settings().detection_confidence_threshold
+
+    prediction = _predict_identity_if_detected(frame, confidence, config, model, 0.80)
+
+    assert prediction == IdentityPrediction(name="Барсик", confidence=0.91)
+    assert model.calls == [(frame, 0.80)]
+
+
+def test_identity_is_not_called_below_per_camera_threshold() -> None:
+    config = CameraDetectionConfig(
+        confidence_threshold=0.30,
+        box_min_confidence=0.15,
+        confirmation_frames=2,
+        window_frames=5,
+    )
+    model = RecordingIdentityModel()
+
+    prediction = _predict_identity_if_detected(object(), 0.29, config, model, 0.80)
+
+    assert prediction is None
+    assert model.calls == []

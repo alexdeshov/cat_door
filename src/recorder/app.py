@@ -7,7 +7,7 @@ import time
 from collections import deque
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -19,7 +19,7 @@ from src.common.detection_config import (
 )
 from src.common.settings import Settings
 from src.inference.cat_detector import DetectorError, OpenVinoCatDetector
-from src.inference.cat_identity import OpenVinoCatIdentity
+from src.inference.cat_identity import IdentityPrediction, OpenVinoCatIdentity
 from src.recorder.automatic import AutomaticEventConfig, AutomaticEventMachine
 from src.recorder.detection_journal import DetectionJournal
 from src.recorder.events import AutomaticEventRequest, persist_automatic_event
@@ -58,6 +58,22 @@ class CameraConfirmationTracker:
     def observe(self, confidence: float) -> bool:
         self._window.append(confidence >= self.config.confidence_threshold)
         return sum(self._window) >= self.config.confirmation_frames
+
+
+class IdentityModel(Protocol):
+    def predict(self, frame: Any, threshold: float) -> IdentityPrediction: ...
+
+
+def _predict_identity_if_detected(
+    frame: Any,
+    confidence: float,
+    camera_config: CameraDetectionConfig,
+    model: IdentityModel | None,
+    identity_threshold: float,
+) -> IdentityPrediction | None:
+    if model is None or confidence < camera_config.confidence_threshold:
+        return None
+    return model.predict(frame, identity_threshold)
 
 
 def publish_heartbeat(settings: Settings) -> None:
@@ -217,11 +233,14 @@ def monitor_automatic(settings: Settings, duration_seconds: float | None) -> Non
                 pass
             previous_state = machine.state.value
             confidences[role] = round(confidence, 4)
-            if confidence >= settings.detection_confidence_threshold and role in identity_models:
-                prediction = identity_models[role].predict(
-                    frame,
-                    settings.identity_confidence_threshold,
-                )
+            prediction = _predict_identity_if_detected(
+                frame,
+                confidence,
+                camera_config,
+                identity_models.get(role),
+                settings.identity_confidence_threshold,
+            )
+            if prediction is not None:
                 identity_predictions[role] = {
                     "name": prediction.name,
                     "confidence": round(prediction.confidence, 4),
