@@ -1,10 +1,25 @@
+import hashlib
 import json
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
 from src.inference.cat_detector import DetectorError, OpenVinoCatDetector
+
+
+class DeviceReportingCompiled:
+    def input(self, name: str) -> str:
+        return name
+
+    def output(self, name: str) -> str:
+        return name
+
+    def get_property(self, name: str) -> list[str]:
+        assert name == "EXECUTION_DEVICES"
+        return ["GPU.0"]
 
 
 def test_detector_rejects_missing_manifest(runtime_path: Path) -> None:
@@ -52,3 +67,42 @@ def test_detector_returns_cat_boxes_and_maximum_confidence() -> None:
     assert result.confidence == pytest.approx(0.8)
     assert len(result.detections) == 2
     assert result.detections[0].box == (10.0, 20.0, 100.0, 120.0)
+
+
+def test_detector_reports_actual_openvino_execution_device(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    payload = b"synthetic-model"
+    model = runtime_path / "detector.onnx"
+    model.write_bytes(payload)
+    model.with_suffix(".json").write_text(
+        json.dumps(
+            {
+                "sha256": hashlib.sha256(payload).hexdigest(),
+                "cat_class_id": 17,
+            }
+        ),
+        encoding="utf-8",
+    )
+    compile_calls: list[tuple[object, str, dict[str, str]]] = []
+    compiled = DeviceReportingCompiled()
+    core = SimpleNamespace(
+        read_model=lambda _path: object(),
+        compile_model=lambda loaded, device, config: (
+            compile_calls.append((loaded, device, config)) or compiled
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "openvino", SimpleNamespace(Core=lambda: core))
+
+    detector = OpenVinoCatDetector(model, "GPU")
+
+    assert detector.execution_devices == ("GPU.0",)
+    assert detector.device == "GPU.0"
+    assert compile_calls[0][1:] == (
+        "GPU",
+        {
+            "PERFORMANCE_HINT": "LATENCY",
+            "INFERENCE_PRECISION_HINT": "f16",
+        },
+    )

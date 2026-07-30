@@ -2,16 +2,37 @@ import json
 import shutil
 import subprocess
 from collections import defaultdict
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Protocol
 from uuid import uuid4
 
+import numpy as np
+from PIL import Image
 from sqlalchemy import select
 
 from src.common.database import Event, create_session_factory
+from src.common.detection_config import (
+    DetectionConfig,
+    DetectorRoi,
+    detection_config_path,
+    load_detection_config,
+)
+from src.common.settings import Settings
+from src.inference.cat_detector import CatDetectionResult, OpenVinoCatDetector
+from src.inference.preprocessing import (
+    crop_normalized_roi,
+    crop_strongest_cat,
+    prepare_detector_frame,
+)
 from training.dataset import DatasetItem, assign_splits, validate_manifest, write_manifest
 
 USABLE_LABELS = {"known_cat", "foreign_cat"}
+
+
+class CatDetector(Protocol):
+    def detect(self, rgb_frame: np.ndarray) -> CatDetectionResult: ...
 
 
 def extract_frames(
@@ -56,12 +77,47 @@ def extract_frames(
     return frames
 
 
+def crop_extracted_frames(
+    frames: Sequence[Path],
+    detector: CatDetector,
+    *,
+    confidence_threshold: float,
+    roi: DetectorRoi | None,
+) -> tuple[list[Path], int]:
+    accepted: list[Path] = []
+    rejected = 0
+    for frame_path in frames:
+        with Image.open(frame_path) as image:
+            frame = np.asarray(image.convert("RGB"), dtype=np.uint8)
+        detector_frame = crop_normalized_roi(frame, roi)
+        detection = detector.detect(prepare_detector_frame(detector_frame))
+        crop = crop_strongest_cat(
+            frame,
+            detection.detections,
+            min_confidence=confidence_threshold,
+            detector_frame=detector_frame,
+            roi=roi,
+        )
+        if crop is None:
+            frame_path.unlink(missing_ok=True)
+            rejected += 1
+            continue
+        Image.fromarray(crop, mode="RGB").save(frame_path, format="JPEG", quality=95)
+        accepted.append(frame_path)
+    return accepted, rejected
+
+
 def build_dataset(
     database_path: Path,
     data_dir: Path,
     ffmpeg_path: str,
     target: str,
     destination: Path,
+    *,
+    detector_model_path: Path,
+    detector_device: str,
+    detector: CatDetector | None = None,
+    default_detection_config: DetectionConfig | None = None,
 ) -> tuple[Path, dict[str, object]]:
     if target not in {"local", "macbook"}:
         raise ValueError("unsupported training target")
@@ -79,7 +135,24 @@ def build_dataset(
     if not events:
         raise ValueError(f"no events selected for {target} training")
 
+    defaults = default_detection_config or DetectionConfig.from_settings(
+        Settings(data_dir=data_dir)
+    )
+    runtime_config = load_detection_config(
+        detection_config_path(data_dir),
+        defaults,
+    )
+    active_detector = detector or OpenVinoCatDetector(
+        detector_model_path,
+        detector_device,
+    )
     items: list[DatasetItem] = []
+    crop_by_view: dict[str, dict[str, int]] = {
+        "face": {"included": 0, "excluded_no_confident_box": 0},
+        "side": {"included": 0, "excluded_no_confident_box": 0},
+    }
+    crops_included = 0
+    crops_rejected = 0
     root = data_dir.resolve()
     for event in events:
         label = event.cat_name if event.label == "known_cat" else "__foreign__"
@@ -101,7 +174,19 @@ def build_dataset(
                 event_dir / "frame-%02d.jpg",
                 rotate_180=True,
             )
-            for frame in frames:
+            camera_config = getattr(runtime_config, view)
+            cropped_frames, rejected = crop_extracted_frames(
+                frames,
+                active_detector,
+                confidence_threshold=camera_config.confidence_threshold,
+                roi=camera_config.roi,
+            )
+            view_report = crop_by_view[view]
+            view_report["included"] += len(cropped_frames)
+            view_report["excluded_no_confident_box"] += rejected
+            crops_included += len(cropped_frames)
+            crops_rejected += rejected
+            for frame in cropped_frames:
                 items.append(
                     DatasetItem(
                         event_id=str(event.id),
@@ -112,8 +197,27 @@ def build_dataset(
                     )
                 )
 
+    crop_report: dict[str, object] = {
+        "included": crops_included,
+        "excluded_no_confident_box": crops_rejected,
+        "by_view": crop_by_view,
+    }
     if not items:
-        raise ValueError("selected events do not contain usable media")
+        empty_report = {
+            "items": 0,
+            "events": 0,
+            "labels": {},
+            "views": {},
+            "splits": {},
+            "detector_crops": crop_report,
+            "warnings": ["Детектор не нашёл уверенную рамку кошки ни на одном кадре"],
+            "ready_for_production": False,
+        }
+        (destination / "dataset-report.json").write_text(
+            json.dumps(empty_report, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        raise ValueError("selected events do not contain confident cat crops")
     items = assign_splits(items)
     manifest = destination / "dataset.jsonl"
     write_manifest(items, manifest)
@@ -140,6 +244,7 @@ def build_dataset(
     report.update(
         {
             "events_per_label": event_counts,
+            "detector_crops": crop_report,
             "warnings": warnings,
             "ready_for_production": not warnings,
         }
@@ -155,12 +260,24 @@ def create_macbook_export(
     database_path: Path,
     data_dir: Path,
     ffmpeg_path: str,
+    detector_model_path: Path,
+    detector_device: str,
+    default_detection_config: DetectionConfig,
 ) -> Path:
     exports_root = data_dir / "exports"
     exports_root.mkdir(parents=True, exist_ok=True)
     name = f"macbook-{datetime.now(UTC):%Y%m%d-%H%M%S}-{uuid4().hex[:8]}"
     work_dir = exports_root / name
-    build_dataset(database_path, data_dir, ffmpeg_path, "macbook", work_dir)
+    build_dataset(
+        database_path,
+        data_dir,
+        ffmpeg_path,
+        "macbook",
+        work_dir,
+        detector_model_path=detector_model_path,
+        detector_device=detector_device,
+        default_detection_config=default_detection_config,
+    )
     archive = Path(shutil.make_archive(str(exports_root / name), "zip", work_dir))
     shutil.rmtree(work_dir)
     return archive

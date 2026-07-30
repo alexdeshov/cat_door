@@ -38,3 +38,6 @@
 
 Локальное обучение требует как минимум двух подтверждённых домашних котов,
 непустых train и validation split и пригодных кадров выбранного ракурса.
+Для fine-tuning также требуются официальные ImageNet-веса MobileNetV3 Small:
+они берутся из cache torchvision или из пути
+`CATDOOR_IDENTITY_PRETRAINED_WEIGHTS_PATH`. Веса хранятся вне Git.

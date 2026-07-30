@@ -6,9 +6,13 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from PIL import Image
 
 from src.inference.cat_detector import DetectorError
+from src.inference.preprocessing import (
+    IDENTITY_NORMALIZATION_MEAN,
+    IDENTITY_NORMALIZATION_STD,
+    prepare_identity_tensor,
+)
 
 
 @dataclass(frozen=True)
@@ -26,11 +30,11 @@ class OpenVinoCatIdentity:
         self.labels = [str(label) for label in metadata["labels"]]
         self.image_size = int(metadata.get("image_size", 160))
         self.mean = np.asarray(
-            metadata.get("normalization_mean", [0.485, 0.456, 0.406]),
+            metadata.get("normalization_mean", IDENTITY_NORMALIZATION_MEAN),
             dtype=np.float32,
         ).reshape(1, 3, 1, 1)
         self.std = np.asarray(
-            metadata.get("normalization_std", [0.229, 0.224, 0.225]),
+            metadata.get("normalization_std", IDENTITY_NORMALIZATION_STD),
             dtype=np.float32,
         ).reshape(1, 3, 1, 1)
         try:
@@ -43,9 +47,13 @@ class OpenVinoCatIdentity:
         self._output = compiled.output(0)
 
     def predict(self, frame: np.ndarray, threshold: float) -> IdentityPrediction:
-        image = Image.fromarray(frame).resize((self.image_size, self.image_size))
-        tensor = np.asarray(image, dtype=np.float32).transpose(2, 0, 1)[None, ...] / 255.0
-        logits = np.asarray(self._compiled([(tensor - self.mean) / self.std])[self._output])[0]
+        tensor = prepare_identity_tensor(
+            frame,
+            self.image_size,
+            mean=self.mean,
+            std=self.std,
+        )
+        logits = np.asarray(self._compiled([tensor])[self._output])[0]
         shifted = logits - logits.max()
         probabilities = np.exp(shifted) / np.exp(shifted).sum()
         index = int(probabilities.argmax())

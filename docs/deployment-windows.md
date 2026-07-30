@@ -15,6 +15,46 @@
 
 Предпочтительно OpenVINO. ONNX Runtime используется как резервный вариант.
 
+## Явный запуск OpenVINO на Iris Plus 655
+
+Сначала проверить, что установленный OpenVINO и драйвер Intel видят iGPU:
+
+```powershell
+.\.venv\Scripts\python.exe -c "import openvino as ov; print(ov.Core().available_devices)"
+```
+
+В списке должно присутствовать `GPU`. Само наличие устройства ещё не
+подтверждает, что драйвер корректно выполнит модель. Только после успешного
+smoke-теста явно задать в локальном `.env`:
+
+```dotenv
+CATDOOR_DETECTOR_DEVICE=GPU
+```
+
+После перезапуска recorder компилирует детектор именно для `GPU` с
+`PERFORMANCE_HINT=LATENCY` и `INFERENCE_PRECISION_HINT=f16`. Проверить без
+записи событий:
+
+```powershell
+.\.venv\Scripts\python.exe -m src.recorder.app --probe-seconds 10
+Invoke-RestMethod http://127.0.0.1:8080/api/recorder/status |
+  Select-Object detector_device_requested, detector_device_actual
+```
+
+При успешном запуске ожидается: запрошено `GPU`, фактически используется
+`GPU.0`. Эти поля также видны в админке. Recorder не переключается на CPU
+автоматически: если GPU недоступен или компиляция не удалась, статус переходит в
+ошибку. Для возврата на CPU нужно явно установить
+`CATDOOR_DETECTOR_DEVICE=CPU` и перезапустить recorder.
+
+Проверка 2026-07-30 на текущей Iris Plus 655 обнаружила `CPU` и `GPU`, а
+компиляция FP16 сообщила `GPU.0`, однако первый реальный инференс не завершился
+за 120 секунд и драйвер создал `kernel.errors.txt` с ошибками CISA. Поэтому
+рабочая конфигурация должна пока оставаться
+`CATDOOR_DETECTOR_DEVICE=CPU`. GPU нельзя считать принятым до обновления
+драйвера/OpenVINO и успешного повторного bounded smoke-теста с нормальной
+задержкой. Служебный `kernel.errors.txt` в Git не добавляется.
+
 ## Локальный фоновый запуск
 
 Web и recorder можно запускать как отделённые процессы:

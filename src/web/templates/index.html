@@ -100,6 +100,10 @@
         {{ recorder_status.frames_processed.face }}/{{ recorder_status.frames_processed.side }}.
         Уверенность cat:
         {{ recorder_status.confidences.face }}/{{ recorder_status.confidences.side }}.
+        {% if recorder_status.detector_device_actual %}
+          OpenVINO: {{ recorder_status.detector_device_actual }}
+          (запрошено {{ recorder_status.detector_device_requested }}).
+        {% endif %}
       </p>
       {% if recorder_status.identity %}
         <p>
@@ -193,6 +197,44 @@
         <input id="detection-{{ role }}-window-frames"
           type="number" min="1" max="30"
           value="{{ camera_config.window_frames }}">
+      </label>
+      <label>
+        <span class="setting-title">Кадров детектора в секунду
+          <span class="setting-help" tabindex="0" role="note"
+            aria-label="Подсказка: частота детектора"
+            data-tooltip="Сколько кадров этой камеры анализировать каждую секунду. Больше — выше шанс поймать быстро проходящего кота, но выше нагрузка на процессор. Cute 2 обычно полезны 6–8 FPS, широкоугольной камере достаточно 3 FPS.">?</span>
+        </span>
+        <input id="detection-{{ role }}-sample-fps"
+          type="number" min="0.1" max="10" step="0.1"
+          value="{{ camera_config.sample_fps }}">
+      </label>
+      <label>
+        <span class="setting-title">Использовать ROI
+          <span class="setting-help" tabindex="0" role="note"
+            aria-label="Подсказка: область интереса"
+            data-tooltip="ROI обрезает для детектора только полезную часть кадра до масштабирования, поэтому кот становится крупнее. Превью и записи остаются полнокадровыми. Координаты задаются долями от 0 до 1.">?</span>
+        </span>
+        <input id="detection-{{ role }}-roi-enabled" type="checkbox"
+          {{ "checked" if camera_config.roi else "" }}>
+      </label>
+      {% set roi = camera_config.roi %}
+      <label>ROI X
+        <input id="detection-{{ role }}-roi-x" type="number" min="0" max="0.99" step="0.01"
+          value="{{ roi.x if roi else 0 }}">
+      </label>
+      <label>ROI Y
+        <input id="detection-{{ role }}-roi-y" type="number" min="0" max="0.99" step="0.01"
+          value="{{ roi.y if roi else 0 }}">
+      </label>
+      <label>ROI ширина
+        <input id="detection-{{ role }}-roi-width"
+          type="number" min="0.01" max="1" step="0.01"
+          value="{{ roi.width if roi else 1 }}">
+      </label>
+      <label>ROI высота
+        <input id="detection-{{ role }}-roi-height"
+          type="number" min="0.01" max="1" step="0.01"
+          value="{{ roi.height if roi else 1 }}">
       </label>
     </div>
     {% endfor %}
@@ -506,12 +548,22 @@
     const button = event.currentTarget;
     const status = document.querySelector("#detection-settings-status");
     const number = id => Number(document.querySelector(id).value);
-    const cameraSettings = role => ({
-      confidence_threshold: number(`#detection-${role}-confidence-threshold`),
-      box_min_confidence: number(`#detection-${role}-box-min-confidence`),
-      confirmation_frames: number(`#detection-${role}-confirmation-frames`),
-      window_frames: number(`#detection-${role}-window-frames`)
-    });
+    const cameraSettings = role => {
+      const roiEnabled = document.querySelector(`#detection-${role}-roi-enabled`).checked;
+      return {
+        confidence_threshold: number(`#detection-${role}-confidence-threshold`),
+        box_min_confidence: number(`#detection-${role}-box-min-confidence`),
+        confirmation_frames: number(`#detection-${role}-confirmation-frames`),
+        window_frames: number(`#detection-${role}-window-frames`),
+        sample_fps: number(`#detection-${role}-sample-fps`),
+        roi: roiEnabled ? {
+          x: number(`#detection-${role}-roi-x`),
+          y: number(`#detection-${role}-roi-y`),
+          width: number(`#detection-${role}-roi-width`),
+          height: number(`#detection-${role}-roi-height`)
+        } : null
+      };
+    };
     const payload = {
       face: cameraSettings("face"),
       side: cameraSettings("side"),
@@ -744,9 +796,14 @@
       const camera = result.initiating_camera
         ? ` · камера: ${result.initiating_camera}`
         : "";
+      const device = result.detector_device_actual
+        ? ` · OpenVINO: ${result.detector_device_actual}` +
+          ` (запрошено ${result.detector_device_requested})`
+        : "";
       details.textContent =
         `Кадры face/side: ${frames.face ?? 0}/${frames.side ?? 0}` +
-        ` · confidence: ${confidences.face ?? 0}/${confidences.side ?? 0}${camera}`;
+        ` · confidence: ${confidences.face ?? 0}/${confidences.side ?? 0}` +
+        `${camera}${device}`;
       const identities = Object.values(result.identity || {});
       if (!result.stale && identities.length) {
         const known = identities

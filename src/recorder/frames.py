@@ -3,20 +3,25 @@ from __future__ import annotations
 import subprocess
 import time
 from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, cast
 
 import numpy as np
-from PIL import Image
 
+from src.inference.preprocessing import NormalizedRoi
 from src.recorder.ffmpeg import _base_input
-from src.recorder.preview import crop_padding
 from src.recorder.ring import prune_segments
 
 FRAME_WIDTH = 640
 FRAME_HEIGHT = 360
 FRAME_BYTES = FRAME_WIDTH * FRAME_HEIGHT * 3
-DETECTOR_SIZE = 320
+
+
+@dataclass(frozen=True)
+class FrameSample:
+    preview: np.ndarray
+    detector: np.ndarray
 
 
 def _read_exact(stream: BinaryIO, size: int) -> bytes:
@@ -29,15 +34,25 @@ def _read_exact(stream: BinaryIO, size: int) -> bytes:
     return bytes(chunks)
 
 
-def prepare_detector_frame(frame: np.ndarray) -> np.ndarray:
-    image = Image.fromarray(crop_padding(frame), mode="RGB")
-    image.thumbnail((DETECTOR_SIZE, DETECTOR_SIZE), Image.Resampling.BILINEAR)
-    detector_image = Image.new("RGB", (DETECTOR_SIZE, DETECTOR_SIZE))
-    detector_image.paste(
-        image,
-        ((DETECTOR_SIZE - image.width) // 2, (DETECTOR_SIZE - image.height) // 2),
+def _scale_filter() -> str:
+    return (
+        f"scale={FRAME_WIDTH}:{FRAME_HEIGHT}:force_original_aspect_ratio=decrease,"
+        f"pad={FRAME_WIDTH}:{FRAME_HEIGHT}:(ow-iw)/2:(oh-ih)/2"
     )
-    return np.asarray(detector_image, dtype=np.uint8)
+
+
+def _roi_filter(fps: float, roi: NormalizedRoi) -> str:
+    crop = (
+        f"crop=iw*{roi.width:g}:ih*{roi.height:g}:"
+        f"iw*{roi.x:g}:ih*{roi.y:g}"
+    )
+    scale = _scale_filter()
+    return (
+        f"[0:v:0]fps={fps},hflip,vflip,split=2[preview_source][detector_source];"
+        f"[preview_source]{scale}[preview];"
+        f"[detector_source]{crop},{scale}[detector];"
+        "[preview][detector]hstack=inputs=2[combined]"
+    )
 
 
 def rgb_frame_stream(
@@ -48,7 +63,8 @@ def rgb_frame_stream(
     segment_directory: Path | None = None,
     segment_seconds: int = 2,
     retention_seconds: int = 180,
-) -> Iterator[np.ndarray]:
+    roi: NormalizedRoi | None = None,
+) -> Iterator[FrameSample]:
     command = [
         *_base_input(ffmpeg_path, rtsp_url),
     ]
@@ -72,17 +88,30 @@ def rgb_frame_stream(
                 str(segment_directory / "%Y%m%dT%H%M%S.mp4"),
             ]
         )
+    if roi is None:
+        command.extend(
+            [
+                "-map",
+                "0:v:0",
+                "-vf",
+                f"fps={fps},{_scale_filter()},hflip,vflip",
+            ]
+        )
+        frame_bytes = FRAME_BYTES
+        output_width = FRAME_WIDTH
+    else:
+        command.extend(
+            [
+                "-filter_complex",
+                _roi_filter(fps, roi),
+                "-map",
+                "[combined]",
+            ]
+        )
+        frame_bytes = FRAME_BYTES * 2
+        output_width = FRAME_WIDTH * 2
     command.extend(
         [
-            "-map",
-            "0:v:0",
-            "-vf",
-            (
-                f"fps={fps},"
-                f"scale={FRAME_WIDTH}:{FRAME_HEIGHT}:force_original_aspect_ratio=decrease,"
-                f"pad={FRAME_WIDTH}:{FRAME_HEIGHT}:(ow-iw)/2:(oh-ih)/2,"
-                "hflip,vflip"
-            ),
             "-an",
             "-pix_fmt",
             "rgb24",
@@ -102,16 +131,23 @@ def rgb_frame_stream(
         stream = cast(BinaryIO, process.stdout)
         last_prune_at = 0.0
         while True:
-            frame = _read_exact(stream, FRAME_BYTES)
-            if len(frame) != FRAME_BYTES:
+            frame = _read_exact(stream, frame_bytes)
+            if len(frame) != frame_bytes:
                 return
             now = time.monotonic()
             if segment_directory is not None and now - last_prune_at >= 5:
                 prune_segments(segment_directory, retention_seconds)
                 last_prune_at = now
-            yield np.frombuffer(frame, dtype=np.uint8).reshape(
-                (FRAME_HEIGHT, FRAME_WIDTH, 3)
+            decoded = np.frombuffer(frame, dtype=np.uint8).reshape(
+                (FRAME_HEIGHT, output_width, 3)
             )
+            if roi is None:
+                yield FrameSample(preview=decoded, detector=decoded)
+            else:
+                yield FrameSample(
+                    preview=np.ascontiguousarray(decoded[:, :FRAME_WIDTH, :]),
+                    detector=np.ascontiguousarray(decoded[:, FRAME_WIDTH:, :]),
+                )
     finally:
         if process.stdout:
             process.stdout.close()

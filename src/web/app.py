@@ -324,6 +324,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 settings.resolved_database_path,
                 settings.data_dir,
                 settings.ffmpeg_path,
+                settings.detector_model_path,
+                settings.detector_device,
+                DetectionConfig.from_settings(settings),
             )
         except (OSError, RuntimeError, ValueError) as exc:
             raise HTTPException(422, str(exc)) from exc
@@ -358,9 +361,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             str(settings.data_dir.resolve()),
             settings.ffmpeg_path,
             str(output_dir.resolve()),
+            "--detector-model",
+            str(settings.detector_model_path.resolve()),
+            "--detector-device",
+            settings.detector_device,
             "--epochs",
             str(settings.local_training_epochs),
         ]
+        if settings.identity_pretrained_weights_path is not None:
+            command.extend(
+                [
+                    "--weights-path",
+                    str(settings.identity_pretrained_weights_path.resolve()),
+                ]
+            )
         creationflags = 0
         if sys.platform == "win32":
             creationflags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS

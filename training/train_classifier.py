@@ -4,7 +4,86 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from src.inference.preprocessing import (
+    IDENTITY_NORMALIZATION_MEAN,
+    IDENTITY_NORMALIZATION_STD,
+)
 from training.dataset import DatasetItem, load_manifest
+
+
+class PretrainedWeightsError(RuntimeError):
+    pass
+
+
+def build_transforms(image_size: int) -> tuple[Any, Any]:
+    from torchvision import transforms
+
+    training_transform = transforms.Compose(
+        [
+            transforms.RandomResizedCrop(
+                image_size,
+                scale=(0.80, 1.0),
+                ratio=(0.90, 1.10),
+            ),
+            transforms.RandomRotation(7),
+            transforms.ColorJitter(brightness=0.2, contrast=0.2),
+            transforms.ToTensor(),
+            transforms.Normalize(
+                IDENTITY_NORMALIZATION_MEAN,
+                IDENTITY_NORMALIZATION_STD,
+            ),
+        ]
+    )
+    validation_transform = transforms.Compose(
+        [
+            transforms.Resize((image_size, image_size)),
+            transforms.ToTensor(),
+            transforms.Normalize(
+                IDENTITY_NORMALIZATION_MEAN,
+                IDENTITY_NORMALIZATION_STD,
+            ),
+        ]
+    )
+    return training_transform, validation_transform
+
+
+def build_pretrained_model(label_count: int, weights_path: Path | None) -> Any:
+    import torch
+    from torchvision import models
+
+    if weights_path is None:
+        weights = models.MobileNet_V3_Small_Weights.IMAGENET1K_V1
+        try:
+            model = models.mobilenet_v3_small(weights=weights)
+        except (OSError, RuntimeError) as exc:
+            raise PretrainedWeightsError(
+                "ImageNet pretrained weights are unavailable. Run training once "
+                "with network access on the MacBook or pass a downloaded state "
+                "dict with --weights-path."
+            ) from exc
+    else:
+        if not weights_path.is_file():
+            raise PretrainedWeightsError(
+                f"pretrained weights file does not exist: {weights_path}"
+            )
+        model = models.mobilenet_v3_small(weights=None)
+        try:
+            payload = torch.load(weights_path, map_location="cpu", weights_only=True)
+            state_dict = (
+                payload["state_dict"]
+                if isinstance(payload, dict) and "state_dict" in payload
+                else payload
+            )
+            model.load_state_dict(state_dict)
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise PretrainedWeightsError(
+                f"could not load MobileNetV3 ImageNet weights from {weights_path}"
+            ) from exc
+    model.classifier[3] = torch.nn.Linear(
+        model.classifier[3].in_features,
+        label_count,
+    )
+    return model
 
 
 def train(
@@ -15,11 +94,11 @@ def train(
     epochs: int,
     image_size: int,
     progress: Callable[[int, int, float], None] | None = None,
+    weights_path: Path | None = None,
 ) -> dict[str, object]:
     import torch
     from PIL import Image
     from torch.utils.data import DataLoader, Dataset
-    from torchvision import models, transforms
 
     items = [item for item in load_manifest(manifest_path) if item.view == view]
     labels = sorted({item.label for item in items if item.label != "__foreign__"})
@@ -27,21 +106,16 @@ def train(
     if len(labels) < 2:
         raise ValueError("training requires at least two known cat labels")
 
-    transform = transforms.Compose(
-        [
-            transforms.Resize((image_size, image_size)),
-            transforms.RandomHorizontalFlip(),
-            transforms.ColorJitter(brightness=0.2, contrast=0.2),
-            transforms.ToTensor(),
-            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
-        ]
-    )
+    training_transform, validation_transform = build_transforms(image_size)
 
     class ManifestDataset(Dataset[Any]):
         def __init__(self, rows: list[DatasetItem], split: str) -> None:
             self.rows = [
                 row for row in rows if row.split == split and row.label in label_to_index
             ]
+            self.transform = (
+                training_transform if split == "train" else validation_transform
+            )
 
         def __len__(self) -> int:
             return len(self.rows)
@@ -49,7 +123,7 @@ def train(
         def __getitem__(self, index: int) -> tuple[Any, int]:
             row = self.rows[index]
             with Image.open(dataset_root / row.image_path) as image:
-                tensor = transform(image.convert("RGB"))
+                tensor = self.transform(image.convert("RGB"))
             return tensor, label_to_index[row.label]
 
     train_data = ManifestDataset(items, "train")
@@ -57,9 +131,7 @@ def train(
     if not train_data or not validation_data:
         raise ValueError("train and validation splits must both be non-empty")
     device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
-    # No automatic weight download: training must remain usable in an offline environment.
-    model = models.mobilenet_v3_small(weights=None)
-    model.classifier[3] = torch.nn.Linear(model.classifier[3].in_features, len(labels))
+    model = build_pretrained_model(len(labels), weights_path)
     model.to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
     loss_function = torch.nn.CrossEntropyLoss()
@@ -114,6 +186,11 @@ def main() -> None:
     parser.add_argument("--view", choices=("face", "side"), required=True)
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--image-size", type=int, default=224)
+    parser.add_argument(
+        "--weights-path",
+        type=Path,
+        help="local MobileNetV3 ImageNet state dict for offline training",
+    )
     args = parser.parse_args()
     train(
         args.manifest,
@@ -122,6 +199,7 @@ def main() -> None:
         args.output,
         args.epochs,
         args.image_size,
+        weights_path=args.weights_path,
     )
 
 

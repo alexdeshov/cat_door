@@ -11,11 +11,26 @@ from src.common.settings import Settings
 from src.recorder.automatic import AutomaticEventConfig
 
 
+class DetectorRoi(BaseModel):
+    x: float = Field(ge=0.0, lt=1.0)
+    y: float = Field(ge=0.0, lt=1.0)
+    width: float = Field(gt=0.0, le=1.0)
+    height: float = Field(gt=0.0, le=1.0)
+
+    @model_validator(mode="after")
+    def validate_bounds(self) -> DetectorRoi:
+        if self.x + self.width > 1.0 or self.y + self.height > 1.0:
+            raise ValueError("ROI must fit inside normalized frame bounds")
+        return self
+
+
 class CameraDetectionConfig(BaseModel):
     confidence_threshold: float = Field(ge=0.0, le=1.0)
     box_min_confidence: float = Field(ge=0.0, le=1.0)
     confirmation_frames: int = Field(ge=1, le=20)
     window_frames: int = Field(ge=1, le=30)
+    sample_fps: float = Field(default=3.0, gt=0.0, le=10.0)
+    roi: DetectorRoi | None = None
 
     @model_validator(mode="after")
     def validate_camera(self) -> CameraDetectionConfig:
@@ -41,6 +56,7 @@ class DetectionConfig(BaseModel):
             box_min_confidence=settings.detection_box_min_confidence,
             confirmation_frames=settings.detection_confirmation_frames,
             window_frames=settings.detection_window_frames,
+            sample_fps=settings.detector_sample_fps,
         )
         return cls(
             face=CameraDetectionConfig(
@@ -48,6 +64,7 @@ class DetectionConfig(BaseModel):
                 box_min_confidence=0.15,
                 confirmation_frames=2,
                 window_frames=5,
+                sample_fps=settings.detector_face_sample_fps,
             ),
             side=side,
             candidate_timeout_seconds=settings.detection_candidate_timeout_seconds,
@@ -105,6 +122,12 @@ def load_detection_config(path: Path, defaults: DetectionConfig) -> DetectionCon
                     "cooldown_seconds",
                 )
             },
+        }
+    elif isinstance(payload["face"], dict) and isinstance(payload["side"], dict):
+        payload = {
+            **payload,
+            "face": {**defaults.face.model_dump(), **payload["face"]},
+            "side": {**defaults.side.model_dump(), **payload["side"]},
         }
     try:
         return DetectionConfig.model_validate(payload)

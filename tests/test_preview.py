@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 from PIL import Image
 
+from src.common.detection_config import DetectorRoi
 from src.inference.cat_detector import CatDetection
 from src.recorder.preview import (
     annotate_detections,
@@ -63,3 +64,21 @@ def test_preview_draws_detection_box_in_source_coordinates() -> None:
 
     assert annotated.shape == (360, 640, 3)
     assert np.any(annotated[:, :, 1] > 150)
+
+
+def test_preview_maps_roi_detection_to_full_frame() -> None:
+    frame = np.full((360, 640, 3), 30, dtype=np.uint8)
+    detector_frame = np.full((360, 640, 3), 30, dtype=np.uint8)
+    detections = (CatDetection(box=(80, 115, 240, 205), confidence=0.8),)
+
+    annotated = annotate_detections(
+        frame,
+        detections,
+        event_threshold=0.55,
+        box_min_confidence=0.2,
+        detector_frame=detector_frame,
+        roi=DetectorRoi(x=0.25, y=0.25, width=0.5, height=0.5),
+    )
+
+    assert annotated[135, 240, 1] > 150
+    assert np.all(annotated[90, 160] == 30)

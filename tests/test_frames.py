@@ -2,7 +2,9 @@ from unittest.mock import Mock
 
 import numpy as np
 
-from src.recorder.frames import FRAME_BYTES, prepare_detector_frame, rgb_frame_stream
+from src.common.detection_config import DetectorRoi
+from src.inference.preprocessing import prepare_detector_frame
+from src.recorder.frames import FRAME_BYTES, FRAME_HEIGHT, FRAME_WIDTH, rgb_frame_stream
 
 
 def test_rgb_frame_stream_decodes_fixed_frame(monkeypatch) -> None:
@@ -23,9 +25,10 @@ def test_rgb_frame_stream_decodes_fixed_frame(monkeypatch) -> None:
     frames = list(rgb_frame_stream("ffmpeg", "rtsp://camera", 3.0))
 
     assert len(frames) == 1
-    assert frames[0].shape == (360, 640, 3)
-    assert frames[0].dtype == np.uint8
-    assert int(frames[0][0, 0, 0]) == 7
+    assert frames[0].preview.shape == (360, 640, 3)
+    assert frames[0].detector.shape == (360, 640, 3)
+    assert frames[0].preview.dtype == np.uint8
+    assert int(frames[0].preview[0, 0, 0]) == 7
     assert (
         "fps=3.0,scale=640:360:force_original_aspect_ratio=decrease,"
         "pad=640:360:(ow-iw)/2:(oh-ih)/2,hflip,vflip"
@@ -68,3 +71,40 @@ def test_rgb_frame_stream_can_write_ring_segments(runtime_path, monkeypatch) -> 
     assert "segment" in commands[0]
     assert "-segment_time" in commands[0]
     assert str(runtime_path / "ring" / "%Y%m%dT%H%M%S.mp4") in commands[0]
+
+
+def test_roi_is_cropped_before_detector_scaling_and_keeps_full_preview(
+    runtime_path,
+    monkeypatch,
+) -> None:
+    preview = np.full((FRAME_HEIGHT, FRAME_WIDTH, 3), 7, dtype=np.uint8)
+    detector = np.full((FRAME_HEIGHT, FRAME_WIDTH, 3), 9, dtype=np.uint8)
+    combined = np.hstack((preview, detector))
+    process = Mock()
+    process.stdout.read.side_effect = [combined.tobytes(), b""]
+    commands = []
+    monkeypatch.setattr(
+        "src.recorder.frames.subprocess.Popen",
+        lambda command, **kwargs: commands.append(command) or process,
+    )
+    roi = DetectorRoi(x=0.2, y=0.1, width=0.5, height=0.7)
+
+    frames = list(
+        rgb_frame_stream(
+            "ffmpeg",
+            "rtsp://camera",
+            8.0,
+            segment_directory=runtime_path / "ring",
+            roi=roi,
+        )
+    )
+
+    assert len(frames) == 1
+    assert np.all(frames[0].preview == 7)
+    assert np.all(frames[0].detector == 9)
+    filter_complex = commands[0][commands[0].index("-filter_complex") + 1]
+    assert (
+        "[detector_source]crop=iw*0.5:ih*0.7:iw*0.2:ih*0.1,"
+        "scale=640:360"
+    ) in filter_complex
+    assert commands[0].index("copy") < commands[0].index("-filter_complex")

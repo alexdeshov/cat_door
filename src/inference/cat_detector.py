@@ -53,11 +53,26 @@ class OpenVinoCatDetector:
         core = ov.Core()
         try:
             model = core.read_model(model_path)
+            compile_config = {"PERFORMANCE_HINT": "LATENCY"}
+            if device.upper().startswith("GPU"):
+                compile_config["INFERENCE_PRECISION_HINT"] = "f16"
             self._compiled: Any = core.compile_model(
                 model,
                 device,
-                {"PERFORMANCE_HINT": "LATENCY"},
+                compile_config,
             )
+            execution_devices = self._compiled.get_property("EXECUTION_DEVICES")
+            self.execution_devices = (
+                (execution_devices,)
+                if isinstance(execution_devices, str)
+                else tuple(
+                    str(execution_device)
+                    for execution_device in execution_devices
+                )
+            )
+            if not self.execution_devices:
+                raise RuntimeError("OpenVINO returned no execution devices")
+            self.device = ",".join(self.execution_devices)
         except Exception as exc:
             raise DetectorError("detector_compile_failed") from exc
         self._input = self._compiled.input("images")
@@ -76,7 +91,12 @@ class OpenVinoCatDetector:
         cat_indices = np.flatnonzero(labels == self.cat_class_id)
         detections = tuple(
             CatDetection(
-                box=tuple(float(value) for value in boxes[index]),
+                box=(
+                    float(boxes[index][0]),
+                    float(boxes[index][1]),
+                    float(boxes[index][2]),
+                    float(boxes[index][3]),
+                ),
                 confidence=float(scores[index]),
             )
             for index in cat_indices

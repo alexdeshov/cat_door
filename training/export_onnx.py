@@ -2,6 +2,11 @@ import argparse
 import json
 from pathlib import Path
 
+from src.inference.preprocessing import (
+    IDENTITY_NORMALIZATION_MEAN,
+    IDENTITY_NORMALIZATION_STD,
+)
+
 
 def export_checkpoint(checkpoint_path: Path, destination: Path) -> dict[str, object]:
     import torch
@@ -33,8 +38,8 @@ def export_checkpoint(checkpoint_path: Path, destination: Path) -> dict[str, obj
         "view": checkpoint["view"],
         "labels": labels,
         "image_size": image_size,
-        "normalization_mean": [0.485, 0.456, 0.406],
-        "normalization_std": [0.229, 0.224, 0.225],
+        "normalization_mean": list(IDENTITY_NORMALIZATION_MEAN),
+        "normalization_std": list(IDENTITY_NORMALIZATION_STD),
         "input_name": "image",
         "output_name": "logits",
         "onnx_file": destination.name,

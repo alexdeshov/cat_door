@@ -33,6 +33,7 @@ dataset/
 exports/
 logs/
 backups/
+kernel.errors.txt
 *.db
 *.sqlite
 *.sqlite3
