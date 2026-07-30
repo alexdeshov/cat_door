@@ -6,6 +6,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -18,12 +19,17 @@ from src.common.detection_config import (
     load_detection_config,
 )
 from src.common.settings import Settings
-from src.inference.cat_detector import DetectorError, OpenVinoCatDetector
+from src.inference.cat_detector import (
+    CatDetectionResult,
+    DetectorError,
+    OpenVinoCatDetector,
+)
 from src.inference.cat_identity import IdentityPrediction, OpenVinoCatIdentity
+from src.inference.preprocessing import crop_strongest_cat, prepare_detector_frame
 from src.recorder.automatic import AutomaticEventConfig, AutomaticEventMachine
 from src.recorder.detection_journal import DetectionJournal
 from src.recorder.events import AutomaticEventRequest, persist_automatic_event
-from src.recorder.frames import prepare_detector_frame, rgb_frame_stream
+from src.recorder.frames import rgb_frame_stream
 from src.recorder.preview import annotate_detections, preview_path, publish_preview
 from src.recorder.status import write_recorder_status
 
@@ -64,16 +70,31 @@ class IdentityModel(Protocol):
     def predict(self, frame: Any, threshold: float) -> IdentityPrediction: ...
 
 
+@dataclass(frozen=True)
+class IdentityAttempt:
+    prediction: IdentityPrediction | None
+    skipped_reason: str | None
+
+
 def _predict_identity_if_detected(
     frame: Any,
-    confidence: float,
+    detection: CatDetectionResult,
     camera_config: CameraDetectionConfig,
     model: IdentityModel | None,
     identity_threshold: float,
-) -> IdentityPrediction | None:
-    if model is None or confidence < camera_config.confidence_threshold:
-        return None
-    return model.predict(frame, identity_threshold)
+) -> IdentityAttempt:
+    if model is None:
+        return IdentityAttempt(None, "model_unavailable")
+    if detection.confidence < camera_config.confidence_threshold:
+        return IdentityAttempt(None, "below_camera_threshold")
+    cat_crop = crop_strongest_cat(
+        frame,
+        detection.detections,
+        min_confidence=camera_config.confidence_threshold,
+    )
+    if cat_crop is None:
+        return IdentityAttempt(None, "no_confident_box")
+    return IdentityAttempt(model.predict(cat_crop, identity_threshold), None)
 
 
 def publish_heartbeat(settings: Settings) -> None:
@@ -234,16 +255,24 @@ def monitor_automatic(settings: Settings, duration_seconds: float | None) -> Non
             previous_state = machine.state.value
             confidences[role] = round(confidence, 4)
             prediction = _predict_identity_if_detected(
-                frame,
-                confidence,
+                preview_frame,
+                detection,
                 camera_config,
                 identity_models.get(role),
                 settings.identity_confidence_threshold,
             )
-            if prediction is not None:
+            if prediction.skipped_reason == "no_confident_box":
+                journal.write(
+                    "identity_skipped",
+                    camera=role,
+                    reason=prediction.skipped_reason,
+                    confidence=round(confidence, 4),
+                    threshold=camera_config.confidence_threshold,
+                )
+            if prediction.prediction is not None:
                 identity_predictions[role] = {
-                    "name": prediction.name,
-                    "confidence": round(prediction.confidence, 4),
+                    "name": prediction.prediction.name,
+                    "confidence": round(prediction.prediction.confidence, 4),
                 }
             frames_processed[role] += 1
             update = machine.observe(time.monotonic(), {role: 1.0 if camera_confirmed else 0.0})

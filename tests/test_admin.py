@@ -318,7 +318,7 @@ def test_macbook_export_download(runtime_path: Path, monkeypatch) -> None:
     archive.write_bytes(b"zip")
     monkeypatch.setattr(
         "src.web.app.create_macbook_export",
-        lambda database_path, data_dir, ffmpeg_path: archive,
+        lambda *_args: archive,
     )
 
     response = client.get("/api/training/macbook/export")

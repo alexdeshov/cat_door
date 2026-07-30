@@ -7,16 +7,13 @@ from pathlib import Path
 from typing import BinaryIO, cast
 
 import numpy as np
-from PIL import Image
 
 from src.recorder.ffmpeg import _base_input
-from src.recorder.preview import crop_padding
 from src.recorder.ring import prune_segments
 
 FRAME_WIDTH = 640
 FRAME_HEIGHT = 360
 FRAME_BYTES = FRAME_WIDTH * FRAME_HEIGHT * 3
-DETECTOR_SIZE = 320
 
 
 def _read_exact(stream: BinaryIO, size: int) -> bytes:
@@ -27,17 +24,6 @@ def _read_exact(stream: BinaryIO, size: int) -> bytes:
             break
         chunks.extend(chunk)
     return bytes(chunks)
-
-
-def prepare_detector_frame(frame: np.ndarray) -> np.ndarray:
-    image = Image.fromarray(crop_padding(frame), mode="RGB")
-    image.thumbnail((DETECTOR_SIZE, DETECTOR_SIZE), Image.Resampling.BILINEAR)
-    detector_image = Image.new("RGB", (DETECTOR_SIZE, DETECTOR_SIZE))
-    detector_image.paste(
-        image,
-        ((DETECTOR_SIZE - image.width) // 2, (DETECTOR_SIZE - image.height) // 2),
-    )
-    return np.asarray(detector_image, dtype=np.uint8)
 
 
 def rgb_frame_stream(

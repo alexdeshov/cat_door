@@ -2,7 +2,8 @@ from unittest.mock import Mock
 
 import numpy as np
 
-from src.recorder.frames import FRAME_BYTES, prepare_detector_frame, rgb_frame_stream
+from src.inference.preprocessing import prepare_detector_frame
+from src.recorder.frames import FRAME_BYTES, rgb_frame_stream
 
 
 def test_rgb_frame_stream_decodes_fixed_frame(monkeypatch) -> None:

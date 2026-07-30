@@ -2,10 +2,12 @@ import json
 import queue
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from src.common.detection_config import CameraDetectionConfig
 from src.common.settings import Settings
+from src.inference.cat_detector import CatDetection, CatDetectionResult
 from src.inference.cat_identity import IdentityPrediction
 from src.recorder.app import (
     CameraConfirmationTracker,
@@ -79,9 +81,9 @@ def test_camera_confirmation_tracker_uses_own_threshold_and_window() -> None:
 
 class RecordingIdentityModel:
     def __init__(self) -> None:
-        self.calls: list[tuple[object, float]] = []
+        self.calls: list[tuple[np.ndarray, float]] = []
 
-    def predict(self, frame: object, threshold: float) -> IdentityPrediction:
+    def predict(self, frame: np.ndarray, threshold: float) -> IdentityPrediction:
         self.calls.append((frame, threshold))
         return IdentityPrediction(name="Барсик", confidence=0.91)
 
@@ -94,14 +96,31 @@ def test_identity_uses_per_camera_threshold_below_legacy_global_threshold() -> N
         window_frames=5,
     )
     model = RecordingIdentityModel()
-    frame = object()
+    frame = np.full((360, 640, 3), 50, dtype=np.uint8)
     confidence = 0.40
     assert confidence < Settings().detection_confidence_threshold
 
-    prediction = _predict_identity_if_detected(frame, confidence, config, model, 0.80)
+    attempt = _predict_identity_if_detected(
+        frame,
+        CatDetectionResult(
+            confidence=confidence,
+            detections=(
+                CatDetection(
+                    box=(80.0, 115.0, 240.0, 205.0),
+                    confidence=confidence,
+                ),
+            ),
+        ),
+        config,
+        model,
+        0.80,
+    )
 
-    assert prediction == IdentityPrediction(name="Барсик", confidence=0.91)
-    assert model.calls == [(frame, 0.80)]
+    assert attempt.prediction == IdentityPrediction(name="Барсик", confidence=0.91)
+    assert attempt.skipped_reason is None
+    assert len(model.calls) == 1
+    assert model.calls[0][0].shape == (252, 448, 3)
+    assert model.calls[0][1] == 0.80
 
 
 def test_identity_is_not_called_below_per_camera_threshold() -> None:
@@ -113,7 +132,44 @@ def test_identity_is_not_called_below_per_camera_threshold() -> None:
     )
     model = RecordingIdentityModel()
 
-    prediction = _predict_identity_if_detected(object(), 0.29, config, model, 0.80)
+    attempt = _predict_identity_if_detected(
+        np.zeros((360, 640, 3), dtype=np.uint8),
+        CatDetectionResult(
+            confidence=0.29,
+            detections=(
+                CatDetection(
+                    box=(80.0, 115.0, 240.0, 205.0),
+                    confidence=0.29,
+                ),
+            ),
+        ),
+        config,
+        model,
+        0.80,
+    )
 
-    assert prediction is None
+    assert attempt.prediction is None
+    assert attempt.skipped_reason == "below_camera_threshold"
+    assert model.calls == []
+
+
+def test_identity_skips_missing_box_without_exception() -> None:
+    config = CameraDetectionConfig(
+        confidence_threshold=0.30,
+        box_min_confidence=0.15,
+        confirmation_frames=2,
+        window_frames=5,
+    )
+    model = RecordingIdentityModel()
+
+    attempt = _predict_identity_if_detected(
+        np.zeros((360, 640, 3), dtype=np.uint8),
+        CatDetectionResult(confidence=0.40, detections=()),
+        config,
+        model,
+        0.80,
+    )
+
+    assert attempt.prediction is None
+    assert attempt.skipped_reason == "no_confident_box"
     assert model.calls == []

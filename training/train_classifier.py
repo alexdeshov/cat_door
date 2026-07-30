@@ -4,6 +4,10 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from src.inference.preprocessing import (
+    IDENTITY_NORMALIZATION_MEAN,
+    IDENTITY_NORMALIZATION_STD,
+)
 from training.dataset import DatasetItem, load_manifest
 
 
@@ -33,7 +37,10 @@ def train(
             transforms.RandomHorizontalFlip(),
             transforms.ColorJitter(brightness=0.2, contrast=0.2),
             transforms.ToTensor(),
-            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+            transforms.Normalize(
+                IDENTITY_NORMALIZATION_MEAN,
+                IDENTITY_NORMALIZATION_STD,
+            ),
         ]
     )
 
