@@ -182,6 +182,8 @@ def test_page_shows_detector_probe_metrics(runtime_path: Path, monkeypatch) -> N
         detector_connected=True,
         frames_processed={"face": 10, "side": 11},
         confidences={"face": 0.25, "side": 0.5},
+        detector_device_requested="GPU",
+        detector_device_actual="GPU.0",
     )
     client = make_client(runtime_path, monkeypatch, side=True)
 
@@ -190,6 +192,7 @@ def test_page_shows_detector_probe_metrics(runtime_path: Path, monkeypatch) -> N
     assert page.status_code == 200
     assert page.text.count('class="rotate-camera"') == 2
     assert "Кадры face/side:" in page.text
+    assert "OpenVINO: GPU.0" in page.text
     assert "10/11" in page.text
     assert "0.25/0.5" in page.text
 

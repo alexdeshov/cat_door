@@ -42,6 +42,16 @@ def build_automatic_config(settings: Settings) -> AutomaticEventConfig:
     return DetectionConfig.from_settings(settings).event_config()
 
 
+def _detector_device_status(
+    settings: Settings,
+    detector: OpenVinoCatDetector | None = None,
+) -> dict[str, str | None]:
+    return {
+        "detector_device_requested": settings.detector_device,
+        "detector_device_actual": detector.device if detector is not None else None,
+    }
+
+
 def _put_latest(output: queue.Queue[Any], item: Any) -> None:
     try:
         output.put_nowait(item)
@@ -145,6 +155,7 @@ def publish_heartbeat(settings: Settings) -> None:
         automatic_capture_enabled=settings.automatic_capture_enabled,
         dry_run=settings.automatic_capture_dry_run,
         detector_connected=False,
+        **_detector_device_status(settings),
     )
 
 
@@ -334,6 +345,7 @@ def monitor_automatic(settings: Settings, duration_seconds: float | None) -> Non
                     detector_connected=True,
                     frames_processed=frames_processed,
                     confidences=confidences,
+                    **_detector_device_status(settings, detector),
                 )
                 continue
             inference_started_at = time.monotonic()
@@ -464,6 +476,7 @@ def monitor_automatic(settings: Settings, duration_seconds: float | None) -> Non
                 identity=identity_predictions,
                 last_action=last_action,
                 initiating_camera=update.initiating_camera,
+                **_detector_device_status(settings, detector),
             )
             last_status_at = now
     except (OSError, RuntimeError, ValueError, SQLAlchemyError) as exc:
@@ -487,6 +500,7 @@ def monitor_automatic(settings: Settings, duration_seconds: float | None) -> Non
             confidences=confidences,
             identity=identity_predictions,
             last_action=last_action,
+            **_detector_device_status(settings, detector),
         )
         journal.write(
             "session_stopped",
@@ -542,6 +556,7 @@ def run(*, once: bool = False, probe_seconds: float | None = None) -> None:
                 automatic_capture_enabled=settings.automatic_capture_enabled,
                 dry_run=settings.automatic_capture_dry_run,
                 detector_connected=False,
+                **_detector_device_status(settings),
             )
         if once:
             return

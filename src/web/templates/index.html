@@ -100,6 +100,10 @@
         {{ recorder_status.frames_processed.face }}/{{ recorder_status.frames_processed.side }}.
         Уверенность cat:
         {{ recorder_status.confidences.face }}/{{ recorder_status.confidences.side }}.
+        {% if recorder_status.detector_device_actual %}
+          OpenVINO: {{ recorder_status.detector_device_actual }}
+          (запрошено {{ recorder_status.detector_device_requested }}).
+        {% endif %}
       </p>
       {% if recorder_status.identity %}
         <p>
@@ -792,9 +796,14 @@
       const camera = result.initiating_camera
         ? ` · камера: ${result.initiating_camera}`
         : "";
+      const device = result.detector_device_actual
+        ? ` · OpenVINO: ${result.detector_device_actual}` +
+          ` (запрошено ${result.detector_device_requested})`
+        : "";
       details.textContent =
         `Кадры face/side: ${frames.face ?? 0}/${frames.side ?? 0}` +
-        ` · confidence: ${confidences.face ?? 0}/${confidences.side ?? 0}${camera}`;
+        ` · confidence: ${confidences.face ?? 0}/${confidences.side ?? 0}` +
+        `${camera}${device}`;
       const identities = Object.values(result.identity || {});
       if (!result.stale && identities.length) {
         const known = identities

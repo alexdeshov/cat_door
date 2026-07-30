@@ -25,6 +25,7 @@ def test_disabled_recorder_writes_safe_heartbeat(runtime_path: Path) -> None:
         data_dir=runtime_path,
         automatic_capture_enabled=False,
         automatic_capture_dry_run=True,
+        detector_device="GPU",
     )
 
     publish_heartbeat(settings)
@@ -34,6 +35,8 @@ def test_disabled_recorder_writes_safe_heartbeat(runtime_path: Path) -> None:
     assert payload["state"] == "disabled"
     assert payload["dry_run"] is True
     assert payload["detector_connected"] is False
+    assert payload["detector_device_requested"] == "GPU"
+    assert payload["detector_device_actual"] is None
     assert "rtsp" not in json.dumps(payload).lower()
 
 
@@ -44,6 +47,8 @@ def test_enabled_recorder_waits_for_local_detector(runtime_path: Path) -> None:
 
     payload = json.loads(recorder_status_path(settings).read_text(encoding="utf-8"))
     assert payload["state"] == "waiting_for_detector"
+    assert payload["detector_device_requested"] == "CPU"
+    assert payload["detector_device_actual"] is None
 
 
 def test_invalid_detection_window_is_rejected() -> None:
