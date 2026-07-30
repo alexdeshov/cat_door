@@ -12,10 +12,34 @@
 ## Подготовка Mac
 
 ```bash
-python3.13 -m venv .venv-training
+python3 -m venv .venv-training
 source .venv-training/bin/activate
-python -m pip install -e ".[training]"
+python -m pip install --upgrade pip
+python -m pip install -e ".[training,dev]"
 ```
+
+## Локальный рабочий каталог
+
+Датасет, checkpoints, ONNX, ZIP-пакеты и отчёты хранятся вне Git. Рекомендуемая
+структура на MacBook:
+
+```text
+~/CatDoorTraining/
+├── incoming/         # полученные ZIP-экспорты разметки
+├── datasets/images/  # распакованные изображения
+├── manifests/        # проверенные JSONL и split
+├── work/             # промежуточные файлы
+├── runs/
+│   ├── face/         # checkpoints модели морды
+│   └── side/         # checkpoints модели тела
+├── release/          # только ONNX и метаданные для сборки
+├── packages/         # итоговые ZIP-архивы моделей
+├── reports/
+└── logs/
+```
+
+Каталог `~/CatDoorTraining` не следует переносить внутрь репозитория или
+добавлять в Git.
 
 ## Манифест датасета
 
@@ -52,11 +76,16 @@ python -m training.train_classifier work/manifest.split.jsonl export/dataset \
 ## ONNX и пакет
 
 ```bash
-python -m training.export_onnx work/face.pt release/face_model.onnx \
-  --model-info release/model_info.json
+python -m training.export_onnx \
+  ~/CatDoorTraining/runs/face/checkpoint.pt \
+  ~/CatDoorTraining/release/face_model.onnx \
+  --model-info ~/CatDoorTraining/release/model_info.json
 
-cp model-manifests/thresholds.example.json release/thresholds.json
-python -m training.model_package build release release/catdoor-face-model.zip
+cp model-manifests/thresholds.example.json \
+  ~/CatDoorTraining/release/thresholds.json
+python -m training.model_package build \
+  ~/CatDoorTraining/release \
+  ~/CatDoorTraining/packages/catdoor-face-model.zip
 ```
 
 Порог нельзя считать окончательным до калибровки на validation и проверки на

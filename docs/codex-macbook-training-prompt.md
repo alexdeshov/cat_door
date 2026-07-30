@@ -56,7 +56,7 @@ Homebrew, Xcode Command Line Tools или командами администр�
 python3 -m venv .venv-training
 source .venv-training/bin/activate
 python -m pip install --upgrade pip
-python -m pip install -e ".[training]"
+python -m pip install -e ".[training,dev]"
 ```
 
 Проверь окружение:
@@ -74,6 +74,11 @@ import torch
 print(torch.backends.mps.is_available())
 print(torch.backends.mps.is_built())
 ```
+
+Если проверка выполняется из Codex, `is_built()` возвращает `true`, а
+`is_available()` — `false`, повтори короткую проверку MPS вне ограниченной
+песочницы после подтверждения владельца. Не делай вывод о недоступности GPU
+только по результату sandbox-процесса.
 
 Если MPS недоступен, выясни причину. Не начинай длительное обучение на CPU без
 моего подтверждения.
@@ -102,7 +107,7 @@ print(torch.backends.mps.is_built())
 
 ```bash
 python -m training.dataset \
-  --manifest /ABSOLUTE/PATH/dataset.jsonl \
+  /ABSOLUTE/PATH/dataset.jsonl \
   --dataset-root /ABSOLUTE/PATH/images \
   --assign-splits /ABSOLUTE/PATH/dataset.with-splits.jsonl
 ```
@@ -140,7 +145,7 @@ python -m training.dataset \
 python -m training.train_classifier \
   /ABSOLUTE/PATH/dataset.with-splits.jsonl \
   /ABSOLUTE/PATH/images \
-  /ABSOLUTE/PATH/runs/face \
+  /ABSOLUTE/PATH/runs/face/checkpoint.pt \
   --view face
 ```
 
@@ -148,7 +153,7 @@ python -m training.train_classifier \
 python -m training.train_classifier \
   /ABSOLUTE/PATH/dataset.with-splits.jsonl \
   /ABSOLUTE/PATH/images \
-  /ABSOLUTE/PATH/runs/side \
+  /ABSOLUTE/PATH/runs/side/checkpoint.pt \
   --view side
 ```
 
@@ -170,6 +175,10 @@ checkpoint и `model-info`; не выдумывай имена файлов.
 ```bash
 python -m training.model_package build ...
 ```
+
+Сохраняй итоговый ZIP вне исходного каталога с ONNX и метаданными, например в
+`/ABSOLUTE/PATH/packages/`. Сборщик намеренно отклоняет checkpoints и другие
+посторонние файлы.
 
 Пороги неизвестности и допуска нельзя принимать как готовые только потому, что
 они указаны в примере. Подбери их на validation с приоритетом низкого FAR, а
