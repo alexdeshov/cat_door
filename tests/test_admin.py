@@ -3,7 +3,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from src.common.database import Event, create_session_factory
+from src.common.database import EvaluationRun, Event, create_session_factory
 from src.common.settings import Settings
 from src.recorder.status import write_recorder_status
 from src.web.app import create_app
@@ -213,6 +213,79 @@ def test_recorder_status_reports_missing_heartbeat(runtime_path: Path, monkeypat
         "message": "CatDoorRecorder не запущен",
         "stale": True,
     }
+
+
+def test_starts_detached_offline_evaluation_on_cpu(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    models = runtime_path / "models"
+    models.mkdir()
+    detector = models / "detector.onnx"
+    detector.write_bytes(b"detector")
+    detector.with_suffix(".json").write_text(
+        '{"architecture":"test","cat_class_id":17}',
+        encoding="utf-8",
+    )
+    identity = models / "face.onnx"
+    identity.write_bytes(b"identity")
+    identity.with_suffix(".json").write_text(
+        '{"labels":["Барсик"],"image_size":160}',
+        encoding="utf-8",
+    )
+    launched: dict[str, object] = {}
+
+    class FakeProcess:
+        pid = 4321
+
+    def fake_popen(command: list[str], **kwargs: object) -> FakeProcess:
+        launched["command"] = command
+        launched["kwargs"] = kwargs
+        return FakeProcess()
+
+    monkeypatch.setattr("src.web.app.subprocess.Popen", fake_popen)
+    settings = Settings(
+        data_dir=runtime_path,
+        database_path=runtime_path / "test.sqlite3",
+        detector_model_path=detector,
+        identity_face_model_path=identity,
+    )
+    client = TestClient(create_app(settings))
+
+    response = client.post(
+        "/api/evaluations",
+        json={"labels": ["known_cat", "foreign_cat"]},
+    )
+
+    assert response.status_code == 202
+    assert response.json() == {"run_id": 1, "pid": 4321, "state": "starting"}
+    command = launched["command"]
+    assert isinstance(command, list)
+    assert "training.evaluation_job" in command
+    assert "--face-model" in command
+    assert "GPU" not in command
+    factory = create_session_factory(runtime_path / "test.sqlite3")
+    with factory() as session:
+        run = session.get(EvaluationRun, 1)
+        assert run is not None
+        assert run.status == "starting"
+        assert run.detector_model_version_id is not None
+        assert run.face_model_version_id is not None
+        assert run.side_model_version_id is None
+
+
+def test_evaluation_rejects_path_outside_models(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    client = make_client(runtime_path, monkeypatch)
+
+    response = client.post(
+        "/api/evaluations",
+        json={"detector_model": "../secret.onnx"},
+    )
+
+    assert response.status_code == 422
 
 
 def test_detection_settings_can_be_updated(runtime_path: Path, monkeypatch) -> None:

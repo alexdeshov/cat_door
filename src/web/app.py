@@ -18,6 +18,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from src.common.database import (
+    EvaluationRun,
     Event,
     EventPrediction,
     create_session_factory,
@@ -29,6 +30,7 @@ from src.common.detection_config import (
     load_detection_config,
     save_detection_config,
 )
+from src.common.model_registry import register_model_version
 from src.common.settings import Settings
 from src.common.windows_power import SleepInhibitor
 from src.recorder.ffmpeg import RecorderError, record_clip
@@ -54,6 +56,23 @@ class BulkLabelPayload(LabelPayload):
     event_ids: list[int] = Field(min_length=1, max_length=100)
 
 
+class EvaluationStartPayload(BaseModel):
+    created_from: datetime | None = None
+    created_to: datetime | None = None
+    labels: list[str] = Field(
+        default_factory=lambda: [
+            "known_cat",
+            "foreign_cat",
+            "pending",
+            "multiple_cats",
+        ]
+    )
+    training_targets: list[str] = Field(default_factory=list)
+    detector_model: str | None = None
+    face_model: str | None = None
+    side_model: str | None = None
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings()
     settings.data_dir.mkdir(parents=True, exist_ok=True)
@@ -72,6 +91,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     def get_session() -> Generator[Session, None, None]:
         yield from session_dependency(factory)
+
+    def resolve_evaluation_model(
+        configured: Path | None,
+        requested: str | None,
+    ) -> Path | None:
+        if requested is None:
+            return configured
+        candidate = Path(requested)
+        if candidate.is_absolute() or ".." in candidate.parts or candidate.suffix != ".onnx":
+            raise HTTPException(422, "Имя модели должно быть безопасным относительным ONNX-путём")
+        models_root = settings.detector_model_path.parent.resolve()
+        resolved = (models_root / candidate).resolve()
+        if models_root not in resolved.parents:
+            raise HTTPException(422, "Модель должна находиться в локальном каталоге models")
+        return resolved
 
     @app.get("/", response_class=HTMLResponse)
     def index(
@@ -425,6 +459,163 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return json.loads(statuses[-1].read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise HTTPException(500, "Не удалось прочитать статус обучения") from exc
+
+    @app.post("/api/evaluations", status_code=202)
+    def start_evaluation(
+        payload: EvaluationStartPayload,
+        session: Annotated[Session, Depends(get_session)],
+    ) -> dict[str, object]:
+        invalid_labels = sorted(set(payload.labels) - LABELS)
+        invalid_targets = sorted(set(payload.training_targets) - TRAINING_TARGETS)
+        if invalid_labels:
+            raise HTTPException(422, f"Неизвестные метки: {', '.join(invalid_labels)}")
+        if invalid_targets:
+            raise HTTPException(
+                422,
+                f"Неизвестные назначения обучения: {', '.join(invalid_targets)}",
+            )
+        if (
+            payload.created_from is not None
+            and payload.created_to is not None
+            and payload.created_from > payload.created_to
+        ):
+            raise HTTPException(422, "Начало диапазона должно быть раньше окончания")
+        running = session.scalar(
+            select(EvaluationRun)
+            .where(EvaluationRun.status.in_(["starting", "running"]))
+            .limit(1)
+        )
+        if running is not None:
+            raise HTTPException(409, "Офлайн-оценка уже выполняется")
+
+        detector_path = resolve_evaluation_model(
+            settings.detector_model_path,
+            payload.detector_model,
+        )
+        face_path = resolve_evaluation_model(
+            settings.identity_face_model_path,
+            payload.face_model,
+        )
+        side_path = resolve_evaluation_model(
+            settings.identity_side_model_path,
+            payload.side_model,
+        )
+        if detector_path is None or not detector_path.is_file():
+            raise HTTPException(422, "Локальная detector-модель не найдена")
+        identity_paths = {
+            role: path
+            for role, path in (("face", face_path), ("side", side_path))
+            if path is not None and path.is_file()
+        }
+        if not identity_paths:
+            raise HTTPException(422, "Не установлена ни одна локальная identity-модель")
+        try:
+            detector_version = register_model_version(
+                session,
+                kind="detector",
+                model_path=detector_path,
+            )
+            identity_versions = {
+                role: register_model_version(
+                    session,
+                    kind=f"identity_{role}",
+                    model_path=path,
+                )
+                for role, path in identity_paths.items()
+            }
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        filter_value = {
+            "created_from": (
+                payload.created_from.isoformat() if payload.created_from else None
+            ),
+            "created_to": payload.created_to.isoformat() if payload.created_to else None,
+            "labels": payload.labels,
+            "training_targets": payload.training_targets,
+        }
+        run = EvaluationRun(
+            run_kind="identity",
+            filter_json=json.dumps(filter_value, ensure_ascii=False),
+            detector_model_version_id=detector_version.id,
+            face_model_version_id=(
+                identity_versions["face"].id if "face" in identity_versions else None
+            ),
+            side_model_version_id=(
+                identity_versions["side"].id if "side" in identity_versions else None
+            ),
+            status="starting",
+        )
+        session.add(run)
+        session.commit()
+        run_directory = settings.data_dir / "evaluations" / f"{run.id:08d}"
+        status_path = run_directory / "status.json"
+        write_status(
+            status_path,
+            state="starting",
+            message="Запуск отдельного процесса оценки",
+            run_id=run.id,
+        )
+        log_path = run_directory / "evaluation.log"
+        command = [
+            sys.executable,
+            "-m",
+            "training.evaluation_job",
+            str(settings.resolved_database_path.resolve()),
+            str(settings.data_dir.resolve()),
+            settings.ffmpeg_path,
+            str(run.id),
+            str(detector_path.resolve()),
+            str(status_path.resolve()),
+            "--identity-threshold",
+            str(settings.identity_confidence_threshold),
+        ]
+        for role in ("face", "side"):
+            if role in identity_paths:
+                command.extend(
+                    [f"--{role}-model", str(identity_paths[role].resolve())]
+                )
+        creationflags = 0
+        if sys.platform == "win32":
+            creationflags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+        try:
+            with log_path.open("ab") as log:
+                process = subprocess.Popen(
+                    command,
+                    stdin=subprocess.DEVNULL,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    cwd=Path.cwd(),
+                    creationflags=creationflags,
+                )
+        except OSError as exc:
+            run.status = "failed"
+            run.completed_at = datetime.now(UTC)
+            run.error_message = "Не удалось запустить Python"
+            session.commit()
+            write_status(
+                status_path,
+                state="failed",
+                message="Не удалось запустить Python",
+                run_id=run.id,
+            )
+            raise HTTPException(500, "Не удалось запустить процесс оценки") from exc
+        return {"run_id": run.id, "pid": process.pid, "state": "starting"}
+
+    @app.get("/api/evaluations/{run_id}/status")
+    def evaluation_status(
+        run_id: int,
+        session: Annotated[Session, Depends(get_session)],
+    ) -> dict[str, object]:
+        run = session.get(EvaluationRun, run_id)
+        if run is None:
+            raise HTTPException(404, "Запуск оценки не найден")
+        status_path = settings.data_dir / "evaluations" / f"{run_id:08d}" / "status.json"
+        try:
+            return json.loads(status_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return {"run_id": run.id, "state": run.status}
+        except (OSError, json.JSONDecodeError) as exc:
+            raise HTTPException(500, "Не удалось прочитать статус оценки") from exc
 
     @app.get("/media/{event_id}/{view}")
     def media(

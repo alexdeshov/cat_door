@@ -1,0 +1,125 @@
+from datetime import UTC, datetime
+
+import numpy as np
+
+from src.common.detection_config import CameraDetectionConfig
+from src.common.evaluation import (
+    EvaluatedEvent,
+    build_identity_evaluation_report,
+    evaluate_view_frames,
+)
+from src.inference.cat_detector import CatDetection, CatDetectionResult
+from src.inference.cat_identity import IdentityPrediction
+
+
+class FakeDetector:
+    def __init__(self, confidences: list[float]) -> None:
+        self.confidences = iter(confidences)
+
+    def detect(self, frame: np.ndarray) -> CatDetectionResult:
+        assert frame.shape == (320, 320, 3)
+        confidence = next(self.confidences)
+        return CatDetectionResult(
+            confidence=confidence,
+            detections=(
+                CatDetection(
+                    box=(80.0, 100.0, 240.0, 220.0),
+                    confidence=confidence,
+                ),
+            ),
+        )
+
+
+class FakeIdentity:
+    def __init__(self, predictions: list[tuple[str, float]]) -> None:
+        self.predictions = iter(predictions)
+
+    def predict(self, frame: np.ndarray, threshold: float) -> IdentityPrediction:
+        assert frame.size > 0
+        name, confidence = next(self.predictions)
+        return IdentityPrediction(
+            name=name if confidence >= threshold else None,
+            confidence=confidence,
+            candidate_name=name,
+        )
+
+
+def test_evaluate_view_frames_uses_shared_crop_and_event_aggregation() -> None:
+    config = CameraDetectionConfig(
+        confidence_threshold=0.30,
+        box_min_confidence=0.15,
+        confirmation_frames=2,
+        window_frames=5,
+    )
+    frames = [
+        np.full((360, 640, 3), 40, dtype=np.uint8),
+        np.full((360, 640, 3), 80, dtype=np.uint8),
+    ]
+
+    result = evaluate_view_frames(
+        frames,
+        FakeDetector([0.70, 0.75]),
+        FakeIdentity([("Барсик", 0.91), ("Барсик", 0.86)]),
+        config,
+        0.80,
+    )
+
+    assert result.aggregate.decision == "known:Барсик"
+    assert result.aggregate.frames_used == 2
+    assert result.max_detector_confidence == 0.75
+    assert len(result.raw_scores) == 2
+
+
+def test_evaluation_report_separates_clean_and_training_seen_events() -> None:
+    config = CameraDetectionConfig(
+        confidence_threshold=0.30,
+        box_min_confidence=0.15,
+        confirmation_frames=2,
+        window_frames=5,
+    )
+    known = evaluate_view_frames(
+        [np.full((360, 640, 3), 40, dtype=np.uint8)],
+        FakeDetector([0.80]),
+        FakeIdentity([("Барсик", 0.90)]),
+        config,
+        0.80,
+    )
+    false_accept = evaluate_view_frames(
+        [np.full((360, 640, 3), 60, dtype=np.uint8)],
+        FakeDetector([0.20]),
+        FakeIdentity([]),
+        config,
+        0.80,
+    )
+    events = [
+        EvaluatedEvent(
+            event_id=1,
+            label="known_cat",
+            cat_name="Барсик",
+            training_target="excluded",
+            created_at=datetime(2026, 7, 30, 12, tzinfo=UTC),
+            views={"face": known},
+        ),
+        EvaluatedEvent(
+            event_id=2,
+            label="foreign_cat",
+            cat_name=None,
+            training_target="macbook",
+            created_at=datetime(2026, 7, 30, 23, tzinfo=UTC),
+            views={"face": false_accept},
+        ),
+    ]
+
+    report = build_identity_evaluation_report(
+        events,
+        ["face"],
+        {"face": 0.30},
+        identity_threshold=0.80,
+    )
+
+    assert report["events_processed"] == 2
+    assert report["training_seen_events"] == 1
+    assert report["clean_events"] == 1
+    assert report["detection"]["face"]["misses"] == 1
+    assert report["metrics"]["face"]["false_accept_rate"] == 0.0
+    assert report["clean_metrics"]["face"]["false_accept_rate"] is None

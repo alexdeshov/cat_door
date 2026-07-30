@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from statistics import mean
 from typing import TypeAlias
@@ -111,9 +112,9 @@ def aggregate_frame_predictions(
 
 
 def calculate_metrics(
-    expected: list[str],
-    predicted: list[PredictionValue],
-    inference_ms: list[float],
+    expected: Sequence[str],
+    predicted: Sequence[PredictionValue],
+    inference_ms: Sequence[float],
     *,
     max_far: float,
     max_frr: float,
@@ -176,9 +177,9 @@ def calculate_metrics(
 
 
 def threshold_sweep(
-    scores: list[ScoredPrediction | None],
-    labels: list[str],
-    thresholds: list[float],
+    scores: Sequence[ScoredPrediction | None],
+    labels: Sequence[str],
+    thresholds: Sequence[float],
     *,
     max_far: float = 1.0,
     max_frr: float = 1.0,
@@ -214,8 +215,8 @@ def threshold_sweep(
 
 
 def confusion_matrix(
-    expected: list[str],
-    predicted: list[PredictionValue],
+    expected: Sequence[str],
+    predicted: Sequence[PredictionValue],
 ) -> dict[str, dict[str, int]]:
     if len(expected) != len(predicted):
         raise ValueError("expected and predicted must have the same length")
