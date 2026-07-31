@@ -60,6 +60,7 @@ def _window_report(
     expected: list[str] = []
     decisions: list[str] = []
     inference_ms: list[float] = []
+    labelled_events = 0
     for event in labelled:
         expected_name = (
             event.cat_name if event.label == "known_cat" else FOREIGN_LABEL
@@ -67,6 +68,9 @@ def _window_report(
         if expected_name is None:
             continue
         event_predictions = predictions_by_event.get(event.id, [])
+        labelled_events += 1
+        if not event_predictions:
+            continue
         expected.append(expected_name)
         decisions.append(combine_event_decisions(event_predictions))
         timings = [
@@ -104,7 +108,12 @@ def _window_report(
     return {
         "events": len(events),
         "pending": sum(event.label == "pending" for event in events),
-        "labelled_identity_events": len(expected),
+        "labelled_identity_events": labelled_events,
+        "coverage": {
+            "with_active_model_predictions": len(expected),
+            "without_active_model_predictions": labelled_events - len(expected),
+            "rate": len(expected) / labelled_events if labelled_events else None,
+        },
         "metrics": metrics,
         "dataset_progress": dict(sorted(progress.items())),
     }

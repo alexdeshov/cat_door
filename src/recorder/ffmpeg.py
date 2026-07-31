@@ -7,6 +7,10 @@ class RecorderError(RuntimeError):
     pass
 
 
+def ffmpeg_creation_flags() -> int:
+    return getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
 def _base_input(ffmpeg_path: str, rtsp_url: str) -> list[str]:
     return [
         ffmpeg_path,
@@ -53,6 +57,7 @@ def record_clip(
             text=True,
             timeout=duration_seconds + 15,
             check=False,
+            creationflags=ffmpeg_creation_flags(),
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         temporary.unlink(missing_ok=True)
@@ -84,6 +89,7 @@ def mjpeg_stream(ffmpeg_path: str, rtsp_url: str, fps: int) -> Iterator[bytes]:
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
+        creationflags=ffmpeg_creation_flags(),
     )
     buffer = bytearray()
     try:

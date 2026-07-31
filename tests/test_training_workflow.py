@@ -10,7 +10,7 @@ from src.common.database import Event, create_session_factory
 from src.common.detection_config import CameraDetectionConfig, DetectionConfig
 from src.inference.cat_detector import CatDetection, CatDetectionResult
 from training.dataset import load_manifest
-from training.workflow import build_dataset
+from training.workflow import StatusHeartbeat, build_dataset
 
 
 class FixedDetector:
@@ -51,6 +51,29 @@ def detection_config() -> DetectionConfig:
         tail_seconds=10,
         cooldown_seconds=5,
     )
+
+
+def test_status_heartbeat_preserves_progress_and_refreshes_timestamp(
+    runtime_path: Path,
+) -> None:
+    status_path = runtime_path / "status.json"
+    status_path.write_text(
+        json.dumps(
+            {
+                "updated_at": "2000-01-01T00:00:00+00:00",
+                "state": "running",
+                "completed": 3,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    StatusHeartbeat(status_path).refresh()
+
+    payload = json.loads(status_path.read_text(encoding="utf-8"))
+    assert payload["updated_at"] != "2000-01-01T00:00:00+00:00"
+    assert payload["state"] == "running"
+    assert payload["completed"] == 3
 
 
 def test_build_dataset_uses_selected_events_only(runtime_path: Path, monkeypatch) -> None:

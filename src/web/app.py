@@ -4,7 +4,7 @@ import subprocess
 import sys
 from collections.abc import Generator
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Literal
 from uuid import uuid4
@@ -43,6 +43,91 @@ from training.workflow import create_macbook_export, write_status
 
 LABELS = {"pending", "known_cat", "foreign_cat", "not_visible", "multiple_cats"}
 TRAINING_TARGETS = {"excluded", "macbook", "local"}
+ACTIVE_EVALUATION_STATES = {"starting", "running"}
+ACTIVE_TRAINING_STATES = {"starting", "preparing", "training"}
+HEARTBEAT_STALE_AFTER = timedelta(minutes=10)
+INTERRUPTED_MESSAGE = "Прерван без завершения: heartbeat не обновлялся более 10 минут"
+
+
+def _read_status(path: Path) -> dict[str, object] | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _as_utc(value: datetime) -> datetime:
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
+def _status_is_stale(
+    payload: dict[str, object] | None,
+    *,
+    fallback: datetime,
+    now: datetime | None = None,
+) -> bool:
+    updated_at = fallback
+    raw_updated_at = payload.get("updated_at") if payload is not None else None
+    if isinstance(raw_updated_at, str):
+        try:
+            updated_at = datetime.fromisoformat(raw_updated_at)
+        except ValueError:
+            pass
+    current_time = now or datetime.now(UTC)
+    return _as_utc(current_time) - _as_utc(updated_at) > HEARTBEAT_STALE_AFTER
+
+
+def _expire_stale_evaluations(
+    session: Session,
+    data_dir: Path,
+    *,
+    now: datetime | None = None,
+) -> int:
+    current_time = now or datetime.now(UTC)
+    runs = session.scalars(
+        select(EvaluationRun).where(EvaluationRun.status.in_(ACTIVE_EVALUATION_STATES))
+    ).all()
+    expired = 0
+    for run in runs:
+        status_path = data_dir / "evaluations" / f"{run.id:08d}" / "status.json"
+        if not _status_is_stale(
+            _read_status(status_path),
+            fallback=run.created_at,
+            now=current_time,
+        ):
+            continue
+        run.status = "failed"
+        run.completed_at = current_time
+        run.error_message = INTERRUPTED_MESSAGE
+        write_status(
+            status_path,
+            state="failed",
+            message=INTERRUPTED_MESSAGE,
+            run_id=run.id,
+        )
+        expired += 1
+    if expired:
+        session.commit()
+    return expired
+
+
+def _expire_stale_training(
+    status_path: Path,
+    payload: dict[str, object],
+    *,
+    now: datetime | None = None,
+) -> bool:
+    if payload.get("state") not in ACTIVE_TRAINING_STATES:
+        return False
+    try:
+        fallback = datetime.fromtimestamp(status_path.stat().st_mtime, tz=UTC)
+    except OSError:
+        fallback = now or datetime.now(UTC)
+    if not _status_is_stale(payload, fallback=fallback, now=now):
+        return False
+    write_status(status_path, state="failed", message=INTERRUPTED_MESSAGE)
+    return True
 
 
 class CapturePayload(BaseModel):
@@ -403,11 +488,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         runs_root = settings.data_dir / "training" / "local"
         existing = sorted(runs_root.glob("*/status.json"))
         if existing:
-            try:
-                latest = json.loads(existing[-1].read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                latest = {}
-            if latest.get("state") in {"starting", "preparing", "training"}:
+            latest = _read_status(existing[-1]) or {}
+            if (
+                latest.get("state") in ACTIVE_TRAINING_STATES
+                and not _expire_stale_training(existing[-1], latest)
+            ):
                 raise HTTPException(409, "Локальное обучение уже выполняется")
 
         run_id = f"{datetime.now(UTC):%Y%m%d-%H%M%S}-{uuid4().hex[:8]}"
@@ -485,9 +570,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             and payload.created_from > payload.created_to
         ):
             raise HTTPException(422, "Начало диапазона должно быть раньше окончания")
+        _expire_stale_evaluations(session, settings.data_dir)
         running = session.scalar(
             select(EvaluationRun)
-            .where(EvaluationRun.status.in_(["starting", "running"]))
+            .where(EvaluationRun.status.in_(ACTIVE_EVALUATION_STATES))
             .limit(1)
         )
         if running is not None:

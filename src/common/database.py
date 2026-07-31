@@ -2,9 +2,12 @@ import sqlite3
 from collections.abc import Generator
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
-from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text, create_engine
+from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text, create_engine, event
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
+
+SQLITE_BUSY_TIMEOUT_SECONDS = 10
 
 
 class Base(DeclarativeBase):
@@ -102,7 +105,8 @@ class EventPrediction(Base):
 
 def apply_migrations(database_path: Path) -> None:
     migrations_dir = Path(__file__).parent / "migrations"
-    with sqlite3.connect(database_path) as connection:
+    with sqlite3.connect(database_path, timeout=SQLITE_BUSY_TIMEOUT_SECONDS) as connection:
+        _configure_sqlite_connection(connection)
         connection.execute(
             "CREATE TABLE IF NOT EXISTS schema_migrations "
             "(version TEXT PRIMARY KEY, applied_at TEXT NOT NULL)"
@@ -121,13 +125,27 @@ def apply_migrations(database_path: Path) -> None:
         connection.commit()
 
 
+def _configure_sqlite_connection(connection: Any, _: Any = None) -> None:
+    cursor = connection.cursor()
+    try:
+        cursor.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_SECONDS * 1000}")
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+    finally:
+        cursor.close()
+
+
 def create_session_factory(database_path: Path) -> sessionmaker[Session]:
     database_path.parent.mkdir(parents=True, exist_ok=True)
     apply_migrations(database_path)
     engine = create_engine(
         f"sqlite:///{database_path.as_posix()}",
-        connect_args={"check_same_thread": False, "timeout": 10},
+        connect_args={
+            "check_same_thread": False,
+            "timeout": SQLITE_BUSY_TIMEOUT_SECONDS,
+        },
     )
+    event.listen(engine, "connect", _configure_sqlite_connection)
     return sessionmaker(engine, expire_on_commit=False)
 
 

@@ -37,7 +37,7 @@ from src.common.evaluation import (
 from src.common.settings import Settings
 from src.inference.cat_detector import OpenVinoCatDetector
 from src.inference.cat_identity import OpenVinoCatIdentity
-from training.workflow import extract_frames, write_status
+from training.workflow import StatusHeartbeat, extract_frames, write_status
 
 
 def _load_filter(raw: str) -> dict[str, Any]:
@@ -175,6 +175,8 @@ def run_evaluation(
 ) -> None:
     factory = create_session_factory(database_path)
     temporary_root = data_dir / "runtime" / "evaluations" / f"{run_id:08d}"
+    heartbeat = StatusHeartbeat(status_path)
+    heartbeat.start()
     try:
         with factory() as session:
             run = session.get(EvaluationRun, run_id)
@@ -386,6 +388,7 @@ def run_evaluation(
             traceback=traceback.format_exc(),
         )
     finally:
+        heartbeat.stop()
         if temporary_root.exists():
             shutil.rmtree(temporary_root)
 

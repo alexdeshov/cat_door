@@ -10,7 +10,7 @@ from typing import BinaryIO, cast
 import numpy as np
 
 from src.inference.preprocessing import NormalizedRoi
-from src.recorder.ffmpeg import _base_input
+from src.recorder.ffmpeg import _base_input, ffmpeg_creation_flags
 from src.recorder.ring import prune_segments
 
 FRAME_WIDTH = 640
@@ -41,14 +41,15 @@ def _scale_filter() -> str:
     )
 
 
-def _roi_filter(fps: float, roi: NormalizedRoi) -> str:
+def _roi_filter(fps: float, roi: NormalizedRoi, rotate_180: bool) -> str:
     crop = (
         f"crop=iw*{roi.width:g}:ih*{roi.height:g}:"
         f"iw*{roi.x:g}:ih*{roi.y:g}"
     )
     scale = _scale_filter()
+    orientation = ",hflip,vflip" if rotate_180 else ""
     return (
-        f"[0:v:0]fps={fps},hflip,vflip,split=2[preview_source][detector_source];"
+        f"[0:v:0]fps={fps}{orientation},split=2[preview_source][detector_source];"
         f"[preview_source]{scale}[preview];"
         f"[detector_source]{crop},{scale}[detector];"
         "[preview][detector]hstack=inputs=2[combined]"
@@ -64,6 +65,7 @@ def rgb_frame_stream(
     segment_seconds: int = 2,
     retention_seconds: int = 180,
     roi: NormalizedRoi | None = None,
+    rotate_180: bool = True,
 ) -> Iterator[FrameSample]:
     command = [
         *_base_input(ffmpeg_path, rtsp_url),
@@ -94,7 +96,10 @@ def rgb_frame_stream(
                 "-map",
                 "0:v:0",
                 "-vf",
-                f"fps={fps},{_scale_filter()},hflip,vflip",
+                (
+                    f"fps={fps},{_scale_filter()}"
+                    f"{',hflip,vflip' if rotate_180 else ''}"
+                ),
             ]
         )
         frame_bytes = FRAME_BYTES
@@ -103,7 +108,7 @@ def rgb_frame_stream(
         command.extend(
             [
                 "-filter_complex",
-                _roi_filter(fps, roi),
+                _roi_filter(fps, roi, rotate_180),
                 "-map",
                 "[combined]",
             ]
@@ -125,6 +130,7 @@ def rgb_frame_stream(
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
+        creationflags=ffmpeg_creation_flags(),
     )
     try:
         assert process.stdout is not None
