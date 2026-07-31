@@ -96,8 +96,10 @@
     {% endif %}
     {% if recorder_status and recorder_status.detector_connected %}
       <p class="muted">
-        Кадры face/side:
+        Детектор за 60 с, face/side:
         {{ recorder_status.frames_processed.face }}/{{ recorder_status.frames_processed.side }}.
+        Пропущено без движения:
+        {{ recorder_status.frames_skipped_no_motion.face }}/{{ recorder_status.frames_skipped_no_motion.side }}.
         Уверенность cat:
         {{ recorder_status.confidences.face }}/{{ recorder_status.confidences.side }}.
         {% if recorder_status.detector_device_actual %}
@@ -207,6 +209,45 @@
         <input id="detection-{{ role }}-sample-fps"
           type="number" min="0.1" max="10" step="0.1"
           value="{{ camera_config.sample_fps }}">
+      </label>
+      <label>
+        <span class="setting-title">Фильтр по движению
+          <span class="setting-help" tabindex="0" role="note"
+            aria-label="Подсказка: фильтр по движению"
+            data-tooltip="Когда автомат ожидает кота, детектор запускается только при изменении сцены. Во время кандидата и события фильтр не применяется. Выключение возвращает прежнюю обработку каждого кадра.">?</span>
+        </span>
+        <input id="detection-{{ role }}-motion-gating-enabled" type="checkbox"
+          {{ "checked" if camera_config.motion_gating_enabled else "" }}>
+      </label>
+      <label>
+        <span class="setting-title">Порог изменения яркости
+          <span class="setting-help" tabindex="0" role="note"
+            aria-label="Подсказка: порог изменения яркости"
+            data-tooltip="Минимальное изменение яркости пикселя по шкале 0–255. Больше — тени и шум реже запускают детектор, но слабое движение легче пропустить. Меньше — выше чувствительность и нагрузка.">?</span>
+        </span>
+        <input id="detection-{{ role }}-motion-delta"
+          type="number" min="0" max="255" step="0.5"
+          value="{{ camera_config.motion_delta }}">
+      </label>
+      <label>
+        <span class="setting-title">Минимальная площадь движения
+          <span class="setting-help" tabindex="0" role="note"
+            aria-label="Подсказка: минимальная площадь движения"
+            data-tooltip="Доля кадра, которая должна измениться, чтобы запустить детектор. Больше — меньше ложных запусков от мелких бликов, но выше риск не заметить далёкого кота. Меньше — чувствительнее.">?</span>
+        </span>
+        <input id="detection-{{ role }}-motion-min-area-fraction"
+          type="number" min="0.0001" max="1" step="0.0005"
+          value="{{ camera_config.motion_min_area_fraction }}">
+      </label>
+      <label>
+        <span class="setting-title">Скорость обновления фона
+          <span class="setting-help" tabindex="0" role="note"
+            aria-label="Подсказка: скорость обновления фона"
+            data-tooltip="Доля нового кадра в фоне. Больше — фон быстрее привыкает к медленным изменениям освещения, но объект быстрее становится частью фона. Меньше — фон стабильнее, но дольше реагирует на смену света.">?</span>
+        </span>
+        <input id="detection-{{ role }}-motion-alpha"
+          type="number" min="0.001" max="1" step="0.01"
+          value="{{ camera_config.motion_alpha }}">
       </label>
       <label>
         <span class="setting-title">Использовать ROI
@@ -583,6 +624,11 @@
         confirmation_frames: number(`#detection-${role}-confirmation-frames`),
         window_frames: number(`#detection-${role}-window-frames`),
         sample_fps: number(`#detection-${role}-sample-fps`),
+        motion_gating_enabled:
+          document.querySelector(`#detection-${role}-motion-gating-enabled`).checked,
+        motion_delta: number(`#detection-${role}-motion-delta`),
+        motion_min_area_fraction: number(`#detection-${role}-motion-min-area-fraction`),
+        motion_alpha: number(`#detection-${role}-motion-alpha`),
         roi: roiEnabled ? {
           x: number(`#detection-${role}-roi-x`),
           y: number(`#detection-${role}-roi-y`),
@@ -819,6 +865,7 @@
           ? "Кот обнаружен — запись события идёт"
           : detectorStateLabels[state] || result.message || state;
       const frames = result.frames_processed || {};
+      const skipped = result.frames_skipped_no_motion || {};
       const confidences = result.confidences || {};
       const camera = result.initiating_camera
         ? ` · камера: ${result.initiating_camera}`
@@ -828,7 +875,8 @@
           ` (запрошено ${result.detector_device_requested})`
         : "";
       details.textContent =
-        `Кадры face/side: ${frames.face ?? 0}/${frames.side ?? 0}` +
+        `Детектор за 60 с face/side: ${frames.face ?? 0}/${frames.side ?? 0}` +
+        ` · без движения: ${skipped.face ?? 0}/${skipped.side ?? 0}` +
         ` · confidence: ${confidences.face ?? 0}/${confidences.side ?? 0}` +
         `${camera}${device}`;
       const identities = Object.values(result.identity || {});

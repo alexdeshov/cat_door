@@ -85,3 +85,37 @@ def test_export_candidate_writes_reproducible_manifest(
     assert manifest["input"]["shape"] == [1, 3, 416, 416]
     assert manifest["weights_sha256"] == expected
     assert manifest["sha256"] == hashlib.sha256(b"onnx").hexdigest()
+
+
+def test_export_yolo26_candidate_uses_end_to_end_manifest(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    weights = runtime_path / "yolo26n.pt"
+    weights.write_bytes(b"yolo26-weights")
+    expected = hashlib.sha256(b"yolo26-weights").hexdigest()
+    output = runtime_path / "yolo26n-416.onnx"
+    monkeypatch.setattr(
+        "scripts.prepare_detector_candidate._export_yolo26",
+        lambda _weights, candidate_output: candidate_output.write_bytes(b"onnx26"),
+    )
+    monkeypatch.setattr(
+        "scripts.prepare_detector_candidate._onnx_contract",
+        lambda _path: ("images", ["output0"], [1, 3, 416, 416]),
+    )
+
+    result = export_candidate(
+        "yolo26n-416",
+        weights,
+        expected,
+        output,
+        python=Path("python"),
+        source_root=None,
+    )
+    manifest = json.loads(result.with_suffix(".json").read_text(encoding="utf-8"))
+
+    assert manifest["architecture"] == "yolo26"
+    assert manifest["license"] == "AGPL-3.0"
+    assert manifest["input"]["shape"] == [1, 3, 416, 416]
+    assert manifest["postprocessing"]["end_to_end"] is True
+    assert manifest["postprocessing"]["nms_in_graph"] is False

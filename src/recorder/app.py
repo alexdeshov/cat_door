@@ -33,7 +33,11 @@ from src.inference.preprocessing import (
     crop_strongest_cat,
     prepare_detector_frame,
 )
-from src.recorder.automatic import AutomaticEventConfig, AutomaticEventMachine
+from src.recorder.automatic import (
+    AutomaticEventConfig,
+    AutomaticEventMachine,
+    AutomaticEventState,
+)
 from src.recorder.detection_journal import DetectionJournal
 from src.recorder.events import (
     AutomaticEventPrediction,
@@ -41,8 +45,9 @@ from src.recorder.events import (
     persist_automatic_event,
 )
 from src.recorder.frames import rgb_frame_stream
+from src.recorder.motion import MotionGate
 from src.recorder.preview import annotate_detections, preview_path, publish_preview
-from src.recorder.status import write_recorder_status
+from src.recorder.status import RecentFrameCounters, write_recorder_status
 
 DATABASE_STARTUP_ATTEMPTS = 3
 DATABASE_STARTUP_RETRY_SECONDS = 1.0
@@ -124,11 +129,39 @@ class IdentityModel(Protocol):
     def predict(self, frame: Any, threshold: float) -> IdentityPrediction: ...
 
 
+class DetectorModel(Protocol):
+    def detect(self, frame: Any) -> CatDetectionResult: ...
+
+
 @dataclass(frozen=True)
 class IdentityAttempt:
     prediction: IdentityPrediction | None
     skipped_reason: str | None
     inference_ms: float | None = None
+
+
+def _build_motion_gate(config: CameraDetectionConfig) -> MotionGate:
+    return MotionGate(
+        alpha=config.motion_alpha,
+        delta=config.motion_delta,
+        min_area_fraction=config.motion_min_area_fraction,
+    )
+
+
+def _detect_with_motion_gate(
+    detector: DetectorModel,
+    frame: Any,
+    camera_config: CameraDetectionConfig,
+    machine_state: AutomaticEventState,
+    motion_gate: MotionGate,
+) -> CatDetectionResult | None:
+    if (
+        not camera_config.motion_gating_enabled
+        or machine_state is not AutomaticEventState.IDLE
+        or motion_gate.has_motion(frame)
+    ):
+        return detector.detect(frame)
+    return None
 
 
 def _predict_identity_if_detected(
@@ -258,6 +291,8 @@ def publish_heartbeat(settings: Settings) -> None:
         automatic_capture_enabled=settings.automatic_capture_enabled,
         dry_run=settings.automatic_capture_dry_run,
         detector_connected=False,
+        frames_processed={"face": 0, "side": 0},
+        frames_skipped_no_motion={"face": 0, "side": 0},
         **_detector_device_status(settings),
     )
 
@@ -265,7 +300,9 @@ def publish_heartbeat(settings: Settings) -> None:
 def _frame_worker(
     role: str,
     settings: Settings,
-    output: queue.Queue[tuple[str, Any, Any, Any, float, CameraDetectionConfig]],
+    output: queue.Queue[
+        tuple[str, Any, Any, Any, float, CameraDetectionConfig, int]
+    ],
     camera_configs: dict[str, CameraDetectionConfig],
     config_lock: threading.Lock,
     reload_stream: threading.Event,
@@ -283,11 +320,13 @@ def _frame_worker(
     )
     if not url:
         return
+    stream_generation = 0
     while not stop.is_set():
         with config_lock:
             camera_config = camera_configs[role]
             reload_stream.clear()
         try:
+            stream_generation += 1
             for sample in rgb_frame_stream(
                 settings.ffmpeg_path,
                 url,
@@ -315,6 +354,7 @@ def _frame_worker(
                     sample.detector,
                     time.monotonic(),
                     camera_config,
+                    stream_generation,
                 )
                 _put_latest(output, item)
         except OSError:
@@ -346,9 +386,16 @@ def monitor_automatic(settings: Settings, duration_seconds: float | None) -> Non
         role: CameraConfirmationTracker(getattr(runtime_config, role))
         for role in ("face", "side")
     }
+    motion_gates = {
+        role: _build_motion_gate(getattr(runtime_config, role))
+        for role in ("face", "side")
+    }
+    stream_generations = {"face": 0, "side": 0}
     frame_queues: dict[
         str,
-        queue.Queue[tuple[str, Any, Any, Any, float, CameraDetectionConfig]],
+        queue.Queue[
+            tuple[str, Any, Any, Any, float, CameraDetectionConfig, int]
+        ],
     ] = {
         role: queue.Queue(maxsize=1)
         for role in ("face", "side")
@@ -390,7 +437,8 @@ def monitor_automatic(settings: Settings, duration_seconds: float | None) -> Non
     started_at = time.monotonic()
     confidences = {"face": 0.0, "side": 0.0}
     identity_predictions: dict[str, dict[str, object]] = {}
-    frames_processed = {"face": 0, "side": 0}
+    frames_processed_total = {"face": 0, "side": 0}
+    recent_frame_counters = RecentFrameCounters()
     last_action: str | None = None
     last_status_at = 0.0
     active_started_at: float | None = None
@@ -445,6 +493,10 @@ def monitor_automatic(settings: Settings, duration_seconds: float | None) -> Non
                         role: CameraConfirmationTracker(getattr(runtime_config, role))
                         for role in ("face", "side")
                     }
+                    motion_gates = {
+                        role: _build_motion_gate(getattr(runtime_config, role))
+                        for role in ("face", "side")
+                    }
                     journal.write("config_updated", **runtime_config.model_dump())
                 last_config_check_at = now
             try:
@@ -460,12 +512,14 @@ def monitor_automatic(settings: Settings, duration_seconds: float | None) -> Non
                     detector_frame,
                     captured_at,
                     camera_config,
+                    stream_generation,
                 ) = item
             except queue.Empty:
+                recent_counts = recent_frame_counters.snapshot(time.monotonic())
                 journal.write(
                     "frames_waiting",
                     state=machine.state.value,
-                    frames_processed=frames_processed,
+                    frames_processed=frames_processed_total,
                 )
                 write_recorder_status(
                     recorder_status_path(settings),
@@ -475,15 +529,62 @@ def monitor_automatic(settings: Settings, duration_seconds: float | None) -> Non
                     automatic_capture_enabled=True,
                     dry_run=True,
                     detector_connected=True,
-                    frames_processed=frames_processed,
+                    **recent_counts,
                     confidences=confidences,
                     **_detector_device_status(settings, detector),
                 )
                 continue
-            inference_started_at = time.monotonic()
-            detection = detector.detect(frame)
-            inference_ms = (time.monotonic() - inference_started_at) * 1000
+            if stream_generations[role] != stream_generation:
+                motion_gates[role].reset()
+                stream_generations[role] = stream_generation
             frame_age_ms = (time.monotonic() - captured_at) * 1000
+            inference_started_at = time.monotonic()
+            detection = _detect_with_motion_gate(
+                detector,
+                frame,
+                camera_config,
+                machine.state,
+                motion_gates[role],
+            )
+            if detection is None:
+                skipped_at = time.monotonic()
+                recent_frame_counters.record_skipped_no_motion(role, skipped_at)
+                journal.write(
+                    "observation",
+                    camera=role,
+                    skipped_reason="no_motion",
+                    sample_fps=camera_config.sample_fps,
+                    frame_age_ms=round(frame_age_ms, 1),
+                )
+                try:
+                    publish_preview(preview_path(settings.data_dir, role), preview_frame)
+                except OSError:
+                    pass
+                if skipped_at - last_status_at >= 0.5:
+                    recent_counts = recent_frame_counters.snapshot(skipped_at)
+                    write_recorder_status(
+                        recorder_status_path(settings),
+                        process="CatDoorRecorder",
+                        state=machine.state.value,
+                        message=(
+                            "Dry-run: локальный детектор анализирует камеры"
+                            if settings.automatic_capture_dry_run
+                            else "Автоматический сбор и запись событий включены"
+                        ),
+                        automatic_capture_enabled=True,
+                        dry_run=settings.automatic_capture_dry_run,
+                        detector_connected=True,
+                        **recent_counts,
+                        confidences=confidences,
+                        identity=identity_predictions,
+                        last_action=last_action,
+                        initiating_camera=None,
+                        **_detector_device_status(settings, detector),
+                    )
+                    last_status_at = skipped_at
+                continue
+            inference_ms = (time.monotonic() - inference_started_at) * 1000
+            recent_frame_counters.record_processed(role, time.monotonic())
             confidence = detection.confidence
             camera_confirmed = trackers[role].observe(confidence)
             try:
@@ -527,7 +628,7 @@ def monitor_automatic(settings: Settings, duration_seconds: float | None) -> Non
                     "name": prediction.prediction.name,
                     "confidence": round(prediction.prediction.confidence, 4),
                 }
-            frames_processed[role] += 1
+            frames_processed_total[role] += 1
             update = machine.observe(time.monotonic(), {role: 1.0 if camera_confirmed else 0.0})
             journal.write(
                 "observation",
@@ -548,7 +649,7 @@ def monitor_automatic(settings: Settings, duration_seconds: float | None) -> Non
                 state=update.state.value,
                 action=update.action.value if update.action is not None else None,
                 initiating_camera=update.initiating_camera,
-                frames_processed=dict(frames_processed),
+                frames_processed=dict(frames_processed_total),
                 inference_ms=round(inference_ms, 1),
                 frame_age_ms=round(frame_age_ms, 1),
                 boxes_visible=sum(
@@ -623,6 +724,7 @@ def monitor_automatic(settings: Settings, duration_seconds: float | None) -> Non
             now = time.monotonic()
             if update.action is None and now - last_status_at < 0.5:
                 continue
+            recent_counts = recent_frame_counters.snapshot(now)
             write_recorder_status(
                 recorder_status_path(settings),
                 process="CatDoorRecorder",
@@ -635,7 +737,7 @@ def monitor_automatic(settings: Settings, duration_seconds: float | None) -> Non
                 automatic_capture_enabled=True,
                 dry_run=settings.automatic_capture_dry_run,
                 detector_connected=True,
-                frames_processed=frames_processed,
+                **recent_counts,
                 confidences=confidences,
                 identity=identity_predictions,
                 last_action=last_action,
@@ -651,6 +753,7 @@ def monitor_automatic(settings: Settings, duration_seconds: float | None) -> Non
         raise
     finally:
         stop.set()
+        recent_counts = recent_frame_counters.snapshot(time.monotonic())
         write_recorder_status(
             recorder_status_path(settings),
             process="CatDoorRecorder",
@@ -659,7 +762,7 @@ def monitor_automatic(settings: Settings, duration_seconds: float | None) -> Non
             automatic_capture_enabled=True,
             dry_run=True,
             detector_connected=True,
-            frames_processed=frames_processed,
+            **recent_counts,
             confidences=confidences,
             identity=identity_predictions,
             last_action=last_action,
@@ -667,7 +770,7 @@ def monitor_automatic(settings: Settings, duration_seconds: float | None) -> Non
         )
         journal.write(
             "session_stopped",
-            frames_processed=frames_processed,
+            frames_processed=frames_processed_total,
             last_action=last_action,
         )
         journal.close()

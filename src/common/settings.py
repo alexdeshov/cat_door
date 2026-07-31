@@ -31,6 +31,10 @@ class Settings(BaseSettings):
     identity_confidence_threshold: float = Field(default=0.80, ge=0.0, le=1.0)
     detector_face_sample_fps: float = Field(default=8.0, gt=0.0, le=10.0)
     detector_sample_fps: float = Field(default=3.0, gt=0.0, le=10.0)
+    motion_gating_enabled: bool = False
+    motion_delta: float = Field(default=12.0, ge=0.0, le=255.0)
+    motion_min_area_fraction: float = Field(default=0.005, gt=0.0, le=1.0)
+    motion_alpha: float = Field(default=0.1, gt=0.0, le=1.0)
     ring_segment_seconds: int = Field(default=2, ge=1, le=10)
     ring_retention_seconds: int = Field(default=180, ge=30, le=1800)
     automatic_prebuffer_seconds: int = Field(default=12, ge=0, le=60)

@@ -74,7 +74,7 @@ def test_capture_and_label_known_cat(runtime_path: Path, monkeypatch) -> None:
     assert "Настройки детекции" in page.text
     assert 'id="detection-face-confirmation-frames"' in page.text
     assert 'id="detection-side-confirmation-frames"' in page.text
-    assert page.text.count('class="setting-help"') == 16
+    assert page.text.count('class="setting-help"') == 24
     assert 'aria-label="Подсказка: рабочий confidence"' in page.text
     assert "На запуск события не влияет." in page.text
     assert "Окно не должно быть меньше числа подтверждений." in page.text
@@ -183,6 +183,7 @@ def test_page_shows_detector_probe_metrics(runtime_path: Path, monkeypatch) -> N
         message="Dry-run проверка завершена",
         detector_connected=True,
         frames_processed={"face": 10, "side": 11},
+        frames_skipped_no_motion={"face": 3, "side": 4},
         confidences={"face": 0.25, "side": 0.5},
         detector_device_requested="GPU",
         detector_device_actual="GPU.0",
@@ -193,9 +194,10 @@ def test_page_shows_detector_probe_metrics(runtime_path: Path, monkeypatch) -> N
 
     assert page.status_code == 200
     assert page.text.count('class="rotate-camera"') == 2
-    assert "Кадры face/side:" in page.text
+    assert "Детектор за 60 с, face/side:" in page.text
     assert "OpenVINO: GPU.0" in page.text
     assert "10/11" in page.text
+    assert "3/4" in page.text
     assert "0.25/0.5" in page.text
 
     status = client.get("/api/recorder/status")
@@ -562,6 +564,10 @@ def test_detection_settings_can_be_updated(runtime_path: Path, monkeypatch) -> N
             "confirmation_frames": 2,
             "window_frames": 5,
             "sample_fps": 8.0,
+            "motion_gating_enabled": True,
+            "motion_delta": 14.0,
+            "motion_min_area_fraction": 0.01,
+            "motion_alpha": 0.2,
             "roi": {"x": 0.1, "y": 0.2, "width": 0.7, "height": 0.6},
         },
         "side": {
@@ -570,6 +576,10 @@ def test_detection_settings_can_be_updated(runtime_path: Path, monkeypatch) -> N
             "confirmation_frames": 2,
             "window_frames": 4,
             "sample_fps": 3.0,
+            "motion_gating_enabled": False,
+            "motion_delta": 12.0,
+            "motion_min_area_fraction": 0.005,
+            "motion_alpha": 0.1,
             "roi": None,
         },
         "candidate_timeout_seconds": 2.0,
@@ -586,6 +596,7 @@ def test_detection_settings_can_be_updated(runtime_path: Path, monkeypatch) -> N
     page = client.get("/")
     assert 'id="detection-face-sample-fps"' in page.text
     assert 'id="detection-face-roi-enabled"' in page.text
+    assert 'id="detection-face-motion-gating-enabled"' in page.text
 
 
 def test_detection_settings_reject_invalid_window(runtime_path: Path, monkeypatch) -> None:

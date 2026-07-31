@@ -508,3 +508,46 @@
   Windows-моноблоке.
 - Следующий шаг: применить быстрые меры в админке, разметить накопленные
   ложные события, затем запустить Codex с `docs/codex-fp-reduction-prompt.md`.
+
+## 2026-07-31 — Motion gating и подготовка YOLO26n
+
+- Цель: выполнить `docs/codex-fp-reduction-prompt.md`, сократить холостые
+  запуски детектора на статичной сцене и измерить YOLO26n как кандидата без
+  активации модели.
+- Сделано: добавлен пер-камерный `MotionGate` на numpy с блочным уменьшением,
+  бегущим фоном, 10 кадрами прогрева и обязательным bypass вне `idle`;
+  добавлены настройки, миграция старого JSON, блок админки, облегчённые
+  `no_motion` observations и heartbeat-счётчики за 60 секунд. Официальные веса
+  YOLO26n проверены по SHA-256, экспортированы в end-to-end ONNX `416×416`,
+  добавлены architecture alias и синтетический тест адаптера. Модель и локальные
+  probe-отчёты оставлены только в игнорируемых runtime-каталогах.
+- Решения: motion gating по умолчанию выключен и не обновляет фон в состояниях
+  `candidate/active/tail/cooldown`; существующие пороги и FPS не менялись.
+  YOLO26n не активирован: latency проходит бюджет, но качество нельзя принять
+  без размеченных событий. Случайно добавленные exporter-ом пакеты
+  `onnxruntime`/`flatbuffers` удалены из основной `.venv`, `pip check` чист.
+- Изменённые файлы: `.env.example`, `config/settings.example.yaml`,
+  `docs/automatic-capture.md`, `docs/detector-candidates.md`,
+  `docs/session-history.md`, `scripts/prepare_detector_candidate.py`,
+  `src/common/detection_config.py`, `src/common/settings.py`,
+  `src/inference/detector_adapters.py`, `src/recorder/app.py`,
+  `src/recorder/motion.py`, `src/recorder/status.py`,
+  `src/web/templates/index.html`, `tests/test_admin.py`,
+  `tests/test_detection_config.py`, `tests/test_detector_adapters.py`,
+  `tests/test_motion.py`, `tests/test_prepare_detector_candidate.py`,
+  `tests/test_recorder_app.py`, `tests/test_recorder_status.py`.
+- Проверки: baseline — Ruff, mypy для 38 файлов и 150 pytest; итог — Ruff,
+  mypy для 39 файлов и 159 pytest. Обычный 20-секундный camera smoke дал 190
+  observations без ошибок. С включённым gate только для Hikvision после 10
+  прогревочных кадров пропущено 206 статичных observations; настройка возвращена
+  в `false`. OpenVINO CPU probe: SSDLite combined median/p95
+  `57.4/97.665` мс, YOLO26n — `47.4/83.05` мс; оба проходят median-бюджет
+  70 мс. Новых обращений к механике двери нет.
+- Статус: motion gating завершён. Фаза качества YOLO26n частично заблокирована:
+  все 125 локальных событий имеют метку `pending`, поэтому не выполнены sanity
+  на трёх кадрах кота и трёх ложных объектах, detector-only replay, miss rate,
+  false trigger rate и threshold sweep. Физическая проверка движения после
+  первого `no_motion` также ожидает жеста владельца перед камерой.
+- Следующий шаг: владельцу разметить минимум три прохода с котом и три ложных
+  события как `not_visible`, затем повторить sanity/replay и проверить gate
+  жестом перед камерой; до этого YOLO26n и новые пороги не активировать.
