@@ -31,6 +31,10 @@ class CameraDetectionConfig(BaseModel):
     window_frames: int = Field(ge=1, le=30)
     sample_fps: float = Field(default=3.0, gt=0.0, le=10.0)
     roi: DetectorRoi | None = None
+    motion_gating_enabled: bool = False
+    motion_delta: float = Field(default=12.0, ge=0.0, le=255.0)
+    motion_min_area_fraction: float = Field(default=0.005, gt=0.0, le=1.0)
+    motion_alpha: float = Field(default=0.1, gt=0.0, le=1.0)
 
     @model_validator(mode="after")
     def validate_camera(self) -> CameraDetectionConfig:
@@ -57,6 +61,10 @@ class DetectionConfig(BaseModel):
             confirmation_frames=settings.detection_confirmation_frames,
             window_frames=settings.detection_window_frames,
             sample_fps=settings.detector_sample_fps,
+            motion_gating_enabled=settings.motion_gating_enabled,
+            motion_delta=settings.motion_delta,
+            motion_min_area_fraction=settings.motion_min_area_fraction,
+            motion_alpha=settings.motion_alpha,
         )
         return cls(
             face=CameraDetectionConfig(
@@ -65,6 +73,10 @@ class DetectionConfig(BaseModel):
                 confirmation_frames=2,
                 window_frames=5,
                 sample_fps=settings.detector_face_sample_fps,
+                motion_gating_enabled=settings.motion_gating_enabled,
+                motion_delta=settings.motion_delta,
+                motion_min_area_fraction=settings.motion_min_area_fraction,
+                motion_alpha=settings.motion_alpha,
             ),
             side=side,
             candidate_timeout_seconds=settings.detection_candidate_timeout_seconds,

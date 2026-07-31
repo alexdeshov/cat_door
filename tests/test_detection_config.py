@@ -86,8 +86,13 @@ def test_nested_legacy_config_gets_new_camera_defaults(runtime_path) -> None:
     assert loaded.face.confidence_threshold == 0.25
     assert loaded.face.sample_fps == 8.0
     assert loaded.face.roi is None
+    assert loaded.face.motion_gating_enabled is False
+    assert loaded.face.motion_delta == 12.0
+    assert loaded.face.motion_min_area_fraction == 0.005
+    assert loaded.face.motion_alpha == 0.1
     assert loaded.side.confidence_threshold == 0.50
     assert loaded.side.sample_fps == 3.0
+    assert loaded.side.motion_gating_enabled is False
 
 
 def test_roi_outside_frame_falls_back_to_defaults(runtime_path) -> None:

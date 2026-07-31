@@ -19,5 +19,9 @@ cameras:
 
 inference:
   detector_fps: 5
+  motion_gating_enabled: false
+  motion_delta: 12
+  motion_min_area_fraction: 0.005
+  motion_alpha: 0.1
   face_weight: 0.65
   body_weight: 0.35

@@ -79,6 +79,28 @@ CANDIDATES: dict[str, dict[str, Any]] = {
         },
         "source": "https://github.com/ultralytics/ultralytics",
     },
+    "yolo26n-416": {
+        "architecture": "yolo26",
+        "license": "AGPL-3.0",
+        "input": {
+            "name": "images",
+            "shape": [1, 3, 416, 416],
+            "channel_order": "rgb",
+            "scale": 1.0 / 255.0,
+            "mean": [0.0, 0.0, 0.0],
+            "std": [1.0, 1.0, 1.0],
+            "letterbox_value": 114,
+            "resize_mode": "letterbox",
+            "letterbox_alignment": "center",
+        },
+        "postprocessing": {
+            "score_threshold": 0.001,
+            "end_to_end": True,
+            "nms_in_graph": False,
+            "max_detections": 300,
+        },
+        "source": "https://github.com/ultralytics/assets/releases/tag/v8.4.0",
+    },
 }
 
 
@@ -234,6 +256,34 @@ def _export_yolo11(weights: Path, output: Path) -> None:
         shutil.move(str(exported), output)
 
 
+def _export_yolo26(weights: Path, output: Path) -> None:
+    try:
+        from ultralytics import YOLO  # type: ignore[import-not-found]
+    except ImportError as exc:
+        raise RuntimeError(
+            "Ultralytics is required only in the candidate export environment"
+        ) from exc
+    default_export = weights.with_suffix(".onnx")
+    if default_export.exists() and default_export.resolve() != output.resolve():
+        raise FileExistsError(f"refusing to overwrite Ultralytics output {default_export}")
+    exported = Path(
+        YOLO(str(weights)).export(
+            format="onnx",
+            imgsz=416,
+            opset=18,
+            simplify=True,
+            end2end=True,
+            max_det=300,
+            batch=1,
+            device="cpu",
+        )
+    )
+    if not exported.is_file():
+        raise RuntimeError("Ultralytics did not return an exported ONNX file")
+    if exported.resolve() != output.resolve():
+        shutil.move(str(exported), output)
+
+
 def _onnx_contract(path: Path) -> tuple[str, list[str], list[int]]:
     try:
         import onnx
@@ -282,6 +332,8 @@ def export_candidate(
             _export_yolox(python, weights, output, source_root)
         elif candidate == "yolo11n-416":
             _export_yolo11(weights, output)
+        elif candidate == "yolo26n-416":
+            _export_yolo26(weights, output)
         else:
             raise ValueError(f"unknown detector candidate: {candidate}")
         if not output.is_file():

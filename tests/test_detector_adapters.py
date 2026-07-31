@@ -79,6 +79,31 @@ def test_yolo11_adapter_reads_end_to_end_nms_output() -> None:
     assert detections[0].confidence == pytest.approx(0.8)
 
 
+def test_yolo26_alias_reads_nms_free_end_to_end_output() -> None:
+    adapter = create_output_adapter(
+        {
+            "architecture": "yolo26",
+            "cat_class_id": 15,
+            "outputs": ["output0"],
+            "postprocessing": {"score_threshold": 0.05},
+        },
+        416,
+    )
+
+    detections = adapter.parse(
+        {
+            "output0": np.asarray(
+                [[[15, 25, 110, 130, 0.87, 15], [20, 30, 40, 50, 0.95, 0]]],
+                dtype=np.float32,
+            )
+        }
+    )
+
+    assert len(detections) == 1
+    assert detections[0].box == (15.0, 25.0, 110.0, 130.0)
+    assert detections[0].confidence == pytest.approx(0.87)
+
+
 def test_nanodet_adapter_decodes_distribution_output() -> None:
     adapter = NanoDetOutputAdapter(
         cat_class_id=1,

@@ -13,6 +13,7 @@ from src.inference.cat_detector import CatDetection, CatDetectionResult
 from src.inference.cat_identity import IdentityPrediction
 from src.recorder.app import (
     CameraConfirmationTracker,
+    _detect_with_motion_gate,
     _get_fair_frame,
     _predict_identity_if_detected,
     _put_latest,
@@ -22,6 +23,8 @@ from src.recorder.app import (
     recorder_status_path,
     run,
 )
+from src.recorder.automatic import AutomaticEventState
+from src.recorder.motion import MotionGate
 
 
 def test_disabled_recorder_writes_safe_heartbeat(runtime_path: Path) -> None:
@@ -104,6 +107,87 @@ def test_camera_confirmation_tracker_uses_own_threshold_and_window() -> None:
     assert tracker.observe(0.31) is False
     assert tracker.observe(0.10) is False
     assert tracker.observe(0.40) is True
+
+
+class RecordingDetector:
+    def __init__(self) -> None:
+        self.calls: list[np.ndarray] = []
+        self.result = CatDetectionResult(confidence=0.0, detections=())
+
+    def detect(self, frame: np.ndarray) -> CatDetectionResult:
+        self.calls.append(frame)
+        return self.result
+
+
+def motion_config(*, enabled: bool) -> CameraDetectionConfig:
+    return CameraDetectionConfig(
+        confidence_threshold=0.30,
+        box_min_confidence=0.15,
+        confirmation_frames=2,
+        window_frames=5,
+        motion_gating_enabled=enabled,
+    )
+
+
+def test_non_idle_state_always_runs_detector_without_updating_static_gate() -> None:
+    detector = RecordingDetector()
+    gate = MotionGate()
+    frame = np.zeros((320, 320, 3), dtype=np.uint8)
+    for _ in range(11):
+        gate.has_motion(frame)
+
+    result = _detect_with_motion_gate(
+        detector,
+        frame,
+        motion_config(enabled=True),
+        AutomaticEventState.ACTIVE,
+        gate,
+    )
+
+    assert result is detector.result
+    assert detector.calls == [frame]
+    assert gate.has_motion(frame) is False
+
+
+def test_disabled_motion_gating_preserves_detector_path_for_every_sample() -> None:
+    detector = RecordingDetector()
+    gate = MotionGate()
+    frame = np.zeros((320, 320, 3), dtype=np.uint8)
+
+    results = [
+        _detect_with_motion_gate(
+            detector,
+            frame,
+            motion_config(enabled=False),
+            AutomaticEventState.IDLE,
+            gate,
+        )
+        for _ in range(12)
+    ]
+
+    assert results == [detector.result] * 12
+    assert detector.calls == [frame] * 12
+    assert gate.has_motion(frame) is True
+
+
+def test_idle_static_scene_skips_detector_after_motion_warmup() -> None:
+    detector = RecordingDetector()
+    gate = MotionGate()
+    frame = np.zeros((320, 320, 3), dtype=np.uint8)
+
+    results = [
+        _detect_with_motion_gate(
+            detector,
+            frame,
+            motion_config(enabled=True),
+            AutomaticEventState.IDLE,
+            gate,
+        )
+        for _ in range(11)
+    ]
+
+    assert results[-1] is None
+    assert len(detector.calls) == 10
 
 
 class RecordingIdentityModel:

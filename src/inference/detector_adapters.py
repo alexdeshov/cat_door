@@ -310,9 +310,9 @@ def create_output_adapter(
             nms_iou_threshold,
             max_detections,
         )
-    if architecture == "yolo11n":
+    if architecture in {"yolo11n", "yolo26"}:
         if len(output_names) != 1:
-            raise DetectorOutputError("YOLO11 requires one end-to-end NMS output")
+            raise DetectorOutputError("end-to-end YOLO requires one detection output")
         return Yolo11OutputAdapter(
             cat_class_id,
             input_size,
