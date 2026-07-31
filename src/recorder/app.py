@@ -276,6 +276,11 @@ def _frame_worker(
     detector_letterbox_alignment: str,
 ) -> None:
     url = settings.camera_face_rtsp if role == "face" else settings.camera_side_rtsp
+    rotate_180 = (
+        settings.camera_face_rotate_180
+        if role == "face"
+        else settings.camera_side_rotate_180
+    )
     if not url:
         return
     while not stop.is_set():
@@ -291,6 +296,7 @@ def _frame_worker(
                 segment_seconds=settings.ring_segment_seconds,
                 retention_seconds=settings.ring_retention_seconds,
                 roi=camera_config.roi,
+                rotate_180=rotate_180,
             ):
                 if stop.is_set():
                     return

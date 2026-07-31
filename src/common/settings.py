@@ -14,6 +14,8 @@ class Settings(BaseSettings):
 
     camera_face_rtsp: str = ""
     camera_side_rtsp: str = ""
+    camera_face_rotate_180: bool = True
+    camera_side_rotate_180: bool = True
     data_dir: Path = Path("data")
     database_path: Path | None = None
     ffmpeg_path: str = "ffmpeg"
