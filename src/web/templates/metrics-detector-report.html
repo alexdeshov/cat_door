@@ -55,7 +55,7 @@
           <tbody>
           {% for view, values in report.sections[section_key].items() %}
             <tr>
-              <td>{{ "Cute 2" if view == "face" else "Ursa Minor" }}</td>
+              <td>{{ "Hikvision" if view == "face" else "Ursa Minor" }}</td>
               <td>{{ values.events }} (нет: {{ values.missing_media }})</td>
               <td>{{ values.cat_events }} (miss: {{ values.misses }})</td>
               <td>{{ "%.2f%%"|format(values.miss_rate * 100) if values.miss_rate is not none else "—" }}</td>
@@ -79,7 +79,7 @@
         {% for view, values in report.sections.clean.items() %}
           {% for group, distribution in values.confidence_distribution.items() %}
             <tr>
-              <td>{{ "Cute 2" if view == "face" else "Ursa Minor" }}</td>
+              <td>{{ "Hikvision" if view == "face" else "Ursa Minor" }}</td>
               <td>{{ group }}</td><td>{{ distribution.samples }}</td>
               {% for key in ["min", "p25", "median", "p75", "p95", "max"] %}
                 <td>{{ "%.3f"|format(distribution[key]) if distribution[key] is not none else "—" }}</td>
@@ -93,7 +93,7 @@
 
     {% for view, points in report.threshold_sweep.items() %}
       <section class="panel">
-        <h2>Пороги: {{ "Cute 2" if view == "face" else "Ursa Minor" }}</h2>
+        <h2>Пороги: {{ "Hikvision" if view == "face" else "Ursa Minor" }}</h2>
         <table>
           <thead><tr><th>Порог</th><th>Miss rate</th><th>False trigger rate</th><th>С котом</th><th>Без кота</th></tr></thead>
           <tbody>

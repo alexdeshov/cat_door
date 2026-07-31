@@ -1,3 +1,4 @@
+import subprocess
 from unittest.mock import Mock
 
 import numpy as np
@@ -15,9 +16,11 @@ def test_rgb_frame_stream_decodes_fixed_frame(monkeypatch) -> None:
         b"",
     ]
     commands = []
+    popen_kwargs = []
 
     def fake_popen(command, **kwargs):
         commands.append(command)
+        popen_kwargs.append(kwargs)
         return process
 
     monkeypatch.setattr("src.recorder.frames.subprocess.Popen", fake_popen)
@@ -33,6 +36,11 @@ def test_rgb_frame_stream_decodes_fixed_frame(monkeypatch) -> None:
         "fps=3.0,scale=640:360:force_original_aspect_ratio=decrease,"
         "pad=640:360:(ow-iw)/2:(oh-ih)/2,hflip,vflip"
     ) in commands[0]
+    assert popen_kwargs[0]["creationflags"] == getattr(
+        subprocess,
+        "CREATE_NO_WINDOW",
+        0,
+    )
     process.terminate.assert_called_once()
 
 
@@ -96,6 +104,7 @@ def test_roi_is_cropped_before_detector_scaling_and_keeps_full_preview(
             8.0,
             segment_directory=runtime_path / "ring",
             roi=roi,
+            rotate_180=False,
         )
     )
 
@@ -103,8 +112,33 @@ def test_roi_is_cropped_before_detector_scaling_and_keeps_full_preview(
     assert np.all(frames[0].preview == 7)
     assert np.all(frames[0].detector == 9)
     filter_complex = commands[0][commands[0].index("-filter_complex") + 1]
+    assert "hflip" not in filter_complex
+    assert "vflip" not in filter_complex
     assert (
         "[detector_source]crop=iw*0.5:ih*0.7:iw*0.2:ih*0.1,"
         "scale=640:360"
     ) in filter_complex
     assert commands[0].index("copy") < commands[0].index("-filter_complex")
+
+
+def test_rgb_frame_stream_can_keep_native_orientation(monkeypatch) -> None:
+    process = Mock()
+    process.stdout.read.return_value = b""
+    commands = []
+    monkeypatch.setattr(
+        "src.recorder.frames.subprocess.Popen",
+        lambda command, **kwargs: commands.append(command) or process,
+    )
+
+    list(
+        rgb_frame_stream(
+            "ffmpeg",
+            "rtsp://camera",
+            3.0,
+            rotate_180=False,
+        )
+    )
+
+    video_filter = commands[0][commands[0].index("-vf") + 1]
+    assert "hflip" not in video_filter
+    assert "vflip" not in video_filter

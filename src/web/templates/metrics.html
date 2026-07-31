@@ -84,7 +84,7 @@
       <tbody>
       {% for role, values in detection.items() %}
         <tr>
-          <td>{{ "Cute 2" if role == "face" else "Ursa Minor" }}</td>
+          <td>{{ "Hikvision" if role == "face" else "Ursa Minor" }}</td>
           <td>{{ values.observations }}</td>
           <td>{{ values.above_threshold }}</td>
           <td>{{ "%.1f мс"|format(values.median_inference_ms) if values.median_inference_ms is not none else "—" }}</td>
