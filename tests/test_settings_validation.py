@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from src.common.settings import (
     ConfigurationError,
@@ -69,3 +70,47 @@ def test_unwritable_data_dir_is_rejected(tmp_path: Path) -> None:
             validate_runtime_paths(settings)
     finally:
         data_dir.chmod(0o700)
+
+
+def test_extra_cameras_join_the_two_roles() -> None:
+    settings = Settings(
+        camera_face_rtsp="rtsp://face",
+        camera_side_rtsp="rtsp://side",
+        cameras=[{"id": "yard", "rtsp": "rtsp://yard", "title": "Двор"}],
+    )
+
+    assert [camera.id for camera in settings.preview_cameras()] == ["face", "side", "yard"]
+    assert settings.preview_camera("yard").display_title == "Двор"
+
+
+def test_unconfigured_role_stays_known_but_is_not_shown() -> None:
+    """A role without an address is a configuration gap, not an unknown camera.
+
+    The stream route tells them apart: one answers 503, the other 404.
+    """
+    settings = Settings(camera_face_rtsp="rtsp://face", camera_side_rtsp="")
+
+    assert [camera.id for camera in settings.preview_cameras()] == ["face"]
+    assert settings.preview_camera("side") is not None
+    assert settings.preview_camera("nothing-like-this") is None
+
+
+def test_a_listed_camera_can_override_a_role() -> None:
+    """Overriding by id is what keeps the migration to a camera list gradual."""
+    settings = Settings(
+        camera_face_rtsp="rtsp://old",
+        cameras=[{"id": "face", "rtsp": "rtsp://new"}],
+    )
+
+    assert settings.preview_camera("face").rtsp == "rtsp://new"
+
+
+def test_camera_id_must_survive_a_url_path_segment() -> None:
+    with pytest.raises(ValidationError):
+        Settings(cameras=[{"id": "../etc", "rtsp": "rtsp://x"}])
+
+
+def test_camera_defaults_to_its_id_as_a_title() -> None:
+    settings = Settings(cameras=[{"id": "gate", "rtsp": "rtsp://gate"}])
+
+    assert settings.preview_camera("gate").display_title == "gate"

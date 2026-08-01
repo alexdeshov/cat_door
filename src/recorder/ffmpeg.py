@@ -94,13 +94,23 @@ def record_clip(
     temporary.replace(destination)
 
 
-def mjpeg_stream(ffmpeg_path: str, rtsp_url: str, fps: int) -> Iterator[bytes]:
+def mjpeg_stream(
+    ffmpeg_path: str,
+    rtsp_url: str,
+    fps: int,
+    *,
+    rotate_180: bool = False,
+) -> Iterator[bytes]:
+    # Same pair of flips the detector pipeline uses in src/recorder/frames.py,
+    # so an upside-down camera looks the same while being aimed as it will once
+    # it is recording.
+    orientation = ",hflip,vflip" if rotate_180 else ""
     command = [
         *_base_input(ffmpeg_path, rtsp_url),
         "-map",
         "0:v:0",
         "-vf",
-        f"fps={fps},scale=960:-2",
+        f"fps={fps},scale=960:-2{orientation}",
         "-q:v",
         "5",
         "-f",

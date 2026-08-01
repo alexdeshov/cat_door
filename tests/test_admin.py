@@ -812,9 +812,10 @@ def test_stream_falls_back_to_the_camera_when_the_recorder_is_idle(
     """
     used: dict[str, object] = {}
 
-    def fake_camera_stream(ffmpeg_path: str, rtsp_url: str, fps: int):
+    def fake_camera_stream(ffmpeg_path: str, rtsp_url: str, fps: int, **options):
         used["ffmpeg_path"] = ffmpeg_path
         used["rtsp_url"] = rtsp_url
+        used["rotate_180"] = options.get("rotate_180")
         yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\ncamera\r\n"
 
     monkeypatch.setattr("src.web.app.mjpeg_stream", fake_camera_stream)
@@ -825,6 +826,8 @@ def test_stream_falls_back_to_the_camera_when_the_recorder_is_idle(
         assert b"camera" in _collect_first_frame(response)
 
     assert used["rtsp_url"] == "rtsp://user:password@camera.local/media/video1"
+    # The role keeps its own orientation flag, which defaults to a rotated camera.
+    assert used["rotate_180"] is True
 
 
 def test_stream_prefers_annotated_frames_while_the_recorder_publishes(
@@ -833,7 +836,7 @@ def test_stream_prefers_annotated_frames_while_the_recorder_publishes(
 ) -> None:
     """Detector boxes are more useful than a raw picture, so they win."""
 
-    def fake_camera_stream(ffmpeg_path: str, rtsp_url: str, fps: int):
+    def fake_camera_stream(ffmpeg_path: str, rtsp_url: str, fps: int, **options):
         raise AssertionError("the camera must not be opened twice")
 
     def fake_published_stream(path: Path, fps: int):
@@ -846,3 +849,27 @@ def test_stream_prefers_annotated_frames_while_the_recorder_publishes(
 
     with client.stream("GET", "/stream/face.mjpeg") as response:
         assert b"annotated" in _collect_first_frame(response)
+
+
+def test_cameras_page_lists_every_configured_camera(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    client = make_client(runtime_path, monkeypatch, side=True)
+
+    page = client.get("/cameras")
+
+    assert page.status_code == 200
+    assert "/stream/face.mjpeg" in page.text
+    assert "/stream/side.mjpeg" in page.text
+
+
+def test_unknown_camera_is_not_confused_with_an_unconfigured_one(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    """404 means nobody declared it; 503 means it has no address yet."""
+    client = make_client(runtime_path, monkeypatch, side=False)
+
+    assert client.get("/stream/nothing-like-this.mjpeg").status_code == 404
+    assert client.get("/stream/side.mjpeg").status_code == 503
