@@ -86,3 +86,47 @@ def test_installer_is_executable() -> None:
     mode = (INSTALL_DIR / "install.sh").stat().st_mode
 
     assert mode & stat.S_IXUSR
+
+
+def _dnsmasq_directives() -> dict[str, list[str]]:
+    lines = (INSTALL_DIR / "dnsmasq-catdoor-cameras.conf").read_text(encoding="utf-8")
+    directives: dict[str, list[str]] = {}
+    for line in lines.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        key, _, value = stripped.partition("=")
+        directives.setdefault(key, []).append(value)
+    return directives
+
+
+def test_dhcp_serves_only_the_camera_interface() -> None:
+    """Bound to eno1 alone: the home LAN already has a DHCP server on it."""
+    directives = _dnsmasq_directives()
+
+    assert directives["interface"] == ["eno1"]
+    assert "bind-interfaces" in directives
+
+
+def test_dhcp_does_not_answer_dns() -> None:
+    """systemd-resolved already holds port 53, and cameras need no names."""
+    assert _dnsmasq_directives()["port"] == ["0"]
+
+
+def test_cameras_are_given_no_way_out() -> None:
+    """Options 3 and 6 carry no address, which tells dnsmasq to omit them.
+
+    Option 3 is the default gateway and option 6 the resolver. Naming an option
+    without a value suppresses it, so a camera gets an address and no route
+    anywhere — docs/cameras.md requires the camera network to have no internet
+    access.
+    """
+    assert _dnsmasq_directives()["dhcp-option"] == ["3", "6"]
+
+
+def test_dhcp_pool_avoids_the_reserved_addresses() -> None:
+    """.10 belongs to the server in netplan, .64 is the Hikvision default."""
+    start, end, _lease = _dnsmasq_directives()["dhcp-range"][0].split(",")
+
+    assert int(start.rsplit(".", 1)[1]) > 64
+    assert int(end.rsplit(".", 1)[1]) < 255
