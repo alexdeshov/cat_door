@@ -39,8 +39,8 @@ from src.common.online_metrics import build_online_metrics
 from src.common.process import spawn_detached
 from src.common.sd_notify import Notifier
 from src.common.settings import ConfigurationError, Settings, validate_runtime_paths
-from src.recorder.ffmpeg import RecorderError, record_clip
-from src.recorder.preview import local_mjpeg_stream, preview_path
+from src.recorder.ffmpeg import RecorderError, mjpeg_stream, record_clip
+from src.recorder.preview import local_mjpeg_stream, preview_is_fresh, preview_path
 from src.recorder.status import read_recorder_status
 from training.workflow import create_macbook_export, write_status
 
@@ -333,8 +333,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(404, "Неизвестная камера")
         if not urls[view]:
             raise HTTPException(503, "Камера не настроена")
+        # Frames annotated by the detector are strictly more useful, so they win
+        # whenever the recorder is publishing them. Falling back to the camera
+        # keeps the picture available for aiming and placement, which is needed
+        # long before a detector model exists on the machine.
+        path = preview_path(settings.data_dir, view)
+        frames = (
+            local_mjpeg_stream(path, settings.preview_fps)
+            if preview_is_fresh(path)
+            else mjpeg_stream(settings.ffmpeg_path, urls[view], settings.preview_fps)
+        )
         return StreamingResponse(
-            local_mjpeg_stream(preview_path(settings.data_dir, view), settings.preview_fps),
+            frames,
             media_type="multipart/x-mixed-replace; boundary=frame",
             headers={
                 "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
