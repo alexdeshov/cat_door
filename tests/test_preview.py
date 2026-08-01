@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+import time
+
 import numpy as np
 from PIL import Image
 
@@ -9,6 +12,7 @@ from src.recorder.preview import (
     annotate_detections,
     crop_padding,
     local_mjpeg_stream,
+    preview_is_fresh,
     preview_path,
     publish_preview,
 )
@@ -99,3 +103,26 @@ def test_preview_maps_416_detection_to_full_frame() -> None:
     )
 
     assert annotated[90, 160, 1] > 150
+
+
+def test_stale_preview_is_not_considered_fresh(runtime_path) -> None:
+    """An old file means the recorder stopped, not that the camera died."""
+    path = preview_path(runtime_path, "face")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"\xff\xd8\xff\xd9")
+    stale = time.time() - 3600
+    os.utime(path, (stale, stale))
+
+    assert not preview_is_fresh(path)
+
+
+def test_missing_preview_is_not_considered_fresh(runtime_path) -> None:
+    assert not preview_is_fresh(preview_path(runtime_path, "face"))
+
+
+def test_just_written_preview_is_fresh(runtime_path) -> None:
+    path = preview_path(runtime_path, "face")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"\xff\xd8\xff\xd9")
+
+    assert preview_is_fresh(path)

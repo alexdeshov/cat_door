@@ -793,3 +793,56 @@ def test_capture_two_cameras_in_parallel(runtime_path: Path, monkeypatch) -> Non
     assert 'data-camera-role="face"' in page
     assert 'data-camera-role="side"' in page
     assert 'swapped ? [side, face] : [face, side]' in page
+
+
+def _collect_first_frame(response) -> bytes:
+    for chunk in response.iter_bytes():
+        return chunk
+    return b""
+
+
+def test_stream_falls_back_to_the_camera_when_the_recorder_is_idle(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    """Aiming a camera must not require a detector model on the machine.
+
+    Only the detector pipeline writes preview files, so without this fallback
+    the admin page shows nothing at all until OpenVINO and a model are in place.
+    """
+    used: dict[str, object] = {}
+
+    def fake_camera_stream(ffmpeg_path: str, rtsp_url: str, fps: int):
+        used["ffmpeg_path"] = ffmpeg_path
+        used["rtsp_url"] = rtsp_url
+        yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\ncamera\r\n"
+
+    monkeypatch.setattr("src.web.app.mjpeg_stream", fake_camera_stream)
+    client = make_client(runtime_path, monkeypatch)
+
+    with client.stream("GET", "/stream/face.mjpeg") as response:
+        assert response.status_code == 200
+        assert b"camera" in _collect_first_frame(response)
+
+    assert used["rtsp_url"] == "rtsp://user:password@camera.local/media/video1"
+
+
+def test_stream_prefers_annotated_frames_while_the_recorder_publishes(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    """Detector boxes are more useful than a raw picture, so they win."""
+
+    def fake_camera_stream(ffmpeg_path: str, rtsp_url: str, fps: int):
+        raise AssertionError("the camera must not be opened twice")
+
+    def fake_published_stream(path: Path, fps: int):
+        yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\nannotated\r\n"
+
+    monkeypatch.setattr("src.web.app.mjpeg_stream", fake_camera_stream)
+    monkeypatch.setattr("src.web.app.local_mjpeg_stream", fake_published_stream)
+    monkeypatch.setattr("src.web.app.preview_is_fresh", lambda path: True)
+    client = make_client(runtime_path, monkeypatch)
+
+    with client.stream("GET", "/stream/face.mjpeg") as response:
+        assert b"annotated" in _collect_first_frame(response)

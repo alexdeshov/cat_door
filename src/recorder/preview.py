@@ -21,6 +21,22 @@ def preview_path(data_dir: Path, role: str) -> Path:
     return data_dir / "runtime" / "previews" / f"{role}.jpg"
 
 
+PREVIEW_MAX_AGE_SECONDS = 5.0
+
+
+def preview_is_fresh(path: Path, max_age_seconds: float = PREVIEW_MAX_AGE_SECONDS) -> bool:
+    """Report whether the recorder is currently publishing frames for this view.
+
+    Only the detector pipeline writes these files, so a missing or stale one
+    means the recorder is idle rather than that the camera is unreachable.
+    """
+    try:
+        age = time.time() - path.stat().st_mtime
+    except OSError:
+        return False
+    return age <= max_age_seconds
+
+
 crop_padding = crop_frame_padding
 
 
