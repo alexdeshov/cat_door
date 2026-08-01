@@ -1,0 +1,44 @@
+[Unit]
+Description=CatDoor recorder
+Documentation=https://github.com/alexdeshov/cat_door/blob/main/docs/deployment-ubuntu.md
+# The cameras are reachable only once the network is actually configured;
+# network.target alone is satisfied far too early for an RTSP client.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+# The recorder pings on every status publication, which happens at least every
+# five seconds even when it is idle. Sixty leaves room for a dozen missed
+# cycles before systemd calls the process hung and restarts it.
+WatchdogSec=60
+
+User=catdoor
+Group=catdoor
+WorkingDirectory=/opt/catdoor
+EnvironmentFile=/etc/catdoor/catdoor.env
+# `python -m` rather than the console script in the virtualenv: this form does
+# not depend on how the editable install maps packages, and WorkingDirectory
+# puts the repository root on sys.path.
+ExecStart=/opt/catdoor/.venv/bin/python -m src.recorder.app
+
+# Exponential backoff from five seconds up to half an hour, without ever giving
+# up. A camera node that stays in `failed` after a rough night is worse than one
+# that keeps retrying slowly.
+Restart=always
+RestartSec=5
+RestartSteps=5
+RestartMaxDelaySec=1800
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+ReadWritePaths=/var/lib/catdoor
+
+[Install]
+WantedBy=multi-user.target

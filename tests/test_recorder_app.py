@@ -8,6 +8,7 @@ import pytest
 from sqlalchemy.exc import SQLAlchemyError
 
 from src.common.detection_config import CameraDetectionConfig
+from src.common.sd_notify import Notifier
 from src.common.settings import Settings
 from src.inference.cat_detector import CatDetection, CatDetectionResult
 from src.inference.cat_identity import IdentityPrediction
@@ -214,7 +215,11 @@ def test_run_retries_unexpected_monitor_failures(
     settings = Settings(data_dir=runtime_path, automatic_capture_enabled=True)
     calls = 0
 
-    def monitor(_settings: Settings, _duration: float | None) -> None:
+    def monitor(
+        _settings: Settings,
+        _duration: float | None,
+        _notifier: Notifier | None = None,
+    ) -> None:
         nonlocal calls
         calls += 1
         if calls == 1:

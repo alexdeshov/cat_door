@@ -22,6 +22,7 @@ from src.common.detection_config import (
 )
 from src.common.metrics import ScoredPrediction, aggregate_frame_predictions, mean_or_none
 from src.common.model_registry import register_model_version
+from src.common.sd_notify import Notifier
 from src.common.settings import ConfigurationError, Settings, validate_runtime_paths
 from src.inference.cat_detector import (
     CatDetectionResult,
@@ -51,6 +52,23 @@ RECORDER_RETRY_SECONDS = 5.0
 
 def recorder_status_path(settings: Settings) -> Path:
     return settings.data_dir / "runtime" / "recorder-status.json"
+
+
+def publish_status(
+    settings: Settings,
+    notifier: Notifier | None,
+    **values: Any,
+) -> None:
+    """Publish the recorder status and tell systemd the process is still alive.
+
+    The two go together on purpose. The recorder reports to the administrator
+    and to its supervisor at exactly the same moments, so a loop that stops
+    making progress goes silent on both channels at once instead of keeping the
+    watchdog happy while the status file goes stale.
+    """
+    write_recorder_status(recorder_status_path(settings), **values)
+    if notifier is not None:
+        notifier.watchdog()
 
 
 def build_automatic_config(settings: Settings) -> AutomaticEventConfig:
@@ -242,7 +260,7 @@ def _build_online_predictions(
     return tuple(predictions)
 
 
-def publish_heartbeat(settings: Settings) -> None:
+def publish_heartbeat(settings: Settings, notifier: Notifier | None = None) -> None:
     build_automatic_config(settings)
     if not settings.automatic_capture_enabled:
         state = "disabled"
@@ -250,8 +268,9 @@ def publish_heartbeat(settings: Settings) -> None:
     else:
         state = "waiting_for_detector"
         message = "Автомат событий готов, локальный детектор ещё не подключён"
-    write_recorder_status(
-        recorder_status_path(settings),
+    publish_status(
+        settings,
+        notifier,
         process="CatDoorRecorder",
         state=state,
         message=message,
@@ -323,7 +342,11 @@ def _frame_worker(
             stop.wait(1)
 
 
-def monitor_automatic(settings: Settings, duration_seconds: float | None) -> None:
+def monitor_automatic(
+    settings: Settings,
+    duration_seconds: float | None,
+    notifier: Notifier | None = None,
+) -> None:
     config_path = detection_config_path(settings.data_dir)
     runtime_config = load_detection_config(config_path, DetectionConfig.from_settings(settings))
     journal = DetectionJournal(
@@ -467,8 +490,9 @@ def monitor_automatic(settings: Settings, duration_seconds: float | None) -> Non
                     state=machine.state.value,
                     frames_processed=frames_processed,
                 )
-                write_recorder_status(
-                    recorder_status_path(settings),
+                publish_status(
+                    settings,
+                    notifier,
                     process="CatDoorRecorder",
                     state="waiting_for_frames",
                     message="Ожидание кадров камер",
@@ -623,8 +647,9 @@ def monitor_automatic(settings: Settings, duration_seconds: float | None) -> Non
             now = time.monotonic()
             if update.action is None and now - last_status_at < 0.5:
                 continue
-            write_recorder_status(
-                recorder_status_path(settings),
+            publish_status(
+                settings,
+                notifier,
                 process="CatDoorRecorder",
                 state=update.state.value,
                 message=(
@@ -651,8 +676,9 @@ def monitor_automatic(settings: Settings, duration_seconds: float | None) -> Non
         raise
     finally:
         stop.set()
-        write_recorder_status(
-            recorder_status_path(settings),
+        publish_status(
+            settings,
+            notifier,
             process="CatDoorRecorder",
             state="probe_completed",
             message="Dry-run проверка завершена",
@@ -700,25 +726,32 @@ def _persist_after_segment_close(
 def run(*, once: bool = False, probe_seconds: float | None = None) -> None:
     settings = Settings()
     validate_runtime_paths(settings)
+    notifier = Notifier.from_environment()
     if probe_seconds is not None:
         settings.automatic_capture_enabled = True
         settings.automatic_capture_dry_run = True
-        monitor_automatic(settings, probe_seconds)
+        monitor_automatic(settings, probe_seconds, notifier)
         return
+    # Readiness is announced only once the paths are known to work: under
+    # Type=notify systemd holds the unit in `activating` until READY=1 arrives,
+    # so an unusable data directory shows up as a failed start instead of a
+    # service that claims to be running and does nothing.
+    notifier.ready("Recorder запущен")
     consecutive_failures = 0
     while True:
         try:
             if settings.automatic_capture_enabled:
-                monitor_automatic(settings, None)
+                monitor_automatic(settings, None, notifier)
             else:
-                publish_heartbeat(settings)
+                publish_heartbeat(settings, notifier)
             consecutive_failures = 0
         except Exception as exc:  # noqa: BLE001 - recorder must survive component failures
             consecutive_failures += 1
             error_type = type(exc).__name__
             try:
-                write_recorder_status(
-                    recorder_status_path(settings),
+                publish_status(
+                    settings,
+                    notifier,
                     process="CatDoorRecorder",
                     state="retrying",
                     message=f"Ошибка recorder ({error_type}), повторный запуск",

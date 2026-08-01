@@ -654,3 +654,42 @@
 - Следующий шаг: подтвердить суиту на Ubuntu, затем PR 2 — systemd-юниты,
   `sd_notify`, замена `scripts/watchdog.py` на health-проверку и каталог
   `install/`.
+
+## 2026-08-01 — PR 2: systemd вместо самодельного супервизора (Claude)
+
+- Цель: заменить `scripts/watchdog.py` штатными средствами systemd и дать
+  проекту установку на Ubuntu-хост одной командой.
+- Сделано: добавлен `src/common/sd_notify.py` — клиент протокола `sd_notify`
+  без внешних зависимостей, с учётом `WATCHDOG_PID` и абстрактных сокетов; вне
+  systemd полностью инертен. Recorder получил `publish_status()`, который
+  связывает публикацию статуса с пингом супервизора, и рассылает его из пяти
+  прежних точек записи статуса; `READY=1` отправляется после
+  `validate_runtime_paths()`. Админка получила `lifespan` с `READY=1` и фоновой
+  задачей пинга на event loop. Создан каталог `install/` с двумя юнитами и
+  идемпотентным `install.sh`. Удалены `scripts/watchdog.py`,
+  `manage_autostart.py`, `autostart_entry.py`, `start_recorder.py`,
+  `start_web.py`, два их теста и пять настроек `watchdog_*`. Добавлены
+  `tests/test_sd_notify.py` и `tests/test_install_units.py`.
+- Решения: `ExecStart` использует форму `python -m` вместо консольного скрипта
+  venv — она не зависит от внутренностей editable-установки. Вместо «три попытки
+  и получасовая блокировка» выбран экспоненциальный backoff `RestartSteps` от
+  5 секунд до 30 минут без потолка попыток: узел без присмотра не должен
+  оставаться в `failed`. Это требует systemd >= 254, установщик проверяет версию.
+  Конфигурация переехала в `/etc/catdoor/catdoor.env` (режим 640, владелец
+  `root:catdoor`): там её не затирает `git pull`, а в файле лежит RTSP-пароль.
+  Отдельный шаблон конфигурации не заводился — установщик засевает файл из
+  `.env.example`, который уже описывает целевую раскладку и покрыт тестом.
+  Health-скрипт не понадобился: `Type=notify` плюс `WatchdogSec` закрывают и
+  падение, и зависание обоих сервисов.
+- Изменённые файлы: `src/common/sd_notify.py`, `src/common/settings.py`,
+  `src/recorder/app.py`, `src/web/app.py`, `install/*`, `tests/test_sd_notify.py`,
+  `tests/test_install_units.py`, `tests/test_recorder_app.py`, `README.md`,
+  `docs/deployment-ubuntu.md`, `docs/session-history.md`; удалены пять скриптов
+  и два теста.
+- Проверки: `pytest` — 173 прошло; `ruff check .` без замечаний; `mypy src
+  scripts training` — 44 файла без ошибок. На реальной машине юниты ещё не
+  запускались.
+- Статус: завершено для этой ветки; проверка на сервере предстоит.
+- Следующий шаг: выполнить `install.sh` на mini-PC, подтвердить `active
+  (running)` вместо зависания в `activating`, проверить рост `NRestarts` после
+  `systemctl kill -s SIGKILL`, затем настроить `ufw` и заполнить камеры.

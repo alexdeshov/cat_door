@@ -1,0 +1,35 @@
+[Unit]
+Description=CatDoor admin interface
+Documentation=https://github.com/alexdeshov/cat_door/blob/main/docs/deployment-ubuntu.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+# The admin interface pings from a background task on the event loop, so a
+# blocked loop stops the pings even while the process is alive.
+WatchdogSec=60
+
+User=catdoor
+Group=catdoor
+WorkingDirectory=/opt/catdoor
+EnvironmentFile=/etc/catdoor/catdoor.env
+ExecStart=/opt/catdoor/.venv/bin/python -m src.web.app
+
+Restart=always
+RestartSec=5
+RestartSteps=5
+RestartMaxDelaySec=1800
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+ReadWritePaths=/var/lib/catdoor
+
+[Install]
+WantedBy=multi-user.target

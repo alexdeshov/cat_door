@@ -1,9 +1,11 @@
+import asyncio
 import json
 import shutil
 import subprocess
 import sys
-from collections.abc import Generator
+from collections.abc import AsyncIterator, Generator
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Literal
@@ -35,6 +37,7 @@ from src.common.detection_stats import read_detection_stats
 from src.common.model_registry import register_model_version
 from src.common.online_metrics import build_online_metrics
 from src.common.process import spawn_detached
+from src.common.sd_notify import Notifier
 from src.common.settings import ConfigurationError, Settings, validate_runtime_paths
 from src.recorder.ffmpeg import RecorderError, record_clip
 from src.recorder.preview import local_mjpeg_stream, preview_path
@@ -163,13 +166,45 @@ class EvaluationStartPayload(BaseModel):
     side_model: str | None = None
 
 
+async def _ping_watchdog(notifier: Notifier, interval_seconds: float) -> None:
+    while True:
+        await asyncio.sleep(interval_seconds)
+        notifier.watchdog()
+
+
+@asynccontextmanager
+async def _notify_systemd(app: FastAPI) -> AsyncIterator[None]:
+    """Announce readiness once the event loop is actually serving.
+
+    Sending READY=1 before `uvicorn.run` would claim the port is open while it
+    is not, so a dependent unit could start too early. Outside systemd the
+    notifier is inert, no task is created, and `TestClient` behaves as before.
+    """
+    notifier = Notifier.from_environment()
+    notifier.ready(f"Админка слушает {app.state.settings.web_host}")
+    interval = notifier.watchdog_interval_seconds
+    task = (
+        asyncio.create_task(_ping_watchdog(notifier, interval))
+        if interval is not None
+        else None
+    )
+    try:
+        yield
+    finally:
+        if task is not None:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+        notifier.close()
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings()
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     factory = create_session_factory(settings.resolved_database_path)
     templates = Jinja2Templates(directory=Path(__file__).parent / "templates")
 
-    app = FastAPI(title="CatDoor AI", version="0.1.0")
+    app = FastAPI(title="CatDoor AI", version="0.1.0", lifespan=_notify_systemd)
     app.state.settings = settings
     app.state.session_factory = factory
 
