@@ -41,7 +41,7 @@ def test_spawn_detached_copies_environment(monkeypatch: pytest.MonkeyPatch) -> N
         "Popen",
         lambda command, **kwargs: captured.update(kwargs) or object(),
     )
-    environment = {"CATDOOR_TEST_MODE": "true"}
+    environment = {"CATDOOR_DETECTOR_DEVICE": "CPU"}
 
     process.spawn_detached(["python", "-V"], env=environment)
 
