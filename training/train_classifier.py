@@ -48,6 +48,14 @@ def build_transforms(image_size: int) -> tuple[Any, Any]:
 
 
 def build_pretrained_model(label_count: int, weights_path: Path | None) -> Any:
+    # Существование файла проверяется до импорта torch: опечатка в пути должна
+    # называться опечаткой, а не `No module named 'torch'` на машине без
+    # обучающих зависимостей.
+    if weights_path is not None and not weights_path.is_file():
+        raise PretrainedWeightsError(
+            f"pretrained weights file does not exist: {weights_path}"
+        )
+
     import torch
     from torchvision import models
 
@@ -62,10 +70,6 @@ def build_pretrained_model(label_count: int, weights_path: Path | None) -> Any:
                 "dict with --weights-path."
             ) from exc
     else:
-        if not weights_path.is_file():
-            raise PretrainedWeightsError(
-                f"pretrained weights file does not exist: {weights_path}"
-            )
         model = models.mobilenet_v3_small(weights=None)
         try:
             payload = torch.load(weights_path, map_location="cpu", weights_only=True)

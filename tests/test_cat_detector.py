@@ -31,6 +31,23 @@ def test_detector_rejects_missing_manifest(runtime_path: Path) -> None:
         OpenVinoCatDetector(model)
 
 
+def test_manifest_is_checked_before_openvino_import(
+    runtime_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A broken model must be named as such even without OpenVINO installed.
+
+    Entry set to None in sys.modules makes the import raise ImportError, which
+    is what a runtime host without the inference extra actually sees.
+    """
+    monkeypatch.setitem(sys.modules, "openvino", None)
+    model = runtime_path / "detector.onnx"
+    model.write_bytes(b"not-a-model")
+
+    with pytest.raises(DetectorError, match="detector_manifest_invalid"):
+        OpenVinoCatDetector(model)
+
+
 def test_detector_rejects_checksum_mismatch(runtime_path: Path) -> None:
     model = runtime_path / "detector.onnx"
     model.write_bytes(b"not-a-model")

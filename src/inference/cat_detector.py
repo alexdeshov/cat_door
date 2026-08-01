@@ -41,11 +41,9 @@ def _sha256(path: Path) -> str:
 
 class OpenVinoCatDetector:
     def __init__(self, model_path: Path, device: str = "CPU") -> None:
-        try:
-            import openvino as ov
-        except ImportError as exc:
-            raise DetectorError("openvino_not_installed") from exc
-
+        # Манифест и контрольная сумма проверяются до импорта OpenVINO. Иначе на
+        # машине без него любая ошибка модели превращается в
+        # `openvino_not_installed` и прячет настоящую причину.
         manifest_path = model_path.with_suffix(".json")
         try:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -110,6 +108,11 @@ class OpenVinoCatDetector:
             raise DetectorError("detector_manifest_invalid") from exc
         if _sha256(model_path) != expected_hash:
             raise DetectorError("detector_checksum_mismatch")
+
+        try:
+            import openvino as ov
+        except ImportError as exc:
+            raise DetectorError("openvino_not_installed") from exc
 
         core = ov.Core()
         try:

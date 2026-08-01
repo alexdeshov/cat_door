@@ -1,3 +1,4 @@
+import sys
 from pathlib import Path
 
 import pytest
@@ -52,5 +53,20 @@ def test_missing_cached_weights_has_actionable_offline_error(monkeypatch) -> Non
 
 
 def test_missing_explicit_weights_path_is_rejected(tmp_path: Path) -> None:
+    with pytest.raises(PretrainedWeightsError, match="does not exist"):
+        build_pretrained_model(2, tmp_path / "missing.pth")
+
+
+def test_weights_path_is_checked_before_torch_import(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A typo in the path must be named as such even without torch installed.
+
+    The runtime host carries no training dependencies, so the check has to run
+    before the import rather than after it.
+    """
+    monkeypatch.setitem(sys.modules, "torch", None)
+
     with pytest.raises(PretrainedWeightsError, match="does not exist"):
         build_pretrained_model(2, tmp_path / "missing.pth")
