@@ -203,10 +203,28 @@ Recorder шлёт пинг в тот же момент, когда публик�
 
 ```sh
 sudo systemctl kill -s SIGKILL catdoor-recorder
-systemctl show catdoor-recorder -p NRestarts
+systemctl show catdoor-recorder -p NRestarts -p MainPID
+journalctl -u catdoor-recorder -n 8 --no-pager
 ```
 
-Счётчик должен вырасти, а служба вернуться в `active`.
+Счётчик должен вырасти, `MainPID` — смениться, служба вернуться в `active`.
+
+Команда при этом печатает пугающее, но безобидное сообщение:
+
+```
+Failed to kill unit catdoor-recorder.service: Failed to send signal SIGKILL
+to auxiliary processes: Invalid argument
+```
+
+Главный процесс к этому моменту уже убит. Ошибка относится к попытке добить
+остальные процессы cgroup, которых у службы нет. Смотреть надо в журнал: там
+подряд идут `Sent signal SIGKILL to main process`, `Main process exited,
+code=killed, status=9/KILL` и через `RestartSec` секунд `Started`. Если
+сообщение мешает, можно бить точечно:
+
+```sh
+sudo systemctl kill -s SIGKILL --kill-whom=main catdoor-recorder
+```
 
 ## Firewall
 
