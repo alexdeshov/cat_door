@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import os
-import subprocess
 import sys
 from pathlib import Path
 
+from src.common.process import spawn_detached
 from src.common.settings import Settings
 
 
@@ -16,15 +16,12 @@ def start_web() -> int:
         (log_dir / "web.stdout.log").open("ab") as stdout,
         (log_dir / "web.stderr.log").open("ab") as stderr,
     ):
-        process = subprocess.Popen(
+        process = spawn_detached(
             [sys.executable, "-m", "src.web.app"],
             cwd=Path(__file__).resolve().parent.parent,
             env=dict(os.environ),
-            stdin=subprocess.DEVNULL,
             stdout=stdout,
             stderr=stderr,
-            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS,
-            close_fds=True,
         )
     return process.pid
 

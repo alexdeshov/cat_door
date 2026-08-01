@@ -34,6 +34,7 @@ from src.common.detection_config import (
 from src.common.detection_stats import read_detection_stats
 from src.common.model_registry import register_model_version
 from src.common.online_metrics import build_online_metrics
+from src.common.process import spawn_detached
 from src.common.settings import Settings
 from src.common.windows_power import SleepInhibitor
 from src.recorder.ffmpeg import RecorderError, record_clip
@@ -522,18 +523,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     str(settings.identity_pretrained_weights_path.resolve()),
                 ]
             )
-        creationflags = 0
-        if sys.platform == "win32":
-            creationflags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
         try:
             with log_path.open("ab") as log:
-                process = subprocess.Popen(
+                process = spawn_detached(
                     command,
-                    stdin=subprocess.DEVNULL,
+                    cwd=Path.cwd(),
                     stdout=log,
                     stderr=subprocess.STDOUT,
-                    cwd=Path.cwd(),
-                    creationflags=creationflags,
                 )
         except OSError as exc:
             write_status(status_path, state="failed", message="Не удалось запустить Python")
@@ -675,18 +671,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 command.extend(
                     [f"--{role}-model", str(identity_paths[role].resolve())]
                 )
-        creationflags = 0
-        if sys.platform == "win32":
-            creationflags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
         try:
             with log_path.open("ab") as log:
-                process = subprocess.Popen(
+                process = spawn_detached(
                     command,
-                    stdin=subprocess.DEVNULL,
+                    cwd=Path.cwd(),
                     stdout=log,
                     stderr=subprocess.STDOUT,
-                    cwd=Path.cwd(),
-                    creationflags=creationflags,
                 )
         except OSError as exc:
             run.status = "failed"
