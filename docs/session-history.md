@@ -531,11 +531,17 @@
   админка выставляется в LAN без аутентификации с ограничением правилом `ufw`,
   дефолт `Settings.web_host` при этом остаётся `127.0.0.1`;
   `scripts/manage_autostart.py` сохраняется до появления systemd-юнитов, чтобы
-  Windows-хост не остался без управления автозапуском.
+  Windows-хост не остался без управления автозапуском. Работающий моноблок
+  заморожен на теге `windows-runtime-final` (состояние `main` до PR #15) и не
+  тянет `main`: разбор показал, что PR #15 отнимает у Windows скрытие окон
+  FFmpeg, запрет сна, ретраи атомарной записи и отделённый запуск, а проверка
+  обратного слэша остановила бы recorder. Кроссплатформенность в коде решено не
+  восстанавливать — вместо неё заморозка плюс запрет на pull в AGENTS.md.
 - Изменённые файлы: `src/common/process.py`, `src/common/settings.py`,
   `src/recorder/app.py`, `src/web/app.py`, `src/recorder/{ffmpeg,frames,ring,status,preview}.py`,
   `src/common/detection_config.py`, `scripts/{start_web,start_recorder,autostart_entry,manage_autostart}.py`,
-  `scripts/__init__.py`, `.env.example`, `tests/`.
+  `scripts/__init__.py`, `.env.example`, `tests/`, `AGENTS.md`, `README.md`,
+  `docs/deployment-windows.md`.
 - Проверки: `ruff check .` без замечаний; `mypy src scripts training` — 48 файлов
   без ошибок (ранее mypy прерывался на конфликте имён модулей и не проверял
   ничего); `pytest` — 152 прошло против 5 падений и 145 проходов до начала
