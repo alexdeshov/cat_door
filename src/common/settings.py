@@ -1,7 +1,12 @@
 from pathlib import Path
+from uuid import uuid4
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class ConfigurationError(RuntimeError):
+    """The configured paths cannot be used, so starting up would be pointless."""
 
 
 class Settings(BaseSettings):
@@ -56,3 +61,38 @@ class Settings(BaseSettings):
     @property
     def resolved_database_path(self) -> Path:
         return self.database_path or self.data_dir / "catdoor.sqlite3"
+
+
+def _require_writable_directory(directory: Path) -> None:
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise ConfigurationError(f"Не удалось создать каталог {directory}") from exc
+    probe = directory / f".catdoor-write-check.{uuid4().hex}"
+    try:
+        probe.touch()
+    except OSError as exc:
+        raise ConfigurationError(f"Каталог недоступен для записи: {directory}") from exc
+    finally:
+        probe.unlink(missing_ok=True)
+
+
+def validate_runtime_paths(settings: Settings) -> None:
+    """Fail fast when the configured paths cannot work.
+
+    The recorder's main loop swallows every exception and retries forever, so an
+    unusable data directory would otherwise turn into a silent spin instead of a
+    visible failure. Under systemd a relative path also resolves against /, which
+    makes the default value unusable for a service.
+    """
+    if not settings.data_dir.is_absolute():
+        raise ConfigurationError(
+            f"CATDOOR_DATA_DIR должен быть абсолютным путём, задано: {settings.data_dir}"
+        )
+    if "\\" in str(settings.detector_model_path):
+        raise ConfigurationError(
+            "CATDOOR_DETECTOR_MODEL_PATH содержит обратный слэш — "
+            f"на Linux это часть имени файла, а не разделитель: {settings.detector_model_path}"
+        )
+    _require_writable_directory(settings.data_dir)
+    _require_writable_directory(settings.resolved_database_path.parent)
