@@ -326,12 +326,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             },
         )
 
+    @app.get("/cameras", response_class=HTMLResponse)
+    def cameras_page(request: Request) -> HTMLResponse:
+        return templates.TemplateResponse(
+            request,
+            "cameras.html",
+            {
+                "cameras": settings.preview_cameras(),
+                "stream_version": uuid4().hex,
+            },
+        )
+
     @app.get("/stream/{view}.mjpeg")
     def stream(view: str) -> StreamingResponse:
-        urls = {"face": settings.camera_face_rtsp, "side": settings.camera_side_rtsp}
-        if view not in urls:
+        camera = settings.preview_camera(view)
+        if camera is None:
             raise HTTPException(404, "Неизвестная камера")
-        if not urls[view]:
+        if not camera.rtsp:
             raise HTTPException(503, "Камера не настроена")
         # Frames annotated by the detector are strictly more useful, so they win
         # whenever the recorder is publishing them. Falling back to the camera
@@ -341,7 +352,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         frames = (
             local_mjpeg_stream(path, settings.preview_fps)
             if preview_is_fresh(path)
-            else mjpeg_stream(settings.ffmpeg_path, urls[view], settings.preview_fps)
+            else mjpeg_stream(
+                settings.ffmpeg_path,
+                camera.rtsp,
+                settings.preview_fps,
+                rotate_180=camera.rotate_180,
+            )
         )
         return StreamingResponse(
             frames,

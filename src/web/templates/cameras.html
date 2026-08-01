@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>CatDoor — камеры</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 0; padding: 24px; background: #0b1120; color: #e5e7eb; }
+    h1 { font-size: 20px; margin: 0 0 4px; }
+    .hint { color: #9ca3af; font-size: 14px; margin: 0 0 24px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 18px; }
+    .camera { background: #111827; border: 1px solid #1f2937; border-radius: 10px; padding: 12px; }
+    .camera h2 { font-size: 15px; margin: 0 0 2px; }
+    .camera .id { color: #6b7280; font-size: 12px; font-family: ui-monospace, monospace; margin: 0 0 10px; }
+    .stream { width: 100%; aspect-ratio: 16/9; object-fit: contain; background: #030712; border-radius: 7px; }
+    .empty { color: #9ca3af; }
+    a { color: #93c5fd; }
+  </style>
+</head>
+<body>
+  <h1>Камеры</h1>
+  <p class="hint">
+    Живое изображение для подбора места установки. Каждый открытый поток — это
+    отдельный процесс ffmpeg на сервере, поэтому держите открытым только то, что
+    смотрите. <a href="/">К админке</a>
+  </p>
+
+  {% if cameras %}
+    <div class="grid">
+      {% for camera in cameras %}
+        <div class="camera">
+          <h2>{{ camera.display_title }}</h2>
+          <p class="id">{{ camera.id }}{% if camera.rotate_180 %} · поворот 180°{% endif %}</p>
+          <img class="stream" alt="Поток камеры {{ camera.display_title }}"
+               src="/stream/{{ camera.id }}.mjpeg?v={{ stream_version }}">
+        </div>
+      {% endfor %}
+    </div>
+  {% else %}
+    <p class="empty">
+      Ни одной камеры не настроено. Задайте <code>CATDOOR_CAMERA_FACE_RTSP</code>
+      либо список <code>CATDOOR_CAMERAS</code>.
+    </p>
+  {% endif %}
+</body>
+</html>
