@@ -22,7 +22,7 @@ from src.common.detection_config import (
 )
 from src.common.metrics import ScoredPrediction, aggregate_frame_predictions, mean_or_none
 from src.common.model_registry import register_model_version
-from src.common.settings import Settings
+from src.common.settings import ConfigurationError, Settings, validate_runtime_paths
 from src.inference.cat_detector import (
     CatDetectionResult,
     OpenVinoCatDetector,
@@ -699,6 +699,7 @@ def _persist_after_segment_close(
 
 def run(*, once: bool = False, probe_seconds: float | None = None) -> None:
     settings = Settings()
+    validate_runtime_paths(settings)
     if probe_seconds is not None:
         settings.automatic_capture_enabled = True
         settings.automatic_capture_dry_run = True
@@ -760,7 +761,10 @@ def main(argv: Sequence[str] | None = None) -> None:
         help="run bounded dry-run inference without recording video",
     )
     arguments = parser.parse_args(argv)
-    run(once=arguments.once, probe_seconds=arguments.probe_seconds)
+    try:
+        run(once=arguments.once, probe_seconds=arguments.probe_seconds)
+    except ConfigurationError as exc:
+        raise SystemExit(f"Конфигурация непригодна для запуска: {exc}") from exc
 
 
 if __name__ == "__main__":

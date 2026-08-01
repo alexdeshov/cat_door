@@ -1,4 +1,3 @@
-import subprocess
 from unittest.mock import Mock
 
 import numpy as np
@@ -36,11 +35,7 @@ def test_rgb_frame_stream_decodes_fixed_frame(monkeypatch) -> None:
         "fps=3.0,scale=640:360:force_original_aspect_ratio=decrease,"
         "pad=640:360:(ow-iw)/2:(oh-ih)/2,hflip,vflip"
     ) in commands[0]
-    assert popen_kwargs[0]["creationflags"] == getattr(
-        subprocess,
-        "CREATE_NO_WINDOW",
-        0,
-    )
+    assert "creationflags" not in popen_kwargs[0]
     process.terminate.assert_called_once()
 
 

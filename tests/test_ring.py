@@ -1,5 +1,4 @@
 import os
-import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -65,11 +64,7 @@ def test_concatenates_segments_atomically(runtime_path: Path, monkeypatch) -> No
 
     assert destination.read_bytes() == b"combined"
     assert not destination.with_suffix(".concat.txt").exists()
-    assert run_kwargs["creationflags"] == getattr(
-        subprocess,
-        "CREATE_NO_WINDOW",
-        0,
-    )
+    assert "creationflags" not in run_kwargs
 
 
 def test_concat_rejects_empty_segment_list(runtime_path: Path) -> None:

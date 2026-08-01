@@ -508,3 +508,45 @@
   Windows-моноблоке.
 - Следующий шаг: применить быстрые меры в админке, разметить накопленные
   ложные события, затем запустить Codex с `docs/codex-fp-reduction-prompt.md`.
+
+## 2026-08-01 — Перенос runtime на Ubuntu: кроссплатформенность (Claude)
+
+- Цель: начать перенос runtime с Windows-моноблока на Ubuntu Server 24.04,
+  выполнив первый из трёх запланированных этапов — снятие Windows-зависимостей
+  в коде без изменений на самом железе.
+- Сделано: создан план переноса из трёх PR; ветка `feature/posix-runtime` и
+  PR #15. Добавлен `src/common/process.py` с `spawn_detached()`
+  (`start_new_session=True`) и через него проведены четыре точки запуска
+  процессов. Добавлена `validate_runtime_paths()` с вызовом до retry-цикла
+  recorder и до `uvicorn.run()`. Удалены `src/common/windows_power.py`,
+  `scripts/open_admin.py`, `ffmpeg_creation_flags()` с четырьмя вызовами,
+  циклы ретраев `PermissionError` вокруг атомарной записи в трёх модулях,
+  `config/settings.example.yaml` и несуществующие ключи `CATDOOR_TEST_MODE`
+  и `CATDOOR_LOG_LEVEL`. `.env.example` переведён на `/var/lib/catdoor`.
+  Добавлены тесты `test_process.py`, `test_env_example.py`,
+  `test_settings_validation.py`; удалены три Windows-теста.
+- Решения: Windows-совместимость runtime не сохраняется; раскладка на сервере —
+  `/opt/catdoor` плюс `/var/lib/catdoor` под системным пользователем `catdoor`;
+  `scripts/watchdog.py` заменяется на systemd и `sd_notify` (следующий PR);
+  админка выставляется в LAN без аутентификации с ограничением правилом `ufw`,
+  дефолт `Settings.web_host` при этом остаётся `127.0.0.1`;
+  `scripts/manage_autostart.py` сохраняется до появления systemd-юнитов, чтобы
+  Windows-хост не остался без управления автозапуском. Работающий моноблок
+  заморожен на теге `windows-runtime-final` (состояние `main` до PR #15) и не
+  тянет `main`: разбор показал, что PR #15 отнимает у Windows скрытие окон
+  FFmpeg, запрет сна, ретраи атомарной записи и отделённый запуск, а проверка
+  обратного слэша остановила бы recorder. Кроссплатформенность в коде решено не
+  восстанавливать — вместо неё заморозка плюс запрет на pull в AGENTS.md.
+- Изменённые файлы: `src/common/process.py`, `src/common/settings.py`,
+  `src/recorder/app.py`, `src/web/app.py`, `src/recorder/{ffmpeg,frames,ring,status,preview}.py`,
+  `src/common/detection_config.py`, `scripts/{start_web,start_recorder,autostart_entry,manage_autostart}.py`,
+  `scripts/__init__.py`, `.env.example`, `tests/`, `AGENTS.md`, `README.md`,
+  `docs/deployment-windows.md`.
+- Проверки: `ruff check .` без замечаний; `mypy src scripts training` — 48 файлов
+  без ошибок (ранее mypy прерывался на конфликте имён модулей и не проверял
+  ничего); `pytest` — 152 прошло против 5 падений и 145 проходов до начала
+  работы. Проверен вручную запуск recorder: относительный `CATDOOR_DATA_DIR`
+  даёт понятное сообщение и код возврата 1, абсолютный — heartbeat и код 0.
+- Статус: завершено; PR #15 открыт и ожидает слияния.
+- Следующий шаг: PR 2 — systemd-юниты, `sd_notify`, замена `scripts/watchdog.py`
+  на health-проверку и каталог `install/`.

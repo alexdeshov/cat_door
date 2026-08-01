@@ -34,8 +34,8 @@ from src.common.detection_config import (
 from src.common.detection_stats import read_detection_stats
 from src.common.model_registry import register_model_version
 from src.common.online_metrics import build_online_metrics
-from src.common.settings import Settings
-from src.common.windows_power import SleepInhibitor
+from src.common.process import spawn_detached
+from src.common.settings import ConfigurationError, Settings, validate_runtime_paths
 from src.recorder.ffmpeg import RecorderError, record_clip
 from src.recorder.preview import local_mjpeg_stream, preview_path
 from src.recorder.status import read_recorder_status
@@ -522,18 +522,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     str(settings.identity_pretrained_weights_path.resolve()),
                 ]
             )
-        creationflags = 0
-        if sys.platform == "win32":
-            creationflags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
         try:
             with log_path.open("ab") as log:
-                process = subprocess.Popen(
+                process = spawn_detached(
                     command,
-                    stdin=subprocess.DEVNULL,
+                    cwd=Path.cwd(),
                     stdout=log,
                     stderr=subprocess.STDOUT,
-                    cwd=Path.cwd(),
-                    creationflags=creationflags,
                 )
         except OSError as exc:
             write_status(status_path, state="failed", message="Не удалось запустить Python")
@@ -675,18 +670,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 command.extend(
                     [f"--{role}-model", str(identity_paths[role].resolve())]
                 )
-        creationflags = 0
-        if sys.platform == "win32":
-            creationflags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
         try:
             with log_path.open("ab") as log:
-                process = subprocess.Popen(
+                process = spawn_detached(
                     command,
-                    stdin=subprocess.DEVNULL,
+                    cwd=Path.cwd(),
                     stdout=log,
                     stderr=subprocess.STDOUT,
-                    cwd=Path.cwd(),
-                    creationflags=creationflags,
                 )
         except OSError as exc:
             run.status = "failed"
@@ -997,8 +987,11 @@ def _combined_clean_metrics(
 
 def run() -> None:
     settings = Settings()
-    with SleepInhibitor():
-        uvicorn.run(create_app(settings), host=settings.web_host, port=settings.web_port)
+    try:
+        validate_runtime_paths(settings)
+    except ConfigurationError as exc:
+        raise SystemExit(f"Конфигурация непригодна для запуска: {exc}") from exc
+    uvicorn.run(create_app(settings), host=settings.web_host, port=settings.web_port)
 
 
 if __name__ == "__main__":

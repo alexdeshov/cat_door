@@ -4,7 +4,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from src.recorder.ffmpeg import RecorderError, ffmpeg_creation_flags
+from src.recorder.ffmpeg import RecorderError
 
 
 def prune_segments(directory: Path, retention_seconds: float, now: float | None = None) -> int:
@@ -82,7 +82,6 @@ def concatenate_segments(
             text=True,
             timeout=60,
             check=False,
-            creationflags=ffmpeg_creation_flags(),
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise RecorderError("ring_concat_failed") from exc

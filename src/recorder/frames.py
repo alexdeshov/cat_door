@@ -10,7 +10,7 @@ from typing import BinaryIO, cast
 import numpy as np
 
 from src.inference.preprocessing import NormalizedRoi
-from src.recorder.ffmpeg import _base_input, ffmpeg_creation_flags
+from src.recorder.ffmpeg import _base_input
 from src.recorder.ring import prune_segments
 
 FRAME_WIDTH = 640
@@ -130,7 +130,6 @@ def rgb_frame_stream(
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
-        creationflags=ffmpeg_creation_flags(),
     )
     try:
         assert process.stdout is not None

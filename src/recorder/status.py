@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -17,14 +16,7 @@ def write_recorder_status(path: Path, **values: Any) -> None:
             json.dumps(payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-        for attempt in range(20):
-            try:
-                temporary.replace(path)
-                return
-            except PermissionError:
-                if attempt == 19:
-                    raise
-                time.sleep(0.025)
+        temporary.replace(path)
     finally:
         temporary.unlink(missing_ok=True)
 

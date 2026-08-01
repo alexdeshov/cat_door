@@ -1,11 +1,14 @@
 from pathlib import Path
-from uuid import uuid4
 
 import pytest
 
 
 @pytest.fixture
-def runtime_path() -> Path:
-    path = Path("data") / "test-runtime" / uuid4().hex
-    path.mkdir(parents=True)
-    return path
+def runtime_path(tmp_path: Path) -> Path:
+    """Per-test scratch directory that pytest removes on its own.
+
+    This used to create data/test-runtime/<uuid> relative to the working
+    directory and never clean it up, which required running pytest from the
+    repository root and left the tree littered.
+    """
+    return tmp_path
