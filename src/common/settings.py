@@ -1,12 +1,50 @@
+import re
 from pathlib import Path
 from uuid import uuid4
 
-from pydantic import Field
+from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class ConfigurationError(RuntimeError):
     """The configured paths cannot be used, so starting up would be pointless."""
+
+
+# Camera ids end up inside stream URLs, so they stay to characters that survive
+# a path segment without escaping.
+_CAMERA_ID = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+
+# The two roles the detector and the event schema are built around. Extra
+# cameras are preview-only until that part of the model is generalised.
+LEGACY_CAMERA_IDS = ("face", "side")
+
+
+class CameraConfig(BaseModel):
+    """One camera available for live preview.
+
+    Separate from the `face`/`side` settings on purpose: those two carry a role
+    the detector, the event tables and the identity models all depend on, while
+    these are extra views used to choose mounting positions.
+    """
+
+    id: str
+    rtsp: str
+    rotate_180: bool = False
+    title: str = ""
+
+    @field_validator("id")
+    @classmethod
+    def _check_id(cls, value: str) -> str:
+        if not _CAMERA_ID.match(value):
+            raise ValueError(
+                "идентификатор камеры может содержать только латиницу в нижнем "
+                f"регистре, цифры, дефис и подчёркивание, задано: {value!r}"
+            )
+        return value
+
+    @property
+    def display_title(self) -> str:
+        return self.title or self.id
 
 
 class Settings(BaseSettings):
@@ -21,6 +59,7 @@ class Settings(BaseSettings):
     camera_side_rtsp: str = ""
     camera_face_rotate_180: bool = True
     camera_side_rotate_180: bool = True
+    cameras: list[CameraConfig] = Field(default_factory=list)
     data_dir: Path = Path("data")
     database_path: Path | None = None
     ffmpeg_path: str = "ffmpeg"
@@ -56,6 +95,43 @@ class Settings(BaseSettings):
     @property
     def resolved_database_path(self) -> Path:
         return self.database_path or self.data_dir / "catdoor.sqlite3"
+
+    def _known_cameras(self) -> dict[str, CameraConfig]:
+        """Roles first, then the list, which may override a role by id.
+
+        The two roles keep their own settings rather than being duplicated into
+        the list, so an existing installation needs no configuration change.
+        """
+        by_id = {
+            "face": CameraConfig(
+                id="face",
+                rtsp=self.camera_face_rtsp,
+                rotate_180=self.camera_face_rotate_180,
+                title="Камера идентификации",
+            ),
+            "side": CameraConfig(
+                id="side",
+                rtsp=self.camera_side_rtsp,
+                rotate_180=self.camera_side_rotate_180,
+                title="Камера подхода",
+            ),
+        }
+        for camera in self.cameras:
+            by_id[camera.id] = camera
+        return by_id
+
+    def preview_cameras(self) -> list[CameraConfig]:
+        """Cameras worth putting on a page: the configured ones."""
+        return [camera for camera in self._known_cameras().values() if camera.rtsp]
+
+    def preview_camera(self, camera_id: str) -> CameraConfig | None:
+        """Look up by id, including roles left unconfigured.
+
+        A known role without an address has to stay distinguishable from a
+        camera nobody ever declared: the first is a configuration gap, the
+        second is a bad URL.
+        """
+        return self._known_cameras().get(camera_id)
 
 
 def _require_writable_directory(directory: Path) -> None:
