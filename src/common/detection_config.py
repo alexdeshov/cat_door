@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import time
 from pathlib import Path
 from uuid import uuid4
 
@@ -143,13 +142,6 @@ def save_detection_config(path: Path, config: DetectionConfig) -> None:
             json.dumps(config.model_dump(), ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-        for attempt in range(10):
-            try:
-                temporary.replace(path)
-                return
-            except PermissionError:
-                if attempt == 9:
-                    raise
-                time.sleep(0.01)
+        temporary.replace(path)
     finally:
         temporary.unlink(missing_ok=True)

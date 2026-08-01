@@ -76,14 +76,7 @@ def publish_preview(path: Path, frame: np.ndarray) -> None:
             format="JPEG",
             quality=75,
         )
-        for attempt in range(10):
-            try:
-                temporary.replace(path)
-                return
-            except PermissionError:
-                if attempt == 9:
-                    raise
-                time.sleep(0.01)
+        temporary.replace(path)
     finally:
         temporary.unlink(missing_ok=True)
 
