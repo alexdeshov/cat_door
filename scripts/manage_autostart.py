@@ -8,9 +8,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 TASKS = {
     "CatDoorWeb": "web",
     "CatDoorRecorderRecording": "recorder-recording",
-    "CatDoorAdminChrome": "browser",
 }
-LEGACY_VALUES = ("CatDoorRecorderDryRun",)
+LEGACY_VALUES = ("CatDoorRecorderDryRun", "CatDoorAdminChrome")
 RUN_KEY = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run"
 WATCHDOG_TASK_NAME = "CatDoorWatchdog"
 

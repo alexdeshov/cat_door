@@ -68,12 +68,6 @@ def append_autostart_event(
 
 
 def run_component(component: str) -> None:
-    if component == "browser":
-        from scripts.open_admin import main as open_admin
-
-        open_admin()
-        return
-
     if component == "web":
         from scripts.start_web import main as start_web
 
@@ -88,8 +82,8 @@ def run_component(component: str) -> None:
 def main() -> None:
     os.chdir(PROJECT_ROOT)
 
-    parser = argparse.ArgumentParser(description="Start a CatDoor component from Windows")
-    parser.add_argument("component", choices=("web", "recorder", "recorder-recording", "browser"))
+    parser = argparse.ArgumentParser(description="Start a CatDoor component")
+    parser.add_argument("component", choices=("web", "recorder", "recorder-recording"))
     arguments = parser.parse_args()
 
     append_autostart_event(arguments.component, "starting")

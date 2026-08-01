@@ -36,7 +36,6 @@ from src.common.model_registry import register_model_version
 from src.common.online_metrics import build_online_metrics
 from src.common.process import spawn_detached
 from src.common.settings import Settings
-from src.common.windows_power import SleepInhibitor
 from src.recorder.ffmpeg import RecorderError, record_clip
 from src.recorder.preview import local_mjpeg_stream, preview_path
 from src.recorder.status import read_recorder_status
@@ -988,8 +987,7 @@ def _combined_clean_metrics(
 
 def run() -> None:
     settings = Settings()
-    with SleepInhibitor():
-        uvicorn.run(create_app(settings), host=settings.web_host, port=settings.web_port)
+    uvicorn.run(create_app(settings), host=settings.web_host, port=settings.web_port)
 
 
 if __name__ == "__main__":
