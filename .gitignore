@@ -61,3 +61,6 @@ models/
 # Keep explicitly approved tiny test fixtures
 !tests/fixtures/
 !tests/fixtures/**
+
+# Local Claude Code session state and worktrees
+.claude/

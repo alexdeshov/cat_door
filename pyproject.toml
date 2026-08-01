@@ -11,6 +11,15 @@ dependencies = [
     "pydantic-settings>=2.7",
 ]
 
+# Раскладка проекта плоская: `src` — обычный пакет, а не корень src-layout.
+# Без явного списка setuptools видит каталог `src/` и принимает раскладку за
+# src-layout, кладёт в sys.path сам `src` и отдаёт наружу `common`/`recorder`/
+# `web`. Импорты в коде и точки входа ниже используют `src.*`, поэтому пакеты
+# перечисляются явно.
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*", "scripts*", "training*"]
+
 [project.scripts]
 catdoor-web = "src.web.app:run"
 catdoor-recorder = "src.recorder.app:main"
@@ -21,6 +30,8 @@ dev = [
     "ruff>=0.9",
     "mypy>=1.14",
     "httpx>=0.28",
+    "numpy>=2.0",
+    "pillow>=11.0",
 ]
 training = [
     "torch>=2.6",
@@ -43,6 +54,11 @@ inference = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Тесты импортируют `src`, `scripts` и `training` из корня репозитория. Без
+# этой строки суита собирается только при запуске через `python -m pytest`,
+# который сам добавляет текущий каталог в sys.path; консольный скрипт `pytest`
+# его не добавляет и падает на импортах.
+pythonpath = ["."]
 
 [tool.ruff]
 line-length = 100
