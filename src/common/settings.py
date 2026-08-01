@@ -52,11 +52,6 @@ class Settings(BaseSettings):
     local_training_epochs: int = Field(default=2, ge=1, le=100)
     web_host: str = "127.0.0.1"
     web_port: int = Field(default=8080, ge=1, le=65535)
-    watchdog_recorder_stale_seconds: int = Field(default=180, ge=30, le=1800)
-    watchdog_restart_cooldown_seconds: int = Field(default=600, ge=60, le=3600)
-    watchdog_max_restart_attempts: int = Field(default=3, ge=1, le=10)
-    watchdog_failure_backoff_seconds: int = Field(default=1800, ge=300, le=21600)
-    watchdog_web_timeout_seconds: float = Field(default=2.0, gt=0.0, le=10.0)
 
     @property
     def resolved_database_path(self) -> Path:
