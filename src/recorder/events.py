@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+
+from sqlalchemy import select
 
 from src.common.database import Event, EventPrediction, create_session_factory
 from src.recorder.ffmpeg import RecorderError
@@ -32,6 +34,35 @@ class AutomaticEventPrediction:
     max_detector_confidence: float
     mean_inference_ms: float | None
     raw_scores: tuple[tuple[str, float], ...]
+
+
+def expire_stale_recordings(
+    database_path: Path,
+    *,
+    older_than: timedelta = timedelta(minutes=10),
+    now: datetime | None = None,
+) -> int:
+    """Пометить отказом записи, которые никогда не завершатся.
+
+    Строка со статусом `recording` создаётся до записи файлов, а финальный
+    статус ставится вторым коммитом. Потеря питания или перезапуск между ними
+    оставляли строку «идёт запись» навсегда — и после каждого отключения такие
+    фантомы копились в ленте. Единственный момент, когда про них известно
+    наверняка, — старт recorder: всё, что взялось записываться до него, уже не
+    допишется.
+    """
+    cutoff = (now or datetime.now(UTC)) - older_than
+    factory = create_session_factory(database_path)
+    with factory() as session:
+        stale = session.scalars(
+            select(Event).where(Event.status == "recording", Event.created_at < cutoff)
+        ).all()
+        for event in stale:
+            event.status = "failed"
+            event.error_code = "interrupted"
+        if stale:
+            session.commit()
+    return len(stale)
 
 
 def persist_automatic_event(

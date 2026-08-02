@@ -388,7 +388,14 @@ def test_frame_worker_waits_for_a_camera_instead_of_exiting(
 
 
 def _stall_fixtures(role: str = "face") -> tuple[dict, dict, dict, dict, threading.Lock]:
-    states = {role: StreamState(started_at=100.0, last_frame_at=100.0)}
+    states = {
+        role: StreamState(
+            target_key=("rtsp://10.0.0.5:554/one", False),
+            target_since=100.0,
+            last_frame_at=100.0,
+            process_started_at=100.0,
+        )
+    }
     targets = {role: StreamTarget(rtsp_url="rtsp://10.0.0.5:554/one", camera_id="hiwatch")}
     queues: dict[str, queue.Queue] = {role: queue.Queue(maxsize=1)}
     events = {role: threading.Event()}
@@ -406,9 +413,10 @@ def test_a_wedged_stream_is_killed_so_the_worker_can_reconnect() -> None:
     states["face"].process = SimpleNamespace(kill=lambda: killed.append("face"))
     queues["face"].put_nowait("устаревший кадр")
 
-    stalled = restart_stalled_streams(states, targets, queues, events, lock, 30.0, 200.0)
+    starving, dead = restart_stalled_streams(states, targets, queues, events, lock, 30.0, 200.0)
 
-    assert stalled == ["face"]
+    assert starving == ["face"]
+    assert dead == ["face"]
     assert killed == ["face"]
     assert events["face"].is_set()
     assert queues["face"].empty()
@@ -419,7 +427,9 @@ def test_a_live_stream_is_left_alone() -> None:
     states, targets, queues, events, lock = _stall_fixtures()
     states["face"].last_frame_at = 199.0
 
-    assert restart_stalled_streams(states, targets, queues, events, lock, 30.0, 200.0) == []
+    starving, dead = restart_stalled_streams(states, targets, queues, events, lock, 30.0, 200.0)
+
+    assert (starving, dead) == ([], [])
     assert not events["face"].is_set()
 
 
@@ -428,25 +438,61 @@ def test_a_role_without_a_camera_is_not_called_stalled() -> None:
     states, targets, queues, events, lock = _stall_fixtures()
     targets["face"] = StreamTarget()
 
-    assert restart_stalled_streams(states, targets, queues, events, lock, 30.0, 900.0) == []
+    starving, dead = restart_stalled_streams(states, targets, queues, events, lock, 30.0, 900.0)
+
+    assert (starving, dead) == ([], [])
 
 
-def test_stall_is_not_reported_twice_while_the_stream_comes_back() -> None:
-    """Отметки сдвигаются при убийстве, иначе роль убивали бы каждую итерацию."""
+def test_starvation_persists_across_reconnect_attempts() -> None:
+    """Голодание не сбрасывается переподключениями — в этом была главная дыра.
+
+    Мёртвая камера даёт быстрый цикл подключение-отказ по пятисекундному
+    таймауту ffmpeg. Прежний код сбрасывал отсчёт на каждой попытке, порог
+    застоя не достигался никогда, и поиск камеры в арендах не запускался.
+    """
     states, targets, queues, events, lock = _stall_fixtures()
+    # Кадров не было вовсе, попытки подключения идут одна за другой.
+    states["face"].last_frame_at = 0.0
+    states["face"].process = None
 
-    first = restart_stalled_streams(states, targets, queues, events, lock, 30.0, 200.0)
-    second = restart_stalled_streams(states, targets, queues, events, lock, 30.0, 210.0)
+    starving, dead = restart_stalled_streams(states, targets, queues, events, lock, 30.0, 200.0)
 
-    assert first == ["face"]
-    assert second == []
+    assert starving == ["face"]
+    assert dead == []
 
 
-def test_silent_camera_gets_its_new_address_from_the_leases(
-    runtime_path: Path,
-    monkeypatch,
-) -> None:
-    """Обрыв питания у камеры: вернулась с новой арендой, старый адрес мёртв."""
+def test_a_fresh_process_is_given_time_before_the_kill() -> None:
+    """Свежее подключение не режется, даже когда роль давно голодает."""
+    states, targets, queues, events, lock = _stall_fixtures()
+    states["face"].last_frame_at = 0.0
+    states["face"].process = SimpleNamespace(kill=lambda: None)
+    states["face"].process_started_at = 195.0  # процессу пять секунд
+
+    starving, dead = restart_stalled_streams(states, targets, queues, events, lock, 30.0, 200.0)
+
+    assert starving == ["face"]
+    assert dead == []
+
+
+def test_each_fruitless_kill_doubles_the_patience() -> None:
+    """Камера с кадром раз в сорок секунд не должна жить в вечном kill-цикле."""
+    states, targets, queues, events, lock = _stall_fixtures()
+    state = states["face"]
+    state.last_frame_at = 0.0
+    state.kills_without_frames = 2
+    state.process = SimpleNamespace(kill=lambda: None)
+    state.process_started_at = 100.0
+
+    # 30 * 2**2 = 120 секунд выдержки: на 219-й секунде процессу 119 — рано.
+    starving, dead = restart_stalled_streams(states, targets, queues, events, lock, 30.0, 219.0)
+    assert (starving, dead) == (["face"], [])
+
+    starving, dead = restart_stalled_streams(states, targets, queues, events, lock, 30.0, 221.0)
+    assert dead == ["face"]
+    assert state.kills_without_frames == 3
+
+
+def _recovery_registry(runtime_path: Path) -> Path:
     registry_path = camera_registry_path(runtime_path)
     save_registry(
         registry_path,
@@ -464,20 +510,32 @@ def test_silent_camera_gets_its_new_address_from_the_leases(
             ]
         ),
     )
-    leases = runtime_path / "dnsmasq.leases"
-    leases.write_text(
-        "1785600000 44:47:cc:11:22:33 192.168.1.137 HIWATCH *\n",
-        encoding="utf-8",
+    return registry_path
+
+
+def _fresh_lease(runtime_path: Path, line: str) -> None:
+    (runtime_path / "dnsmasq.leases").write_text(line, encoding="utf-8")
+
+
+def _recovery_settings(runtime_path: Path) -> Settings:
+    return Settings(
+        data_dir=runtime_path,
+        camera_dhcp_leases_path=runtime_path / "dnsmasq.leases",
     )
-    registry = load_registry(registry_path)
-    targets = stream_targets_from_registry(registry)
+
+
+def test_silent_camera_gets_its_new_address_from_the_leases(runtime_path: Path) -> None:
+    """Обрыв питания у камеры: вернулась с новой арендой, старый адрес мёртв."""
+    registry_path = _recovery_registry(runtime_path)
+    _fresh_lease(runtime_path, "9999999999 44:47:cc:11:22:33 192.168.1.137 HIWATCH *\n")
+    targets = stream_targets_from_registry(load_registry(registry_path))
 
     updated, moved = recover_stalled_addresses(
-        registry,
+        _recovery_settings(runtime_path),
         registry_path,
-        leases,
         targets,
         ["face"],
+        probe=lambda url: None,
     )
 
     assert moved == {"hiwatch": "192.168.1.137"}
@@ -487,7 +545,108 @@ def test_silent_camera_gets_its_new_address_from_the_leases(
     assert camera.password == "secret"
     assert camera.stream_path == "/one"
     assert camera.role == "face"
-    assert updated.by_role("face").host == "192.168.1.137"
+    assert updated is not None and updated.by_role("face").host == "192.168.1.137"
+
+
+def test_unanswered_candidate_address_is_not_applied(runtime_path: Path) -> None:
+    """Проба обязательна: аренда — самое слабое свидетельство из возможных.
+
+    Лежалая запись со старым адресом иначе перезаписала бы рабочий адрес
+    мёртвым, и «автопочинка» делала бы хуже, чем бездействие.
+    """
+    registry_path = _recovery_registry(runtime_path)
+    _fresh_lease(runtime_path, "9999999999 44:47:cc:11:22:33 192.168.1.137 HIWATCH *\n")
+    targets = stream_targets_from_registry(load_registry(registry_path))
+
+    _updated, moved = recover_stalled_addresses(
+        _recovery_settings(runtime_path),
+        registry_path,
+        targets,
+        ["face"],
+        probe=lambda url: "камера не ответила",
+    )
+
+    assert moved == {}
+    assert load_registry(registry_path).by_role("face").host == "192.168.1.101"
+
+
+def test_expired_lease_is_ignored(runtime_path: Path) -> None:
+    registry_path = _recovery_registry(runtime_path)
+    _fresh_lease(runtime_path, "1000000000 44:47:cc:11:22:33 192.168.1.137 HIWATCH *\n")
+    targets = stream_targets_from_registry(load_registry(registry_path))
+
+    _updated, moved = recover_stalled_addresses(
+        _recovery_settings(runtime_path),
+        registry_path,
+        targets,
+        ["face"],
+        probe=lambda url: None,
+    )
+
+    assert moved == {}
+
+
+def test_an_address_already_owned_by_another_camera_is_not_stolen(
+    runtime_path: Path,
+) -> None:
+    """Чужой адрес хуже неработающего: роль молча писала бы не тот ракурс."""
+    registry_path = camera_registry_path(runtime_path)
+    save_registry(
+        registry_path,
+        CameraRegistry(
+            cameras=[
+                CameraRecord(
+                    id="hiwatch", host="192.168.1.101", mac="44:47:cc:11:22:33", role="face"
+                ),
+                CameraRecord(id="nobelic", host="192.168.1.137", role="side"),
+            ]
+        ),
+    )
+    _fresh_lease(runtime_path, "9999999999 44:47:cc:11:22:33 192.168.1.137 HIWATCH *\n")
+    targets = stream_targets_from_registry(load_registry(registry_path))
+
+    _updated, moved = recover_stalled_addresses(
+        _recovery_settings(runtime_path),
+        registry_path,
+        targets,
+        ["face"],
+        probe=lambda url: None,
+    )
+
+    assert moved == {}
+    assert load_registry(registry_path).by_role("face").host == "192.168.1.101"
+
+
+def test_recovery_reads_the_registry_from_disk_not_from_memory(
+    runtime_path: Path,
+) -> None:
+    """Правки админа, сделанные пока recorder был занят, не затираются.
+
+    Recorder держит копию реестра в памяти и перечитывает её только в
+    ожидании; recovery же пишет файл целиком. Возьми она копию из памяти —
+    пароль, сохранённый админом во время события, молча откатился бы.
+    """
+    registry_path = _recovery_registry(runtime_path)
+    targets = stream_targets_from_registry(load_registry(registry_path))
+    # Пока recorder «был занят», админ сменил пароль камеры на диске.
+    fresh = load_registry(registry_path)
+    save_registry(
+        registry_path,
+        fresh.with_camera(fresh.get("hiwatch").model_copy(update={"password": "новый"})),
+    )
+    _fresh_lease(runtime_path, "9999999999 44:47:cc:11:22:33 192.168.1.137 HIWATCH *\n")
+
+    recover_stalled_addresses(
+        _recovery_settings(runtime_path),
+        registry_path,
+        targets,
+        ["face"],
+        probe=lambda url: None,
+    )
+
+    camera = load_registry(registry_path).get("hiwatch")
+    assert camera.host == "192.168.1.137"
+    assert camera.password == "новый"
 
 
 def test_camera_without_a_mac_is_left_as_is(runtime_path: Path) -> None:
@@ -497,16 +656,15 @@ def test_camera_without_a_mac_is_left_as_is(runtime_path: Path) -> None:
         registry_path,
         CameraRegistry(cameras=[CameraRecord(id="ursa", host="192.168.1.101", role="face")]),
     )
-    leases = runtime_path / "dnsmasq.leases"
-    leases.write_text("1785600000 44:47:cc:11:22:33 192.168.1.137 X *\n", encoding="utf-8")
+    _fresh_lease(runtime_path, "9999999999 44:47:cc:11:22:33 192.168.1.137 X *\n")
     registry = load_registry(registry_path)
 
     _updated, moved = recover_stalled_addresses(
-        registry,
+        _recovery_settings(runtime_path),
         registry_path,
-        leases,
         stream_targets_from_registry(registry),
         ["face"],
+        probe=lambda url: None,
     )
 
     assert moved == {}
@@ -514,23 +672,15 @@ def test_camera_without_a_mac_is_left_as_is(runtime_path: Path) -> None:
 
 
 def test_missing_leases_file_changes_nothing(runtime_path: Path) -> None:
-    registry_path = camera_registry_path(runtime_path)
-    save_registry(
-        registry_path,
-        CameraRegistry(
-            cameras=[
-                CameraRecord(id="hiwatch", host="192.168.1.101", mac="44:47:cc:11:22:33", role="face")
-            ]
-        ),
-    )
+    registry_path = _recovery_registry(runtime_path)
     registry = load_registry(registry_path)
 
     _updated, moved = recover_stalled_addresses(
-        registry,
+        _recovery_settings(runtime_path),
         registry_path,
-        runtime_path / "нет-аренд",
         stream_targets_from_registry(registry),
         ["face"],
+        probe=lambda url: None,
     )
 
     assert moved == {}
@@ -611,7 +761,7 @@ def test_worker_reconnects_after_a_wedged_process_is_killed(
         # Момент проверки задаётся явно вперёд, а не берётся текущим: иначе
         # тест держится на том, что между подключением воркера и этой строкой
         # пройдёт больше порога, а на быстрой машине не проходит.
-        stalled = restart_stalled_streams(
+        starving, dead = restart_stalled_streams(
             states,
             targets,
             queues,
@@ -621,7 +771,8 @@ def test_worker_reconnects_after_a_wedged_process_is_killed(
             time.monotonic() + 60,
         )
 
-        assert stalled == ["face"]
+        assert starving == ["face"]
+        assert dead == ["face"]
         wait_for(2)
         assert worker.is_alive()
     finally:
@@ -699,3 +850,59 @@ def test_disabling_from_the_admin_stops_the_running_monitor(
     payload = json.loads(recorder_status_path(settings).read_text(encoding="utf-8"))
     assert payload["state"] == "disabled"
     assert payload["automatic_capture_enabled"] is False
+
+
+def test_frame_worker_survives_an_unexpected_exception(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    """Воркер обязан быть бессмертным.
+
+    Раньше ловился только OSError, и любое другое исключение убивало поток;
+    главный цикл продолжал кормить watchdog при полностью мёртвом захвате.
+    """
+    attempts: list[int] = []
+    frame = np.zeros((4, 4, 3), dtype=np.uint8)
+
+    def flaky_stream(ffmpeg_path: str, rtsp_url: str, fps: float, **options):
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise ValueError("рассинхронизация пайпа")
+        yield FrameSample(preview=frame, detector=frame)
+
+    monkeypatch.setattr("src.recorder.app.rgb_frame_stream", flaky_stream)
+    monkeypatch.setattr("src.recorder.app.prepare_detector_frame", lambda sample, *rest: sample)
+    monkeypatch.setattr("src.recorder.app.RECORDER_RETRY_SECONDS", 0.05)
+
+    settings = Settings(data_dir=runtime_path, camera_face_rtsp="rtsp://10.0.0.5:554/one")
+    camera_configs = {
+        "face": CameraDetectionConfig(
+            confidence_threshold=0.5,
+            box_min_confidence=0.2,
+            confirmation_frames=1,
+            window_frames=1,
+        )
+    }
+    targets = {"face": StreamTarget(rtsp_url="rtsp://10.0.0.5:554/one", camera_id="x")}
+    states = {"face": StreamState()}
+    output: queue.Queue = queue.Queue(maxsize=1)
+    stop = threading.Event()
+    worker = threading.Thread(
+        target=_frame_worker,
+        args=(
+            "face", settings, output, camera_configs, targets, states,
+            threading.Lock(), threading.Event(), stop,
+            320, 114, "letterbox", "center",
+        ),
+        daemon=True,
+    )
+    worker.start()
+    try:
+        role = output.get(timeout=10)[0]
+        assert role == "face"
+        assert len(attempts) >= 2
+        assert worker.is_alive()
+    finally:
+        stop.set()
+        worker.join(timeout=10)
+        assert not worker.is_alive()

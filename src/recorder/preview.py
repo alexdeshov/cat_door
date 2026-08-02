@@ -97,10 +97,23 @@ def publish_preview(path: Path, frame: np.ndarray) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def local_mjpeg_stream(path: Path, fps: int) -> Iterator[bytes]:
+def local_mjpeg_stream(
+    path: Path,
+    fps: int,
+    idle_timeout_seconds: float = 20.0,
+) -> Iterator[bytes]:
+    """Кадры из файла превью, пока recorder его обновляет.
+
+    Поток обязан заканчиваться, когда превью протухло. Прежний вечный цикл
+    без единого yield был невидимой утечкой: sync-генератор занимает поток
+    пула админки, отмена его не прерывает, и каждый зритель остановленного
+    recorder навсегда сжигал по потоку — до полного паралича админки.
+    """
     last_frame: bytes | None = None
     delay = 1 / fps
     while True:
+        if not preview_is_fresh(path, idle_timeout_seconds):
+            return
         try:
             frame = path.read_bytes()
         except OSError:

@@ -23,6 +23,7 @@ import socket
 import time
 from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import suppress
 from dataclasses import dataclass, replace
 from ipaddress import IPv4Address, IPv4Network, ip_network
 from pathlib import Path
@@ -100,11 +101,16 @@ def _normalize_mac(value: str) -> str:
     return mac
 
 
-def read_dhcp_leases(path: Path) -> list[DiscoveredDevice]:
+def read_dhcp_leases(path: Path, *, now: float | None = None) -> list[DiscoveredDevice]:
     """Разобрать `dnsmasq.leases`: срок, MAC, адрес, имя, client-id.
 
     Битая строка пропускается молча. Файл пишет чужая служба, и одна её
     странность не должна отменять поиск целиком.
+
+    С заданным `now` истёкшие аренды отбрасываются. Это важно для автопочинки
+    адресов: лежалая запись со старым адресом камеры иначе перезаписала бы
+    рабочий адрес мёртвым. Для поиска в админке фильтр не включается — там
+    устаревшая строка тоже подсказка, и решение принимает человек.
     """
     try:
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -115,6 +121,12 @@ def read_dhcp_leases(path: Path) -> list[DiscoveredDevice]:
         parts = line.split()
         if len(parts) < 3:
             continue
+        if now is not None:
+            try:
+                if float(parts[0]) < now:
+                    continue
+            except ValueError:
+                continue
         mac = _normalize_mac(parts[1])
         host = parts[2]
         if not mac or not host:
@@ -265,6 +277,16 @@ def ws_discovery(
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
         if bind_address:
             sock.bind((bind_address, 0))
+            # bind задаёт адрес источника, но исходящий интерфейс мультикаста
+            # на Linux выбирает IP_MULTICAST_IF. Без него проба уходила по
+            # маршруту по умолчанию — в домашнюю сеть, и камеры в изолированном
+            # сегменте её попросту не видели.
+            with suppress(OSError):
+                sock.setsockopt(
+                    socket.IPPROTO_IP,
+                    socket.IP_MULTICAST_IF,
+                    socket.inet_aton(bind_address),
+                )
         sock.settimeout(min(0.5, max(timeout, 0.05)))
         for _ in range(max(1, attempts)):
             try:

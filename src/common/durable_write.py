@@ -36,6 +36,23 @@ def _fsync_directory(directory: Path) -> None:
             os.close(descriptor)
 
 
+def publish_file_durably(temporary: Path, destination: Path) -> None:
+    """Обнародовать уже записанный файл так, чтобы он пережил обрыв питания.
+
+    Для видео события `replace()` без fsync означал ровно тот же дефект, что и
+    у конфигов: переименование переживает обрыв раньше данных, и в ленте
+    остаётся «готовое» событие с пустым файлом — как правило, последний проход
+    перед отключением, самый интересный.
+    """
+    descriptor = os.open(temporary, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    temporary.replace(destination)
+    _fsync_directory(destination.parent)
+
+
 def write_text_durably(path: Path, text: str, *, mode: int = 0o600) -> None:
     """Записать файл целиком, с гарантией, что он переживёт потерю питания.
 

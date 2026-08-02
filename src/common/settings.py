@@ -60,6 +60,11 @@ class Settings(BaseSettings):
     camera_arp_table_path: Path = Path("/proc/net/arp")
     camera_discovery_subnet: str = ""
     camera_discovery_timeout_seconds: float = Field(default=3.0, gt=0.0, le=15.0)
+    # Порог свободного места, ниже которого новые записи не начинаются.
+    # Заполненный до конца диск глушит и сами записи, и всю отчётность о них:
+    # статус, журнал и базу. Отказаться от новой записи заранее — единственный
+    # способ сохранить систему говорящей.
+    disk_min_free_gb: float = Field(default=2.0, ge=0.0, le=500.0)
     # Сколько recorder ждёт кадр, прежде чем счесть поток застрявшим и убить
     # ffmpeg. Должно превышать самую медленную настроенную частоту кадров с
     # запасом на переподключение, иначе живой поток будут рвать зря.
@@ -71,6 +76,7 @@ class Settings(BaseSettings):
     # Контур калитки: служба systemd, поднимающая Frigate, и адрес его
     # интерфейса для ссылки с пульта. Пустой адрес — ссылка не показывается.
     gate_service_unit: str = "frigate.service"
+    gate_container_name: str = "frigate"
     gate_ui_url: str = ""
     data_dir: Path = Path("data")
     database_path: Path | None = None

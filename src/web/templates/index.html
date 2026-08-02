@@ -704,6 +704,13 @@
       if (result.detector_device_actual) {
         items.push(readout("OpenVINO", result.detector_device_actual));
       }
+      if (result.disk_free_gb != null) {
+        const disk = readout("диск", `${result.disk_free_gb} ГБ`);
+        if (result.disk_low) {
+          disk.querySelector(".readout-value").classList.add("bad");
+        }
+        items.push(disk);
+      }
       items.push(readout("режим", result.dry_run === false ? "запись событий" : "наблюдение"));
       const identities = Object.values(result.identity || {}).filter(item => item.name);
       if (!result.stale && identities.length) {

@@ -22,7 +22,7 @@ import subprocess
 from dataclasses import dataclass
 from typing import Literal
 
-GateState = Literal["running", "stopped", "failed", "absent", "unknown"]
+GateState = Literal["running", "starting", "stopped", "failed", "absent", "unknown"]
 
 # Пульт ждёт ответа, поэтому команды коротки по времени. Запуск Frigate идёт
 # в фоне: systemd возвращает управление, не дожидаясь готовности контейнера.
@@ -36,7 +36,12 @@ class GateStatus:
 
     @property
     def running(self) -> bool:
-        return self.state == "running"
+        """Запускающаяся служба считается работающей.
+
+        Для примирителя это важно: иначе он видел бы «остановлена» во время
+        долгого первого запуска и пытался запустить ещё раз.
+        """
+        return self.state in {"running", "starting"}
 
     @property
     def deployed(self) -> bool:
@@ -73,6 +78,10 @@ def gate_status(unit: str) -> GateStatus:
     code, output = _run(["systemctl", "is-active", unit])
     if output == "active":
         return GateStatus("running")
+    if output == "activating":
+        # Первый запуск тянет образ минуты. Показывать это время «остановлена»
+        # значило бы подталкивать щёлкать переключателем ещё раз.
+        return GateStatus("starting", "служба запускается")
     if output == "failed":
         return GateStatus("failed", "служба завершилась с ошибкой")
     if not output:
@@ -91,8 +100,15 @@ def set_gate_running(unit: str, running: bool) -> str | None:
     эта команда не сработала бы: `NoNewPrivileges` в его юните запрещает любое
     повышение прав, включая `sudo`.
     """
-    action = "start" if running else "stop"
-    code, output = _run(["systemctl", action, unit])
+    if running:
+        # Запуск не ждёт готовности: первый старт Frigate тянет образ минуты, а
+        # блокирующий вызов обрезался бы нашим же таймаутом и лёг в журнал
+        # ложным отказом. Сошёлся ли запуск, выяснит следующий прогон
+        # примирителя — по таймеру он приходит регулярно.
+        code, output = _run(["systemctl", "start", "--no-block", unit])
+    else:
+        code, output = _run(["systemctl", "stop", unit])
     if code == 0:
         return None
+    action = "start" if running else "stop"
     return output or f"не удалось выполнить systemctl {action} {unit}"
