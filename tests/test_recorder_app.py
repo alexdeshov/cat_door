@@ -1,12 +1,14 @@
 import json
 import queue
 import sqlite3
+import threading
 from pathlib import Path
 
 import numpy as np
 import pytest
 from sqlalchemy.exc import SQLAlchemyError
 
+from src.common.camera_registry import CameraRecord, CameraRegistry
 from src.common.detection_config import CameraDetectionConfig
 from src.common.sd_notify import Notifier
 from src.common.settings import Settings
@@ -14,6 +16,8 @@ from src.inference.cat_detector import CatDetection, CatDetectionResult
 from src.inference.cat_identity import IdentityPrediction
 from src.recorder.app import (
     CameraConfirmationTracker,
+    StreamTarget,
+    _frame_worker,
     _get_fair_frame,
     _predict_identity_if_detected,
     _put_latest,
@@ -22,7 +26,9 @@ from src.recorder.app import (
     publish_heartbeat,
     recorder_status_path,
     run,
+    stream_targets_from_registry,
 )
+from src.recorder.frames import FrameSample
 
 
 def test_disabled_recorder_writes_safe_heartbeat(runtime_path: Path) -> None:
@@ -265,3 +271,101 @@ def test_register_loaded_models_retries_database_startup(
 
     assert _register_loaded_models(Settings(), {}) == {"detector": 42}
     assert attempts == 3
+
+
+def test_stream_targets_follow_the_role_not_the_camera_id() -> None:
+    registry = CameraRegistry(
+        cameras=[
+            CameraRecord(id="ursa", host="10.0.0.5", stream_path="/one", role="side"),
+            CameraRecord(id="hiwatch", host="10.0.0.6", stream_path="/two", role="face"),
+            CameraRecord(id="spare", host="10.0.0.7", enabled=False),
+        ]
+    )
+
+    targets = stream_targets_from_registry(registry)
+
+    assert targets["face"].camera_id == "hiwatch"
+    assert targets["face"].rtsp_url == "rtsp://10.0.0.6:554/two"
+    assert targets["side"].camera_id == "ursa"
+
+
+def test_disabled_camera_leaves_its_role_without_a_stream() -> None:
+    registry = CameraRegistry(
+        cameras=[CameraRecord(id="ursa", host="10.0.0.5", role="face", enabled=False)]
+    )
+
+    targets = stream_targets_from_registry(registry)
+
+    assert targets["face"].camera_id == "ursa"
+    assert targets["face"].rtsp_url == ""
+    assert targets["side"] == StreamTarget()
+
+
+def test_frame_worker_waits_for_a_camera_instead_of_exiting(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    """Роль без камеры — ожидание, а не конец работы.
+
+    Прежний воркер завершался на пустом адресе, поэтому камера, подключённая
+    после старта, начинала отдавать кадры только после перезапуска службы.
+    """
+    connected: list[str] = []
+    frame = np.zeros((4, 4, 3), dtype=np.uint8)
+
+    def fake_stream(ffmpeg_path: str, rtsp_url: str, fps: float, **options):
+        connected.append(rtsp_url)
+        yield FrameSample(preview=frame, detector=frame)
+
+    monkeypatch.setattr("src.recorder.app.rgb_frame_stream", fake_stream)
+    monkeypatch.setattr("src.recorder.app.prepare_detector_frame", lambda sample, *rest: sample)
+
+    settings = Settings(data_dir=runtime_path)
+    output: queue.Queue = queue.Queue(maxsize=1)
+    camera_configs = {
+        "face": CameraDetectionConfig(
+            confidence_threshold=0.5,
+            box_min_confidence=0.2,
+            confirmation_frames=1,
+            window_frames=1,
+        )
+    }
+    targets = {"face": StreamTarget()}
+    lock = threading.Lock()
+    reload_stream = threading.Event()
+    stop = threading.Event()
+    worker = threading.Thread(
+        target=_frame_worker,
+        args=(
+            "face",
+            settings,
+            output,
+            camera_configs,
+            targets,
+            lock,
+            reload_stream,
+            stop,
+            320,
+            114,
+            "letterbox",
+            "center",
+        ),
+        daemon=True,
+    )
+    worker.start()
+    try:
+        assert output.empty()
+        with lock:
+            targets["face"] = StreamTarget(
+                rtsp_url="rtsp://10.0.0.9:554/new",
+                camera_id="hiwatch",
+            )
+        role = output.get(timeout=10)[0]
+
+        assert role == "face"
+        assert connected == ["rtsp://10.0.0.9:554/new"]
+        assert worker.is_alive()
+    finally:
+        stop.set()
+        worker.join(timeout=10)
+        assert not worker.is_alive()

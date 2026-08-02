@@ -13,6 +13,13 @@ from typing import Any, Protocol
 
 from sqlalchemy.exc import SQLAlchemyError
 
+from src.common.camera_registry import (
+    ROLES,
+    CameraRegistry,
+    camera_registry_path,
+    ensure_registry,
+    load_registry,
+)
 from src.common.database import create_session_factory
 from src.common.detection_config import (
     CameraDetectionConfig,
@@ -48,6 +55,22 @@ from src.recorder.status import write_recorder_status
 DATABASE_STARTUP_ATTEMPTS = 3
 DATABASE_STARTUP_RETRY_SECONDS = 1.0
 RECORDER_RETRY_SECONDS = 5.0
+# Пауза воркера роли, у которой сейчас нет камеры. Назначение роли приходит
+# файлом инвентаря, а не сигналом, поэтому проверять чаще смысла нет.
+CAMERA_WAIT_SECONDS = 2.0
+
+
+@dataclass(frozen=True)
+class StreamTarget:
+    """Куда сейчас подключается воркер роли.
+
+    Отдельно от `CameraDetectionConfig`, потому что меняется по другой причине:
+    настройки детекции правит человек, а адрес — перестановка камер.
+    """
+
+    rtsp_url: str = ""
+    rotate_180: bool = False
+    camera_id: str | None = None
 
 
 def recorder_status_path(settings: Settings) -> Path:
@@ -73,6 +96,25 @@ def publish_status(
 
 def build_automatic_config(settings: Settings) -> AutomaticEventConfig:
     return DetectionConfig.from_settings(settings).event_config()
+
+
+def _camera_status(stream_targets: dict[str, StreamTarget]) -> dict[str, object]:
+    """Что админка показывает про каждую роль, не зная адресов.
+
+    Роль без камеры и роль с камерой, которая молчит, — разные неисправности,
+    и различить их по одному счётчику кадров нельзя.
+    """
+    return {
+        role: {"camera_id": target.camera_id, "configured": bool(target.rtsp_url)}
+        for role, target in stream_targets.items()
+    }
+
+
+def _waiting_message(stream_targets: dict[str, StreamTarget]) -> str:
+    unassigned = [role for role, target in stream_targets.items() if not target.rtsp_url]
+    if not unassigned:
+        return "Ожидание кадров камер"
+    return f"Ролям не назначена камера: {', '.join(sorted(unassigned))}"
 
 
 def _detector_device_status(
@@ -260,8 +302,27 @@ def _build_online_predictions(
     return tuple(predictions)
 
 
+def stream_targets_from_registry(registry: CameraRegistry) -> dict[str, StreamTarget]:
+    targets: dict[str, StreamTarget] = {}
+    for role in ROLES:
+        camera = registry.by_role(role)
+        targets[role] = (
+            StreamTarget(
+                rtsp_url=camera.rtsp_url() if camera.enabled else "",
+                rotate_180=camera.rotate_180,
+                camera_id=camera.id,
+            )
+            if camera is not None
+            else StreamTarget()
+        )
+    return targets
+
+
 def publish_heartbeat(settings: Settings, notifier: Notifier | None = None) -> None:
     build_automatic_config(settings)
+    # Инвентарь заводится и здесь: recorder может подняться раньше веб-службы,
+    # и тогда файл камер должен появиться с его стороны.
+    registry = ensure_registry(camera_registry_path(settings.data_dir), settings)
     if not settings.automatic_capture_enabled:
         state = "disabled"
         message = "Автоматический сбор выключен"
@@ -277,6 +338,7 @@ def publish_heartbeat(settings: Settings, notifier: Notifier | None = None) -> N
         automatic_capture_enabled=settings.automatic_capture_enabled,
         dry_run=settings.automatic_capture_dry_run,
         detector_connected=False,
+        cameras=_camera_status(stream_targets_from_registry(registry)),
         **_detector_device_status(settings),
     )
 
@@ -286,6 +348,7 @@ def _frame_worker(
     settings: Settings,
     output: queue.Queue[tuple[str, Any, Any, Any, float, CameraDetectionConfig]],
     camera_configs: dict[str, CameraDetectionConfig],
+    stream_targets: dict[str, StreamTarget],
     config_lock: threading.Lock,
     reload_stream: threading.Event,
     stop: threading.Event,
@@ -294,28 +357,27 @@ def _frame_worker(
     detector_resize_mode: str,
     detector_letterbox_alignment: str,
 ) -> None:
-    url = settings.camera_face_rtsp if role == "face" else settings.camera_side_rtsp
-    rotate_180 = (
-        settings.camera_face_rotate_180
-        if role == "face"
-        else settings.camera_side_rotate_180
-    )
-    if not url:
-        return
     while not stop.is_set():
         with config_lock:
             camera_config = camera_configs[role]
+            target = stream_targets[role]
             reload_stream.clear()
+        if not target.rtsp_url:
+            # Роль без камеры — это ожидание назначения, а не конец работы.
+            # Раньше воркер здесь завершался, и камера, подключённая позже,
+            # начинала отдавать кадры только после перезапуска службы.
+            stop.wait(CAMERA_WAIT_SECONDS)
+            continue
         try:
             for sample in rgb_frame_stream(
                 settings.ffmpeg_path,
-                url,
+                target.rtsp_url,
                 camera_config.sample_fps,
                 segment_directory=settings.data_dir / "runtime" / "ring" / role,
                 segment_seconds=settings.ring_segment_seconds,
                 retention_seconds=settings.ring_retention_seconds,
                 roi=camera_config.roi,
-                rotate_180=rotate_180,
+                rotate_180=target.rotate_180,
             ):
                 if stop.is_set():
                     return
@@ -348,6 +410,8 @@ def monitor_automatic(
     notifier: Notifier | None = None,
 ) -> None:
     config_path = detection_config_path(settings.data_dir)
+    registry_path = camera_registry_path(settings.data_dir)
+    registry = ensure_registry(registry_path, settings)
     runtime_config = load_detection_config(config_path, DetectionConfig.from_settings(settings))
     journal = DetectionJournal(
         settings.data_dir / "runtime" / "detection.jsonl",
@@ -380,6 +444,7 @@ def monitor_automatic(
         role: getattr(runtime_config, role)
         for role in ("face", "side")
     }
+    stream_targets = stream_targets_from_registry(registry)
     config_lock = threading.Lock()
     reload_events = {
         role: threading.Event()
@@ -394,6 +459,7 @@ def monitor_automatic(
                 settings,
                 frame_queues[role],
                 worker_configs,
+                stream_targets,
                 config_lock,
                 reload_events[role],
                 stop,
@@ -439,8 +505,8 @@ def monitor_automatic(
         },
         recording=not settings.automatic_capture_dry_run,
         cameras={
-            "face": bool(settings.camera_face_rtsp),
-            "side": bool(settings.camera_side_rtsp),
+            role: target.camera_id if target.rtsp_url else None
+            for role, target in stream_targets.items()
         },
     )
     last_config_check_at = 0.0
@@ -469,6 +535,35 @@ def monitor_automatic(
                         for role in ("face", "side")
                     }
                     journal.write("config_updated", **runtime_config.model_dump())
+                updated_registry = load_registry(registry_path)
+                if updated_registry is not None and updated_registry != registry:
+                    registry = updated_registry
+                    updated_targets = stream_targets_from_registry(registry)
+                    changed_roles = [
+                        role
+                        for role in ("face", "side")
+                        if updated_targets[role] != stream_targets[role]
+                    ]
+                    with config_lock:
+                        for role in changed_roles:
+                            stream_targets[role] = updated_targets[role]
+                            _clear_queue(frame_queues[role])
+                            reload_events[role].set()
+                    if changed_roles:
+                        # Адрес не пишется даже в замаскированном виде: в
+                        # журнале хватает того, какая камера теперь на роли.
+                        journal.write(
+                            "cameras_updated",
+                            roles=changed_roles,
+                            cameras={
+                                role: updated_targets[role].camera_id
+                                for role in ("face", "side")
+                            },
+                            configured={
+                                role: bool(updated_targets[role].rtsp_url)
+                                for role in ("face", "side")
+                            },
+                        )
                 last_config_check_at = now
             try:
                 item, next_camera = _get_fair_frame(
@@ -495,12 +590,13 @@ def monitor_automatic(
                     notifier,
                     process="CatDoorRecorder",
                     state="waiting_for_frames",
-                    message="Ожидание кадров камер",
+                    message=_waiting_message(stream_targets),
                     automatic_capture_enabled=True,
                     dry_run=True,
                     detector_connected=True,
                     frames_processed=frames_processed,
                     confidences=confidences,
+                    cameras=_camera_status(stream_targets),
                     **_detector_device_status(settings, detector),
                 )
                 continue
@@ -665,6 +761,7 @@ def monitor_automatic(
                 identity=identity_predictions,
                 last_action=last_action,
                 initiating_camera=update.initiating_camera,
+                cameras=_camera_status(stream_targets),
                 **_detector_device_status(settings, detector),
             )
             last_status_at = now
@@ -689,6 +786,7 @@ def monitor_automatic(
             confidences=confidences,
             identity=identity_predictions,
             last_action=last_action,
+            cameras=_camera_status(stream_targets),
             **_detector_device_status(settings, detector),
         )
         journal.write(

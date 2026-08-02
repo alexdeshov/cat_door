@@ -15,10 +15,23 @@ import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from src.common.camera_registry import (
+    ROLE_TITLES,
+    ROLES,
+    CameraRecord,
+    CameraRegistry,
+    CameraRole,
+    camera_from_url,
+    camera_registry_path,
+    ensure_registry,
+    load_registry,
+    save_registry,
+    slugify_camera_id,
+)
 from src.common.database import (
     EvaluationRun,
     Event,
@@ -39,7 +52,7 @@ from src.common.online_metrics import build_online_metrics
 from src.common.process import spawn_detached
 from src.common.sd_notify import Notifier
 from src.common.settings import ConfigurationError, Settings, validate_runtime_paths
-from src.recorder.ffmpeg import RecorderError, mjpeg_stream, record_clip
+from src.recorder.ffmpeg import RecorderError, mjpeg_stream, probe_stream, record_clip
 from src.recorder.preview import local_mjpeg_stream, preview_is_fresh, preview_path
 from src.recorder.status import read_recorder_status
 from training.workflow import create_macbook_export, write_status
@@ -137,6 +150,114 @@ class CapturePayload(BaseModel):
     duration_seconds: int = Field(ge=3, le=30)
 
 
+class CameraPayload(BaseModel):
+    """Поля карточки камеры.
+
+    Пароль отдельно: `None` означает «оставить прежний», пустая строка —
+    «стереть». Иначе форма, которая не может показать сохранённый пароль,
+    стирала бы его при каждом сохранении соседнего поля.
+    """
+
+    id: str | None = None
+    title: str = ""
+    host: str = ""
+    port: int = Field(default=554, ge=1, le=65535)
+    stream_path: str = ""
+    username: str = ""
+    password: str | None = None
+    mac: str = ""
+    role: CameraRole | None = None
+    rotate_180: bool = False
+    enabled: bool = True
+    note: str = ""
+    rtsp_url: str = ""
+
+
+def _unique_camera_id(registry: CameraRegistry, candidate: str) -> str:
+    if registry.get(candidate) is None:
+        return candidate
+    suffix = 2
+    while registry.get(f"{candidate}-{suffix}") is not None:
+        suffix += 1
+    return f"{candidate}-{suffix}"
+
+
+def _role_stream_url(registry: CameraRegistry, role: str) -> str:
+    """RTSP-адрес камеры роли. Пустая строка — роли нечем снимать.
+
+    Выключенная камера считается отсутствующей: recorder её тоже не берёт, и
+    показывать с неё живое изображение значило бы обещать запись, которой не
+    будет. Кнопка проверки потока работает и для выключенной.
+    """
+    camera = registry.by_role(role)
+    return camera.rtsp_url() if camera is not None and camera.enabled else ""
+
+
+def _camera_view(camera: CameraRecord) -> dict[str, object]:
+    """Карточка камеры для API. Пароль наружу не выходит никогда."""
+    return {
+        "id": camera.id,
+        "title": camera.title,
+        "display_title": camera.display_title,
+        "host": camera.host,
+        "port": camera.port,
+        "stream_path": camera.stream_path,
+        "username": camera.username,
+        "has_password": bool(camera.password),
+        "mac": camera.mac,
+        "role": camera.role,
+        "rotate_180": camera.rotate_180,
+        "enabled": camera.enabled,
+        "note": camera.note,
+        "configured": bool(camera.rtsp_url()),
+    }
+
+
+def _apply_camera_payload(
+    payload: CameraPayload,
+    camera_id: str,
+    existing: CameraRecord | None,
+) -> CameraRecord:
+    """Наложить присланные поля на сохранённую запись.
+
+    Применяется только то, что действительно пришло в запросе: запрос, где
+    поменялся один адрес, не должен заодно снять с камеры роль и поворот.
+    Целый RTSP-адрес, если он задан, перекрывает разобранные поля — вставить
+    строку из вебморды камеры проще, чем разложить её руками.
+    """
+    base = existing if existing is not None else CameraRecord(id=camera_id)
+    provided = payload.model_dump(exclude_unset=True)
+    provided.pop("id", None)
+    rtsp_url = str(provided.pop("rtsp_url", "") or "")
+    password = provided.pop("password", None)
+    values: dict[str, object] = {**base.model_dump(), **provided, "id": camera_id}
+    if password is not None:
+        values["password"] = password
+    if rtsp_url.strip():
+        parsed = camera_from_url(camera_id, rtsp_url)
+        values.update(
+            {
+                "host": parsed.host,
+                "port": parsed.port,
+                "stream_path": parsed.stream_path,
+            }
+        )
+        if parsed.username:
+            values["username"] = parsed.username
+        if parsed.password:
+            values["password"] = parsed.password
+    try:
+        return CameraRecord.model_validate(values)
+    except ValidationError as exc:
+        # Берутся только сообщения: полный текст ошибки pydantic цитирует ещё и
+        # значения полей, а среди них пароль камеры.
+        reason = "; ".join(
+            f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}"
+            for error in exc.errors()
+        )
+        raise HTTPException(422, f"Некорректные поля камеры: {reason}") from exc
+
+
 class LabelPayload(BaseModel):
     label: str
     cat_name: str | None = Field(default=None, max_length=100)
@@ -203,6 +324,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     factory = create_session_factory(settings.resolved_database_path)
     templates = Jinja2Templates(directory=Path(__file__).parent / "templates")
+    registry_path = camera_registry_path(settings.data_dir)
+    ensure_registry(registry_path, settings)
 
     app = FastAPI(title="CatDoor AI", version="0.1.0", lifespan=_notify_systemd)
     app.state.settings = settings
@@ -213,6 +336,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             detection_config_path(settings.data_dir),
             DetectionConfig.from_settings(settings),
         )
+
+    def current_registry() -> CameraRegistry:
+        """Инвентарь читается на каждый запрос.
+
+        Файл крошечный, а редактировать его может и recorder, и человек через
+        SSH: держать копию в памяти означало бы показывать устаревший адрес
+        ровно тогда, когда камеру только что переставили.
+        """
+        return load_registry(registry_path) or ensure_registry(registry_path, settings)
+
+    def store_registry(registry: CameraRegistry) -> None:
+        try:
+            save_registry(registry_path, registry)
+        except OSError as exc:
+            raise HTTPException(500, "Не удалось сохранить список камер") from exc
+
+    def required_camera(registry: CameraRegistry, camera_id: str) -> CameraRecord:
+        camera = registry.get(camera_id)
+        if camera is None:
+            raise HTTPException(404, "Камера не найдена")
+        return camera
 
     def get_session() -> Generator[Session, None, None]:
         yield from session_dependency(factory)
@@ -304,14 +448,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if recorder_status
             else settings.automatic_capture_dry_run
         )
+        registry = current_registry()
         return templates.TemplateResponse(
             request=request,
             name="index.html",
             context={
                 "events": events,
                 "event_predictions": event_predictions,
-                "face_configured": bool(settings.camera_face_rtsp),
-                "side_configured": bool(settings.camera_side_rtsp),
+                "face_configured": bool(_role_stream_url(registry, "face")),
+                "side_configured": bool(_role_stream_url(registry, "side")),
                 "default_duration": settings.capture_duration_seconds,
                 "target_counts": target_counts,
                 "event_summary": event_summary,
@@ -328,33 +473,98 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/cameras", response_class=HTMLResponse)
     def cameras_page(request: Request) -> HTMLResponse:
+        registry = current_registry()
         return templates.TemplateResponse(
             request,
             "cameras.html",
             {
-                "cameras": settings.preview_cameras(),
+                "cameras": [_camera_view(camera) for camera in registry.cameras],
+                "role_titles": ROLE_TITLES,
+                "roles": list(ROLES),
+                "detection_config": current_detection_config(),
+                "recorder_status": read_recorder_status(
+                    settings.data_dir / "runtime" / "recorder-status.json"
+                ),
                 "stream_version": uuid4().hex,
             },
         )
 
+    @app.get("/api/cameras")
+    def list_cameras() -> dict[str, object]:
+        registry = current_registry()
+        return {"cameras": [_camera_view(camera) for camera in registry.cameras]}
+
+    @app.post("/api/cameras", status_code=201)
+    def create_camera(payload: CameraPayload) -> dict[str, object]:
+        registry = current_registry()
+        if payload.id:
+            camera_id = slugify_camera_id(payload.id)
+            if registry.get(camera_id) is not None:
+                raise HTTPException(409, f"Камера с идентификатором {camera_id} уже есть")
+        else:
+            # Идентификатор собран за администратора, поэтому и совпадение
+            # разрешается за него: название на кириллице сворачивается в один и
+            # тот же слаг, а отказ на этом месте выглядел бы отказом добавить
+            # камеру вовсе.
+            camera_id = _unique_camera_id(
+                registry,
+                slugify_camera_id(payload.title or payload.host or "camera"),
+            )
+        camera = _apply_camera_payload(payload, camera_id, None)
+        store_registry(registry.with_camera(camera))
+        return _camera_view(camera)
+
+    @app.put("/api/cameras/{camera_id}")
+    def update_camera(camera_id: str, payload: CameraPayload) -> dict[str, object]:
+        registry = current_registry()
+        existing = required_camera(registry, camera_id)
+        camera = _apply_camera_payload(payload, camera_id, existing)
+        store_registry(registry.with_camera(camera))
+        return _camera_view(camera)
+
+    @app.delete("/api/cameras/{camera_id}", status_code=204)
+    def delete_camera(camera_id: str) -> None:
+        registry = current_registry()
+        required_camera(registry, camera_id)
+        store_registry(registry.without_camera(camera_id))
+
+    @app.post("/api/cameras/swap-roles")
+    def swap_camera_roles() -> dict[str, object]:
+        registry = current_registry().with_swapped_roles()
+        store_registry(registry)
+        return {"cameras": [_camera_view(camera) for camera in registry.cameras]}
+
+    @app.post("/api/cameras/{camera_id}/test")
+    def test_camera(camera_id: str) -> dict[str, object]:
+        camera = required_camera(current_registry(), camera_id)
+        url = camera.rtsp_url()
+        if not url:
+            raise HTTPException(422, "У камеры не задан адрес")
+        reason = probe_stream(settings.ffmpeg_path, url)
+        return {"ok": reason is None, "reason": reason}
+
     @app.get("/stream/{view}.mjpeg")
     def stream(view: str) -> StreamingResponse:
-        camera = settings.preview_camera(view)
+        registry = current_registry()
+        camera = registry.resolve(view)
         if camera is None:
             raise HTTPException(404, "Неизвестная камера")
-        if not camera.rtsp:
+        rtsp_url = camera.rtsp_url() if camera.enabled else ""
+        if not rtsp_url:
             raise HTTPException(503, "Камера не настроена")
         # Frames annotated by the detector are strictly more useful, so they win
         # whenever the recorder is publishing them. Falling back to the camera
         # keeps the picture available for aiming and placement, which is needed
         # long before a detector model exists on the machine.
-        path = preview_path(settings.data_dir, view)
+        # The recorder publishes previews per role, so a camera without a role
+        # simply has none and is streamed directly.
+        path = preview_path(settings.data_dir, camera.role or camera.id)
         frames = (
             local_mjpeg_stream(path, settings.preview_fps)
             if preview_is_fresh(path)
             else mjpeg_stream(
                 settings.ffmpeg_path,
-                camera.rtsp,
+                rtsp_url,
                 settings.preview_fps,
                 rotate_180=camera.rotate_180,
             )
@@ -404,15 +614,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         payload: CapturePayload,
         session: Annotated[Session, Depends(get_session)],
     ) -> dict[str, object]:
-        if not settings.camera_face_rtsp:
+        registry = current_registry()
+        face_url = _role_stream_url(registry, "face")
+        side_url = _role_stream_url(registry, "side")
+        if not face_url:
             raise HTTPException(503, "Камера face не настроена")
         event = Event(duration_seconds=payload.duration_seconds)
         session.add(event)
         session.commit()
         event_dir = settings.data_dir / "events" / f"{event.id:08d}"
-        recordings = {"face": (settings.camera_face_rtsp, event_dir / "face.mp4")}
-        if settings.camera_side_rtsp:
-            recordings["side"] = (settings.camera_side_rtsp, event_dir / "side.mp4")
+        recordings = {"face": (face_url, event_dir / "face.mp4")}
+        if side_url:
+            recordings["side"] = (side_url, event_dir / "side.mp4")
         errors: list[str] = []
         completed: set[str] = set()
         with ThreadPoolExecutor(max_workers=len(recordings)) as executor:

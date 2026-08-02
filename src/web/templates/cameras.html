@@ -1,45 +1,527 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="ru">
 <head>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>CatDoor — камеры</title>
   <style>
-    body { font-family: system-ui, sans-serif; margin: 0; padding: 24px; background: #0b1120; color: #e5e7eb; }
-    h1 { font-size: 20px; margin: 0 0 4px; }
-    .hint { color: #9ca3af; font-size: 14px; margin: 0 0 24px; }
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 18px; }
-    .camera { background: #111827; border: 1px solid #1f2937; border-radius: 10px; padding: 12px; }
-    .camera h2 { font-size: 15px; margin: 0 0 2px; }
-    .camera .id { color: #6b7280; font-size: 12px; font-family: ui-monospace, monospace; margin: 0 0 10px; }
-    .stream { width: 100%; aspect-ratio: 16/9; object-fit: contain; background: #030712; border-radius: 7px; }
-    .empty { color: #9ca3af; }
+    :root { color-scheme: dark; font-family: system-ui, sans-serif; }
+    body { margin: 0; background: #111827; color: #e5e7eb; }
+    header, main { width: min(1100px, calc(100% - 32px)); margin: 24px auto; }
+    header { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+    h1 { font-size: 22px; margin: 0; }
+    .panel { background: #1f2937; border: 1px solid #374151; border-radius: 14px; padding: 18px; margin-bottom: 20px; }
+    .camera { border-top: 1px solid #374151; padding-top: 16px; margin-top: 16px; }
+    .camera:first-of-type { border-top: 0; padding-top: 0; margin-top: 0; }
+    .camera-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+    .camera-head h3 { margin: 0; font-size: 17px; }
+    .camera-body { display: grid; grid-template-columns: minmax(0, 320px) minmax(0, 1fr); gap: 18px; align-items: start; }
+    .stream { width: 100%; aspect-ratio: 16/9; object-fit: contain; background: #030712; border-radius: 9px; }
+    .no-stream { display: grid; place-items: center; width: 100%; aspect-ratio: 16/9; background: #030712; border-radius: 9px; color: #9ca3af; text-align: center; padding: 8px; }
+    .id { color: #6b7280; font-size: 12px; font-family: ui-monospace, monospace; }
+    .badge { padding: 4px 9px; border-radius: 999px; background: #1e3a8a; color: #bfdbfe; font-size: 12px; }
+    .badge.free { background: #374151; color: #d1d5db; }
+    .badge.off { background: #7f1d1d; color: #fecaca; }
+    .settings-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; }
+    .settings-grid label { display: grid; gap: 6px; font-size: 14px; }
+    .settings-grid label.wide { grid-column: 1 / -1; }
+    .controls { display: flex; gap: 10px; align-items: center; margin-top: 14px; flex-wrap: wrap; }
+    button, select, input { font: inherit; border-radius: 8px; border: 1px solid #4b5563; padding: 8px 11px; }
+    button { background: #2563eb; color: white; cursor: pointer; }
+    button.secondary { background: #374151; }
+    button.danger { background: #991b1b; }
+    button:disabled { opacity: .55; cursor: wait; }
+    select, input { background: #111827; color: #e5e7eb; }
+    input[type="checkbox"] { justify-self: start; width: 18px; height: 18px; }
+    .muted { color: #9ca3af; font-size: 14px; }
+    .error { color: #fca5a5; }
     a { color: #93c5fd; }
+    .setting-title { display: flex; align-items: center; gap: 6px; }
+    .setting-help {
+      position: relative; display: inline-grid; place-items: center; width: 18px; height: 18px;
+      flex: 0 0 18px; border: 1px solid #6b7280; border-radius: 50%; color: #bfdbfe;
+      font-size: 12px; font-weight: 700; line-height: 1; cursor: help;
+    }
+    .setting-help::after {
+      content: attr(data-tooltip); position: absolute; z-index: 20; left: 50%; bottom: calc(100% + 9px);
+      width: min(300px, 75vw); padding: 9px 11px; border: 1px solid #64748b; border-radius: 8px;
+      background: #020617; color: #e5e7eb; font-size: 13px; font-weight: 400; line-height: 1.35;
+      box-shadow: 0 8px 24px rgb(0 0 0 / .35); opacity: 0; pointer-events: none;
+      transform: translate(-50%, 4px); transition: opacity .12s, transform .12s;
+    }
+    .setting-help:hover::after, .setting-help:focus::after { opacity: 1; transform: translate(-50%, 0); }
+    .setting-help:focus { outline: 2px solid #60a5fa; outline-offset: 2px; }
+    @media (max-width: 760px) { .camera-body { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
+<header>
   <h1>Камеры</h1>
-  <p class="hint">
-    Живое изображение для подбора места установки. Каждый открытый поток — это
-    отдельный процесс ffmpeg на сервере, поэтому держите открытым только то, что
-    смотрите. <a href="/">К админке</a>
-  </p>
-
-  {% if cameras %}
-    <div class="grid">
-      {% for camera in cameras %}
-        <div class="camera">
-          <h2>{{ camera.display_title }}</h2>
-          <p class="id">{{ camera.id }}{% if camera.rotate_180 %} · поворот 180°{% endif %}</p>
-          <img class="stream" alt="Поток камеры {{ camera.display_title }}"
-               src="/stream/{{ camera.id }}.mjpeg?v={{ stream_version }}">
-        </div>
-      {% endfor %}
-    </div>
-  {% else %}
-    <p class="empty">
-      Ни одной камеры не настроено. Задайте <code>CATDOOR_CAMERA_FACE_RTSP</code>
-      либо список <code>CATDOOR_CAMERAS</code>.
+  <div><a href="/">К админке</a> · <a href="/metrics">Метрики</a></div>
+</header>
+<main>
+  <section class="panel">
+    <h2>Роли</h2>
+    <p class="muted">
+      Роли <code>face</code> и <code>side</code> живут отдельно от камер: на них
+      завязаны детектор, таблицы событий и модели идентификации. Перестановка
+      камер местами — это смена роли в карточке, а не правка адресов. Настройки
+      детекции остаются за ролью: они описывают сцену, а не железку.
     </p>
-  {% endif %}
+    <ul class="muted">
+      {% for role in roles %}
+        {% set assigned = cameras | selectattr("role", "equalto", role) | list %}
+        <li>
+          <strong>{{ role }}</strong> — {{ role_titles[role] }}:
+          {% if assigned %}
+            {{ assigned[0].display_title }}
+            {% if not assigned[0].configured %}<span class="error">(адрес не задан)</span>{% endif %}
+          {% else %}
+            <span class="error">камера не назначена</span>
+          {% endif %}
+        </li>
+      {% endfor %}
+    </ul>
+    {% if recorder_status and recorder_status.cameras %}
+      <p class="muted">
+        Recorder видит:
+        {% for role, state in recorder_status.cameras.items() %}
+          {{ role }} — {{ state.camera_id or "нет камеры" }}{{ ", адрес не задан" if not state.configured else "" }}{{ "; " if not loop.last }}
+        {% endfor %}
+      </p>
+    {% endif %}
+    <div class="controls">
+      <button id="swap-roles" type="button">Поменять роли местами</button>
+      <span id="swap-status" class="muted"></span>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Список камер</h2>
+    <p class="muted">
+      Каждый открытый поток — отдельный процесс ffmpeg на сервере, поэтому
+      держите открытым только то, что смотрите. Камера остаётся в списке, даже
+      когда её не видно в сети: запись переживает и смену адреса, и отключение
+      питания.
+    </p>
+    {% if not cameras %}
+      <p class="error">Список пуст. Добавьте камеру формой ниже.</p>
+    {% endif %}
+    {% for camera in cameras %}
+      <article class="camera" data-camera-id="{{ camera.id }}">
+        <div class="camera-head">
+          <h3>{{ camera.display_title }}</h3>
+          <span class="id">{{ camera.id }}</span>
+          {% if camera.role %}
+            <span class="badge">роль {{ camera.role }}</span>
+          {% else %}
+            <span class="badge free">без роли</span>
+          {% endif %}
+          {% if not camera.enabled %}<span class="badge off">выключена</span>{% endif %}
+        </div>
+        <div class="camera-body">
+          <div>
+            {% if camera.configured and camera.enabled %}
+              <img class="stream" alt="Поток камеры {{ camera.display_title }}"
+                   src="/stream/{{ camera.id }}.mjpeg?v={{ stream_version }}">
+            {% else %}
+              <div class="no-stream">
+                {{ "Адрес не задан" if not camera.configured else "Камера выключена" }}
+              </div>
+            {% endif %}
+          </div>
+          <div>
+            <div class="settings-grid">
+              <label>Название
+                <input data-field="title" type="text" value="{{ camera.title }}">
+              </label>
+              <label>Адрес (IP или имя)
+                <input data-field="host" type="text" value="{{ camera.host }}">
+              </label>
+              <label>Порт
+                <input data-field="port" type="number" min="1" max="65535" value="{{ camera.port }}">
+              </label>
+              <label>Путь потока
+                <input data-field="stream_path" type="text" value="{{ camera.stream_path }}"
+                       placeholder="/Streaming/Channels/101">
+              </label>
+              <label>Логин
+                <input data-field="username" type="text" value="{{ camera.username }}"
+                       autocomplete="off">
+              </label>
+              <label>
+                <span class="setting-title">Пароль
+                  <span class="setting-help" tabindex="0" role="note"
+                    aria-label="Подсказка: пароль камеры"
+                    data-tooltip="Сохранённый пароль наружу не отдаётся. Пустое поле означает «оставить прежний»; чтобы отключить авторизацию, очистите логин.">?</span>
+                </span>
+                <input data-field="password" type="password" value="" autocomplete="new-password"
+                       placeholder="{{ "сохранён" if camera.has_password else "не задан" }}">
+              </label>
+              <label>
+                <span class="setting-title">MAC
+                  <span class="setting-help" tabindex="0" role="note"
+                    aria-label="Подсказка: MAC-адрес"
+                    data-tooltip="Постоянный признак камеры: IP выдаётся по DHCP и меняется при перевключении, MAC — нет. По нему камера опознаётся после перестановки.">?</span>
+                </span>
+                <input data-field="mac" type="text" value="{{ camera.mac }}"
+                       placeholder="aa:bb:cc:dd:ee:ff">
+              </label>
+              <label>Роль
+                <select data-field="role">
+                  <option value="" {{ "selected" if not camera.role }}>без роли</option>
+                  {% for role in roles %}
+                    <option value="{{ role }}" {{ "selected" if camera.role == role }}>
+                      {{ role }} — {{ role_titles[role] }}
+                    </option>
+                  {% endfor %}
+                </select>
+              </label>
+              <label>Поворот на 180°
+                <input data-field="rotate_180" type="checkbox" {{ "checked" if camera.rotate_180 }}>
+              </label>
+              <label>Включена
+                <input data-field="enabled" type="checkbox" {{ "checked" if camera.enabled }}>
+              </label>
+              <label class="wide">Заметка
+                <input data-field="note" type="text" value="{{ camera.note }}"
+                       placeholder="Где висит, чем питается">
+              </label>
+              <label class="wide">
+                <span class="setting-title">Вставить RTSP целиком
+                  <span class="setting-help" tabindex="0" role="note"
+                    aria-label="Подсказка: RTSP-адрес целиком"
+                    data-tooltip="Строка вида rtsp://логин:пароль@адрес:554/путь. При сохранении она разбирается на поля выше и перекрывает их.">?</span>
+                </span>
+                <input data-field="rtsp_url" type="text" value="" autocomplete="off"
+                       placeholder="rtsp://логин:пароль@192.168.1.101:554/Streaming/Channels/101">
+              </label>
+            </div>
+            <div class="controls">
+              <button class="save-camera" type="button">Сохранить</button>
+              <button class="test-camera secondary" type="button">Проверить поток</button>
+              <button class="delete-camera danger" type="button">Удалить</button>
+              <span class="camera-status muted"></span>
+            </div>
+          </div>
+        </div>
+      </article>
+    {% endfor %}
+  </section>
+
+  <section class="panel">
+    <h2>Добавить камеру</h2>
+    <p class="muted">
+      Идентификатор попадает в адрес потока. Если оставить его пустым, он будет
+      собран из названия.
+    </p>
+    <div class="settings-grid" id="new-camera">
+      <label>Идентификатор
+        <input data-field="id" type="text" placeholder="hiwatch-2">
+      </label>
+      <label>Название
+        <input data-field="title" type="text" placeholder="HiWatch у столба">
+      </label>
+      <label>Роль
+        <select data-field="role">
+          <option value="" selected>без роли</option>
+          {% for role in roles %}
+            <option value="{{ role }}">{{ role }} — {{ role_titles[role] }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>Поворот на 180°
+        <input data-field="rotate_180" type="checkbox">
+      </label>
+      <label class="wide">RTSP-адрес целиком
+        <input data-field="rtsp_url" type="text" autocomplete="off"
+               placeholder="rtsp://логин:пароль@192.168.1.101:554/Streaming/Channels/101">
+      </label>
+    </div>
+    <div class="controls">
+      <button id="add-camera" type="button">Добавить</button>
+      <span id="add-status" class="muted"></span>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Настройки детекции</h2>
+    <p class="muted">
+      Настройки принадлежат роли, а не камере: при перестановке они продолжают
+      описывать ту же сцену. Recorder применяет их на ходу, когда автомат
+      событий находится в состоянии ожидания.
+    </p>
+    {% for role in roles %}
+    {% set camera_config = detection_config[role] %}
+    {% set assigned = cameras | selectattr("role", "equalto", role) | list %}
+    <h3>{{ role }} — {{ role_titles[role] }}
+      <span class="muted">{{ assigned[0].display_title if assigned else "камера не назначена" }}</span>
+    </h3>
+    <div class="settings-grid">
+      <label>
+        <span class="setting-title">Рабочий confidence
+          <span class="setting-help" tabindex="0" role="note"
+            aria-label="Подсказка: рабочий confidence"
+            data-tooltip="Минимальная уверенность модели, при которой кадр считается обнаружением кота. Ниже — детекция быстрее и чаще, но больше ложных срабатываний. Выше — строже, но кот может быть пропущен.">?</span>
+        </span>
+        <input id="detection-{{ role }}-confidence-threshold"
+          type="number" min="0" max="1" step="0.01"
+          value="{{ camera_config.confidence_threshold }}">
+      </label>
+      <label>
+        <span class="setting-title">Минимум для рамки
+          <span class="setting-help" tabindex="0" role="note"
+            aria-label="Подсказка: минимум для рамки"
+            data-tooltip="Минимальная уверенность для показа цветной рамки на превью. На запуск события не влияет. Ниже — видно больше слабых гипотез модели, выше — только уверенные рамки.">?</span>
+        </span>
+        <input id="detection-{{ role }}-box-min-confidence"
+          type="number" min="0" max="1" step="0.01"
+          value="{{ camera_config.box_min_confidence }}">
+      </label>
+      <label>
+        <span class="setting-title">Подтверждений
+          <span class="setting-help" tabindex="0" role="note"
+            aria-label="Подсказка: число подтверждений"
+            data-tooltip="Сколько кадров в окне должны превысить рабочий confidence. Меньше — реакция быстрее, но чувствительнее к одиночным ошибкам. Больше — стабильнее, но детекция начинается позже.">?</span>
+        </span>
+        <input id="detection-{{ role }}-confirmation-frames"
+          type="number" min="1" max="20"
+          value="{{ camera_config.confirmation_frames }}">
+      </label>
+      <label>
+        <span class="setting-title">Размер окна кадров
+          <span class="setting-help" tabindex="0" role="note"
+            aria-label="Подсказка: размер окна кадров"
+            data-tooltip="Число последних обработанных кадров, среди которых ищутся подтверждения. Большее окно допускает паузы между удачными кадрами, но дольше помнит старые обнаружения. Окно не должно быть меньше числа подтверждений.">?</span>
+        </span>
+        <input id="detection-{{ role }}-window-frames"
+          type="number" min="1" max="30"
+          value="{{ camera_config.window_frames }}">
+      </label>
+      <label>
+        <span class="setting-title">Кадров детектора в секунду
+          <span class="setting-help" tabindex="0" role="note"
+            aria-label="Подсказка: частота детектора"
+            data-tooltip="Сколько кадров этой камеры анализировать каждую секунду. Больше — выше шанс поймать быстро проходящего кота, но выше нагрузка на процессор. Камере идентификации обычно полезны 6–8 FPS, камере подхода достаточно 3 FPS.">?</span>
+        </span>
+        <input id="detection-{{ role }}-sample-fps"
+          type="number" min="0.1" max="10" step="0.1"
+          value="{{ camera_config.sample_fps }}">
+      </label>
+      <label>
+        <span class="setting-title">Использовать ROI
+          <span class="setting-help" tabindex="0" role="note"
+            aria-label="Подсказка: область интереса"
+            data-tooltip="ROI обрезает для детектора только полезную часть кадра до масштабирования, поэтому кот становится крупнее. Превью и записи остаются полнокадровыми. Координаты задаются долями от 0 до 1.">?</span>
+        </span>
+        <input id="detection-{{ role }}-roi-enabled" type="checkbox"
+          {{ "checked" if camera_config.roi else "" }}>
+      </label>
+      {% set roi = camera_config.roi %}
+      <label>ROI X
+        <input id="detection-{{ role }}-roi-x" type="number" min="0" max="0.99" step="0.01"
+          value="{{ roi.x if roi else 0 }}">
+      </label>
+      <label>ROI Y
+        <input id="detection-{{ role }}-roi-y" type="number" min="0" max="0.99" step="0.01"
+          value="{{ roi.y if roi else 0 }}">
+      </label>
+      <label>ROI ширина
+        <input id="detection-{{ role }}-roi-width"
+          type="number" min="0.01" max="1" step="0.01"
+          value="{{ roi.width if roi else 1 }}">
+      </label>
+      <label>ROI высота
+        <input id="detection-{{ role }}-roi-height"
+          type="number" min="0.01" max="1" step="0.01"
+          value="{{ roi.height if roi else 1 }}">
+      </label>
+    </div>
+    {% endfor %}
+    <h3>Общие тайминги события</h3>
+    <div class="settings-grid">
+      <label>
+        <span class="setting-title">Таймаут кандидата, сек.
+          <span class="setting-help" tabindex="0" role="note"
+            aria-label="Подсказка: таймаут кандидата"
+            data-tooltip="Сколько времени после первого возможного обнаружения система ждёт остальные подтверждения. Больше — легче поймать быстро исчезающего или плохо видимого кота. Меньше — быстрее сбрасываются случайные гипотезы.">?</span>
+        </span>
+        <input id="detection-candidate-timeout" type="number" min="0.1" max="30" step="0.1"
+          value="{{ detection_config.candidate_timeout_seconds }}">
+      </label>
+      <label>
+        <span class="setting-title">До потери кота, сек.
+          <span class="setting-help" tabindex="0" role="note"
+            aria-label="Подсказка: время до потери кота"
+            data-tooltip="Сколько секунд без подтверждённого кота ждать перед завершением активной части события. Больше — терпимее к кратким пропаданиям из кадра, но запись получается длиннее.">?</span>
+        </span>
+        <input id="detection-absence-seconds" type="number" min="0.1" max="60" step="0.1"
+          value="{{ detection_config.absence_seconds }}">
+      </label>
+      <label>
+        <span class="setting-title">Хвост события, сек.
+          <span class="setting-help" tabindex="0" role="note"
+            aria-label="Подсказка: хвост события"
+            data-tooltip="Сколько видео сохранить после того, как отсутствие кота подтверждено. Большее значение лучше захватывает уход кота, но увеличивает длительность и размер записи.">?</span>
+        </span>
+        <input id="detection-tail-seconds" type="number" min="0" max="60" step="0.1"
+          value="{{ detection_config.tail_seconds }}">
+      </label>
+      <label>
+        <span class="setting-title">Пауза после события, сек.
+          <span class="setting-help" tabindex="0" role="note"
+            aria-label="Подсказка: пауза после события"
+            data-tooltip="Период после завершения события, когда новые детекции не создают следующую запись. Больше — меньше дубликатов одного прохода, но можно пропустить следующий близкий проход.">?</span>
+        </span>
+        <input id="detection-cooldown-seconds" type="number" min="0" max="300" step="0.1"
+          value="{{ detection_config.cooldown_seconds }}">
+      </label>
+    </div>
+    <div class="controls">
+      <button id="save-detection-settings" type="button">Сохранить настройки детекции</button>
+      <span id="detection-settings-status" class="muted"></span>
+    </div>
+  </section>
+</main>
+<script>
+  const roles = {{ roles | tojson }};
+
+  function fieldValue(input) {
+    if (input.type === "checkbox") return input.checked;
+    if (input.type === "number") return Number(input.value);
+    return input.value;
+  }
+
+  function collectFields(container) {
+    const payload = {};
+    container.querySelectorAll("[data-field]").forEach(input => {
+      payload[input.dataset.field] = fieldValue(input);
+    });
+    return payload;
+  }
+
+  function normalizeCameraPayload(payload) {
+    // Пустой пароль — «оставить прежний»: сохранённый наружу не отдаётся, и
+    // форма не может отправить его обратно неизменным.
+    payload.password = payload.password ? payload.password : null;
+    payload.role = payload.role || null;
+    return payload;
+  }
+
+  async function send(method, url, body) {
+    const response = await fetch(url, {
+      method,
+      headers: body === undefined ? {} : {"Content-Type": "application/json"},
+      body: body === undefined ? undefined : JSON.stringify(body)
+    });
+    if (response.status === 204) return null;
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.detail || `ошибка ${response.status}`);
+    return result;
+  }
+
+  async function withButton(button, status, action, successText) {
+    button.disabled = true;
+    status.textContent = "…";
+    status.classList.remove("error");
+    try {
+      status.textContent = (await action()) || successText;
+    } catch (error) {
+      status.textContent = `Ошибка: ${error.message}`;
+      status.classList.add("error");
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  document.querySelectorAll(".camera").forEach(card => {
+    const cameraId = card.dataset.cameraId;
+    const status = card.querySelector(".camera-status");
+
+    card.querySelector(".save-camera").addEventListener("click", event => {
+      withButton(event.currentTarget, status, async () => {
+        await send("PUT", `/api/cameras/${cameraId}`, normalizeCameraPayload(collectFields(card)));
+        location.reload();
+      }, "Сохранено");
+    });
+
+    card.querySelector(".test-camera").addEventListener("click", event => {
+      withButton(event.currentTarget, status, async () => {
+        const result = await send("POST", `/api/cameras/${cameraId}/test`);
+        if (!result.ok) throw new Error(result.reason || "камера не ответила");
+        return "Кадр получен";
+      }, "Кадр получен");
+    });
+
+    card.querySelector(".delete-camera").addEventListener("click", event => {
+      if (!confirm(`Удалить камеру ${cameraId} из списка?`)) return;
+      withButton(event.currentTarget, status, async () => {
+        await send("DELETE", `/api/cameras/${cameraId}`);
+        location.reload();
+      }, "Удалена");
+    });
+  });
+
+  document.querySelector("#swap-roles").addEventListener("click", event => {
+    withButton(event.currentTarget, document.querySelector("#swap-status"), async () => {
+      await send("POST", "/api/cameras/swap-roles");
+      location.reload();
+    }, "Роли переназначены");
+  });
+
+  document.querySelector("#add-camera").addEventListener("click", event => {
+    const form = document.querySelector("#new-camera");
+    withButton(event.currentTarget, document.querySelector("#add-status"), async () => {
+      const payload = normalizeCameraPayload(collectFields(form));
+      if (!payload.id) delete payload.id;
+      await send("POST", "/api/cameras", payload);
+      location.reload();
+    }, "Добавлена");
+  });
+
+  document.querySelector("#save-detection-settings").addEventListener("click", async event => {
+    const button = event.currentTarget;
+    const status = document.querySelector("#detection-settings-status");
+    const number = id => Number(document.querySelector(id).value);
+    const cameraSettings = role => {
+      const roiEnabled = document.querySelector(`#detection-${role}-roi-enabled`).checked;
+      return {
+        confidence_threshold: number(`#detection-${role}-confidence-threshold`),
+        box_min_confidence: number(`#detection-${role}-box-min-confidence`),
+        confirmation_frames: number(`#detection-${role}-confirmation-frames`),
+        window_frames: number(`#detection-${role}-window-frames`),
+        sample_fps: number(`#detection-${role}-sample-fps`),
+        roi: roiEnabled ? {
+          x: number(`#detection-${role}-roi-x`),
+          y: number(`#detection-${role}-roi-y`),
+          width: number(`#detection-${role}-roi-width`),
+          height: number(`#detection-${role}-roi-height`)
+        } : null
+      };
+    };
+    const payload = {
+      candidate_timeout_seconds: number("#detection-candidate-timeout"),
+      absence_seconds: number("#detection-absence-seconds"),
+      tail_seconds: number("#detection-tail-seconds"),
+      cooldown_seconds: number("#detection-cooldown-seconds")
+    };
+    for (const role of roles) payload[role] = cameraSettings(role);
+    button.disabled = true;
+    try {
+      const response = await fetch("/api/detection/settings", {
+        method: "PUT",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(payload)
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.detail || "ошибка проверки");
+      status.textContent = "Сохранено — recorder применит настройки в состоянии idle";
+    } catch (error) {
+      status.textContent = `Ошибка: ${error.message}`;
+    } finally {
+      button.disabled = false;
+    }
+  });
+</script>
 </body>
 </html>

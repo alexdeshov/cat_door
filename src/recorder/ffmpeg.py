@@ -94,6 +94,48 @@ def record_clip(
     temporary.replace(destination)
 
 
+def probe_stream(
+    ffmpeg_path: str,
+    rtsp_url: str,
+    *,
+    timeout_seconds: float = 12.0,
+) -> str | None:
+    """Забрать с камеры один кадр. `None` — получилось.
+
+    Нужно после каждой перестановки: адрес мог достаться другой камере, пароль
+    мог не совпасть, а поток на этом пути мог не существовать вовсе. В браузере
+    все три случая выглядят одинаково — пустым прямоугольником.
+    """
+    command = [
+        *_base_input(ffmpeg_path, rtsp_url),
+        "-map",
+        "0:v:0",
+        "-frames:v",
+        "1",
+        "-f",
+        "null",
+        "-",
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return f"камера не ответила за {timeout_seconds:g} с"
+    except OSError:
+        return "ffmpeg недоступен"
+    if result.returncode == 0:
+        return None
+    complaints = (result.stderr or "").strip().splitlines()
+    return mask_credentials(complaints[-1]) if complaints else "ffmpeg ничего не сообщил"
+
+
 def mjpeg_stream(
     ffmpeg_path: str,
     rtsp_url: str,
