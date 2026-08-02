@@ -5,6 +5,12 @@ Documentation=https://github.com/alexdeshov/cat_door/blob/main/docs/deployment-u
 # network.target alone is satisfied far too early for an RTSP client.
 After=network-online.target
 Wants=network-online.target
+# Без этого действует умолчание systemd — пять запусков за десять
+# секунд, и юнит остаётся в `failed`. Обещание ниже «никогда не
+# сдаваться» иначе держится только на том, что RestartSec больше
+# этого окна: измени его кто-нибудь, и узел молча перестанет
+# подниматься после череды сбоев.
+StartLimitIntervalSec=0
 
 [Service]
 Type=notify

@@ -3,6 +3,12 @@ Description=CatDoor admin interface
 Documentation=https://github.com/alexdeshov/cat_door/blob/main/docs/deployment-ubuntu.md
 After=network-online.target
 Wants=network-online.target
+# Без этого действует умолчание systemd — пять запусков за десять
+# секунд, и юнит остаётся в `failed`. Обещание ниже «никогда не
+# сдаваться» иначе держится только на том, что RestartSec больше
+# этого окна: измени его кто-нибудь, и узел молча перестанет
+# подниматься после череды сбоев.
+StartLimitIntervalSec=0
 
 [Service]
 Type=notify

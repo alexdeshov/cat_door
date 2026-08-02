@@ -60,6 +60,14 @@ class Settings(BaseSettings):
     camera_arp_table_path: Path = Path("/proc/net/arp")
     camera_discovery_subnet: str = ""
     camera_discovery_timeout_seconds: float = Field(default=3.0, gt=0.0, le=15.0)
+    # Сколько recorder ждёт кадр, прежде чем счесть поток застрявшим и убить
+    # ffmpeg. Должно превышать самую медленную настроенную частоту кадров с
+    # запасом на переподключение, иначе живой поток будут рвать зря.
+    camera_stall_seconds: float = Field(default=30.0, ge=5.0, le=600.0)
+    # Превью в админке живёт отдельным процессом ffmpeg на каждую открытую
+    # вкладку; без этого предела забытая вкладка с мёртвой камерой держала бы
+    # его до перезапуска веб-службы.
+    preview_idle_timeout_seconds: float = Field(default=20.0, ge=5.0, le=300.0)
     data_dir: Path = Path("data")
     database_path: Path | None = None
     ffmpeg_path: str = "ffmpeg"

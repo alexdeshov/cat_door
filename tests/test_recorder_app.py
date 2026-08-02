@@ -2,13 +2,21 @@ import json
 import queue
 import sqlite3
 import threading
+import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 from sqlalchemy.exc import SQLAlchemyError
 
-from src.common.camera_registry import CameraRecord, CameraRegistry
+from src.common.camera_registry import (
+    CameraRecord,
+    CameraRegistry,
+    camera_registry_path,
+    load_registry,
+    save_registry,
+)
 from src.common.detection_config import CameraDetectionConfig
 from src.common.sd_notify import Notifier
 from src.common.settings import Settings
@@ -16,6 +24,7 @@ from src.inference.cat_detector import CatDetection, CatDetectionResult
 from src.inference.cat_identity import IdentityPrediction
 from src.recorder.app import (
     CameraConfirmationTracker,
+    StreamState,
     StreamTarget,
     _frame_worker,
     _get_fair_frame,
@@ -25,6 +34,8 @@ from src.recorder.app import (
     build_automatic_config,
     publish_heartbeat,
     recorder_status_path,
+    recover_stalled_addresses,
+    restart_stalled_streams,
     run,
     stream_targets_from_registry,
 )
@@ -331,6 +342,7 @@ def test_frame_worker_waits_for_a_camera_instead_of_exiting(
         )
     }
     targets = {"face": StreamTarget()}
+    states = {"face": StreamState()}
     lock = threading.Lock()
     reload_stream = threading.Event()
     stop = threading.Event()
@@ -342,6 +354,7 @@ def test_frame_worker_waits_for_a_camera_instead_of_exiting(
             output,
             camera_configs,
             targets,
+            states,
             lock,
             reload_stream,
             stop,
@@ -368,4 +381,247 @@ def test_frame_worker_waits_for_a_camera_instead_of_exiting(
     finally:
         stop.set()
         worker.join(timeout=10)
+        assert not worker.is_alive()
+
+
+def _stall_fixtures(role: str = "face") -> tuple[dict, dict, dict, dict, threading.Lock]:
+    states = {role: StreamState(started_at=100.0, last_frame_at=100.0)}
+    targets = {role: StreamTarget(rtsp_url="rtsp://10.0.0.5:554/one", camera_id="hiwatch")}
+    queues: dict[str, queue.Queue] = {role: queue.Queue(maxsize=1)}
+    events = {role: threading.Event()}
+    return states, targets, queues, events, threading.Lock()
+
+
+def test_a_wedged_stream_is_killed_so_the_worker_can_reconnect() -> None:
+    """Главная дыра до этой правки: зависший ffmpeg не виден никому.
+
+    Чтение кадра блокирующее, главный цикл при этом жив и исправно кормит
+    watchdog, поэтому systemd такой отказ не замечает вовсе.
+    """
+    states, targets, queues, events, lock = _stall_fixtures()
+    killed: list[str] = []
+    states["face"].process = SimpleNamespace(kill=lambda: killed.append("face"))
+    queues["face"].put_nowait("устаревший кадр")
+
+    stalled = restart_stalled_streams(states, targets, queues, events, lock, 30.0, 200.0)
+
+    assert stalled == ["face"]
+    assert killed == ["face"]
+    assert events["face"].is_set()
+    assert queues["face"].empty()
+    assert states["face"].process is None
+
+
+def test_a_live_stream_is_left_alone() -> None:
+    states, targets, queues, events, lock = _stall_fixtures()
+    states["face"].last_frame_at = 199.0
+
+    assert restart_stalled_streams(states, targets, queues, events, lock, 30.0, 200.0) == []
+    assert not events["face"].is_set()
+
+
+def test_a_role_without_a_camera_is_not_called_stalled() -> None:
+    """Пустая роль молчит по совершенно другой причине — её нечего перезапускать."""
+    states, targets, queues, events, lock = _stall_fixtures()
+    targets["face"] = StreamTarget()
+
+    assert restart_stalled_streams(states, targets, queues, events, lock, 30.0, 900.0) == []
+
+
+def test_stall_is_not_reported_twice_while_the_stream_comes_back() -> None:
+    """Отметки сдвигаются при убийстве, иначе роль убивали бы каждую итерацию."""
+    states, targets, queues, events, lock = _stall_fixtures()
+
+    first = restart_stalled_streams(states, targets, queues, events, lock, 30.0, 200.0)
+    second = restart_stalled_streams(states, targets, queues, events, lock, 30.0, 210.0)
+
+    assert first == ["face"]
+    assert second == []
+
+
+def test_silent_camera_gets_its_new_address_from_the_leases(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    """Обрыв питания у камеры: вернулась с новой арендой, старый адрес мёртв."""
+    registry_path = camera_registry_path(runtime_path)
+    save_registry(
+        registry_path,
+        CameraRegistry(
+            cameras=[
+                CameraRecord(
+                    id="hiwatch",
+                    host="192.168.1.101",
+                    stream_path="/one",
+                    username="admin",
+                    password="secret",
+                    mac="44:47:cc:11:22:33",
+                    role="face",
+                )
+            ]
+        ),
+    )
+    leases = runtime_path / "dnsmasq.leases"
+    leases.write_text(
+        "1785600000 44:47:cc:11:22:33 192.168.1.137 HIWATCH *\n",
+        encoding="utf-8",
+    )
+    registry = load_registry(registry_path)
+    targets = stream_targets_from_registry(registry)
+
+    updated, moved = recover_stalled_addresses(
+        registry,
+        registry_path,
+        leases,
+        targets,
+        ["face"],
+    )
+
+    assert moved == {"hiwatch": "192.168.1.137"}
+    camera = load_registry(registry_path).by_role("face")
+    assert camera.host == "192.168.1.137"
+    # Меняется только адрес: смена аренды не повод трогать всё остальное.
+    assert camera.password == "secret"
+    assert camera.stream_path == "/one"
+    assert camera.role == "face"
+    assert updated.by_role("face").host == "192.168.1.137"
+
+
+def test_camera_without_a_mac_is_left_as_is(runtime_path: Path) -> None:
+    """Без MAC совпадение недоказуемо, а чужой адрес хуже неработающего."""
+    registry_path = camera_registry_path(runtime_path)
+    save_registry(
+        registry_path,
+        CameraRegistry(cameras=[CameraRecord(id="ursa", host="192.168.1.101", role="face")]),
+    )
+    leases = runtime_path / "dnsmasq.leases"
+    leases.write_text("1785600000 44:47:cc:11:22:33 192.168.1.137 X *\n", encoding="utf-8")
+    registry = load_registry(registry_path)
+
+    _updated, moved = recover_stalled_addresses(
+        registry,
+        registry_path,
+        leases,
+        stream_targets_from_registry(registry),
+        ["face"],
+    )
+
+    assert moved == {}
+    assert load_registry(registry_path).by_role("face").host == "192.168.1.101"
+
+
+def test_missing_leases_file_changes_nothing(runtime_path: Path) -> None:
+    registry_path = camera_registry_path(runtime_path)
+    save_registry(
+        registry_path,
+        CameraRegistry(
+            cameras=[
+                CameraRecord(id="hiwatch", host="192.168.1.101", mac="44:47:cc:11:22:33", role="face")
+            ]
+        ),
+    )
+    registry = load_registry(registry_path)
+
+    _updated, moved = recover_stalled_addresses(
+        registry,
+        registry_path,
+        runtime_path / "нет-аренд",
+        stream_targets_from_registry(registry),
+        ["face"],
+    )
+
+    assert moved == {}
+
+
+def test_worker_reconnects_after_a_wedged_process_is_killed(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    """Сквозная проверка на настоящих процессах, без подмены ffmpeg заглушкой.
+
+    Имитируется ровно тот отказ, который раньше был невидим: процесс запущен,
+    соединение принято, кадров нет и не будет. Воркер обязан выйти из чтения
+    после убийства и подключиться заново.
+    """
+    launches = runtime_path / "launches.txt"
+    fake_ffmpeg = runtime_path / "hanging-ffmpeg.sh"
+    # `exec` обязателен: без него канал держал бы дочерний `sleep`, а убийство
+    # оболочки чтение бы не разбудило. Настоящий ffmpeg — один процесс и держит
+    # канал сам, так что здесь воспроизводится именно его случай.
+    fake_ffmpeg.write_text(
+        f'#!/bin/sh\necho started >> "{launches}"\nexec sleep 30\n',
+        encoding="utf-8",
+    )
+    fake_ffmpeg.chmod(0o755)
+
+    def launch_count() -> int:
+        return len(launches.read_text(encoding="utf-8").splitlines()) if launches.exists() else 0
+
+    def wait_for(count: int, timeout: float = 15.0) -> None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if launch_count() >= count:
+                return
+            time.sleep(0.05)
+        raise AssertionError(f"ожидался {count}-й запуск, было {launch_count()}")
+
+    settings = Settings(data_dir=runtime_path, ffmpeg_path=str(fake_ffmpeg))
+    camera_configs = {
+        "face": CameraDetectionConfig(
+            confidence_threshold=0.5,
+            box_min_confidence=0.2,
+            confirmation_frames=1,
+            window_frames=1,
+        )
+    }
+    targets = {"face": StreamTarget(rtsp_url="rtsp://10.0.0.5:554/one", camera_id="hiwatch")}
+    states = {"face": StreamState()}
+    queues: dict[str, queue.Queue] = {"face": queue.Queue(maxsize=1)}
+    events = {"face": threading.Event()}
+    lock = threading.Lock()
+    stop = threading.Event()
+    worker = threading.Thread(
+        target=_frame_worker,
+        args=(
+            "face",
+            settings,
+            queues["face"],
+            camera_configs,
+            targets,
+            states,
+            lock,
+            events["face"],
+            stop,
+            320,
+            114,
+            "letterbox",
+            "center",
+        ),
+        daemon=True,
+    )
+    worker.start()
+    try:
+        wait_for(1)
+        with lock:
+            assert states["face"].process is not None
+
+        stalled = restart_stalled_streams(
+            states,
+            targets,
+            queues,
+            events,
+            lock,
+            0.1,
+            time.monotonic(),
+        )
+
+        assert stalled == ["face"]
+        wait_for(2)
+        assert worker.is_alive()
+    finally:
+        stop.set()
+        with lock:
+            if states["face"].process is not None:
+                states["face"].process.kill()
+        worker.join(timeout=15)
         assert not worker.is_alive()

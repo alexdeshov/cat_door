@@ -21,7 +21,7 @@ from __future__ import annotations
 import re
 import socket
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from ipaddress import IPv4Address, IPv4Network, ip_network
@@ -352,6 +352,30 @@ def match_camera(registry: CameraRegistry, device: DiscoveredDevice) -> CameraRe
         (camera for camera in registry.cameras if camera.host == device.host),
         None,
     )
+
+
+def addresses_from_leases(
+    registry: CameraRegistry,
+    devices: Sequence[DiscoveredDevice],
+    camera_ids: Iterable[str],
+) -> dict[str, str]:
+    """Новые адреса для перечисленных камер: `{идентификатор: адрес}`.
+
+    Камера с известным MAC, обнаруженная на другом адресе, — это она же после
+    новой аренды, других толкований нет. Возвращается только адрес: пароль,
+    роль и путь потока к смене аренды отношения не имеют, и трогать их значило
+    бы чинить не то, что сломалось.
+    """
+    by_mac = {device.mac: device.host for device in devices if device.mac and device.host}
+    updates: dict[str, str] = {}
+    for camera_id in camera_ids:
+        camera = registry.get(camera_id)
+        if camera is None or not camera.mac:
+            continue
+        host = by_mac.get(camera.mac)
+        if host and host != camera.host:
+            updates[camera.id] = host
+    return updates
 
 
 def is_authentication_failure(reason: str) -> bool:

@@ -137,3 +137,20 @@ def test_rgb_frame_stream_can_keep_native_orientation(monkeypatch) -> None:
     video_filter = commands[0][commands[0].index("-vf") + 1]
     assert "hflip" not in video_filter
     assert "vflip" not in video_filter
+
+
+def test_stream_hands_out_its_process_so_a_stall_can_be_broken(monkeypatch) -> None:
+    """Чтение кадра блокирующее: разбудить застрявший поток можно только извне.
+
+    Поэтому сам процесс отдаётся наружу сразу после запуска, а не после первого
+    успешного кадра — камера, принявшая соединение и замолчавшая, кадра не даст
+    никогда.
+    """
+    process = Mock()
+    process.stdout.read.side_effect = [b""]
+    handed: list[object] = []
+    monkeypatch.setattr("src.recorder.frames.subprocess.Popen", lambda command, **kwargs: process)
+
+    list(rgb_frame_stream("ffmpeg", "rtsp://camera", 3.0, on_process=handed.append))
+
+    assert handed == [process]

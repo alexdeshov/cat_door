@@ -3,6 +3,7 @@ from pathlib import Path
 from src.common.camera_discovery import (
     RTSP_PATH_CANDIDATES,
     DiscoveredDevice,
+    addresses_from_leases,
     candidate_paths,
     identify_stream_path,
     is_authentication_failure,
@@ -189,3 +190,32 @@ def test_unreachable_camera_reports_the_last_reason() -> None:
     assert guess.found is False
     assert guess.needs_credentials is False
     assert guess.reason == "камера не ответила за 6 с"
+
+
+def test_moved_camera_is_matched_to_its_new_lease() -> None:
+    registry = CameraRegistry(
+        cameras=[
+            CameraRecord(id="hiwatch", host="192.168.1.101", mac="44:47:cc:11:22:33"),
+            CameraRecord(id="ursa", host="192.168.1.102", mac="aa:bb:cc:dd:ee:ff"),
+        ]
+    )
+    devices = [
+        DiscoveredDevice(host="192.168.1.137", mac="44:47:cc:11:22:33"),
+        DiscoveredDevice(host="192.168.1.102", mac="aa:bb:cc:dd:ee:ff"),
+    ]
+
+    updates = addresses_from_leases(registry, devices, ["hiwatch", "ursa"])
+
+    # Только уехавшая: камера на прежнем адресе в правке не нуждается.
+    assert updates == {"hiwatch": "192.168.1.137"}
+
+
+def test_only_the_named_cameras_are_considered() -> None:
+    """Правится адрес только у того, кто молчит, а не у всех разом."""
+    registry = CameraRegistry(
+        cameras=[CameraRecord(id="hiwatch", host="192.168.1.101", mac="44:47:cc:11:22:33")]
+    )
+    devices = [DiscoveredDevice(host="192.168.1.137", mac="44:47:cc:11:22:33")]
+
+    assert addresses_from_leases(registry, devices, []) == {}
+    assert addresses_from_leases(registry, devices, ["ursa"]) == {}

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import subprocess
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, cast
@@ -66,7 +66,15 @@ def rgb_frame_stream(
     retention_seconds: int = 180,
     roi: NormalizedRoi | None = None,
     rotate_180: bool = True,
+    on_process: Callable[[subprocess.Popen[bytes]], None] | None = None,
 ) -> Iterator[FrameSample]:
+    """Кадры с камеры. `on_process` отдаёт наружу сам процесс ffmpeg.
+
+    Отдавать его приходится потому, что чтение кадра блокирующее: если камера
+    пропала так, что TCP-сессия не закрылась, поток роли останется в `read`
+    навсегда, и разбудить его можно только со стороны — убив процесс. Кто
+    именно следит за застоем, здесь не решается.
+    """
     command = [
         *_base_input(ffmpeg_path, rtsp_url),
     ]
@@ -131,6 +139,8 @@ def rgb_frame_stream(
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
     )
+    if on_process is not None:
+        on_process(process)
     try:
         assert process.stdout is not None
         stream = cast(BinaryIO, process.stdout)
