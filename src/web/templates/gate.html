@@ -151,14 +151,11 @@
       const result = await putCircuits({active: choice.dataset.circuit}, status);
       if (!result) return;
       press(circuitChoices, button => result[button.dataset.circuit] === true);
-      if (result.gate_error) {
-        // Состояние узла сохранено, но служба к нему не приведена. Расхождение
-        // показывается, а не прячется за успешным ответом.
-        status.textContent = result.gate_error;
-        status.classList.add("bad");
-        return;
-      }
-      location.reload();
+      // Службу приводит к состоянию примиритель от root, а не эта страница:
+      // у веб-процесса нет привилегий. Секунда ожидания — чтобы перезагрузка
+      // показала уже применённое состояние, а не прежнее.
+      status.textContent = "применяется…";
+      setTimeout(() => location.reload(), 1200);
     });
   });
 

@@ -77,7 +77,7 @@ from src.common.detection_config import (
     save_detection_config,
 )
 from src.common.detection_stats import read_detection_stats
-from src.common.gate_service import gate_status, set_gate_running
+from src.common.gate_service import gate_status
 from src.common.model_registry import register_model_version
 from src.common.online_metrics import build_online_metrics
 from src.common.process import spawn_detached
@@ -250,20 +250,6 @@ class DiscoveryPayload(BaseModel):
     password: str = ""
     subnet: str | None = None
     probe_streams: bool = True
-
-
-def _apply_gate_service(settings: Settings, circuits: NodeCircuits) -> str | None:
-    """Привести службу калитки к тому, что записано в состоянии узла.
-
-    Ненастроенный контур не считается ошибкой: до развёртывания Frigate служба
-    отсутствует, и пульт должен об этом сказать, а не падать.
-    """
-    status = gate_status(settings.gate_service_unit)
-    if not status.deployed:
-        return None if not circuits.gate else "контур не развёрнут на узле"
-    if status.running == circuits.gate:
-        return None
-    return set_gate_running(settings.gate_service_unit, circuits.gate)
 
 
 def _unique_camera_id(registry: CameraRegistry, candidate: str) -> str:
@@ -828,11 +814,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             save_circuits(circuits_path(settings.data_dir), circuits)
         except OSError as exc:
             raise HTTPException(500, "Не удалось сохранить состояние узла") from exc
-        # Служба приводится к записанному состоянию после сохранения, а не до:
-        # если systemd откажет, на диске уже лежит то, что показывает пульт, и
-        # расхождение видно, а не спрятано за неудачным запросом.
-        applied = _apply_gate_service(settings, circuits)
-        return {**circuits_view(circuits), "gate_error": applied}
+        # Служба к состоянию не приводится здесь: у веб-процесса нет и не
+        # должно быть привилегий. Файл читает примиритель `catdoor-gate-sync`,
+        # запускаемый от root по изменению этого файла, — вкладка увидит
+        # результат при ближайшем обновлении состояния.
+        return circuits_view(circuits)
 
     @app.get("/gate", response_class=HTMLResponse)
     def gate_page(request: Request) -> HTMLResponse:
