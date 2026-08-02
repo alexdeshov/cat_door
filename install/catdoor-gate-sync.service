@@ -11,6 +11,10 @@ Type=oneshot
 WorkingDirectory=/opt/catdoor
 EnvironmentFile=/etc/catdoor/catdoor.env
 ExecStart=/opt/catdoor/.venv/bin/python -m src.common.gate_sync
+# `systemctl start frigate` блокируется до готовности контейнера, а у той
+# службы таймаут 900 секунд. С умолчанием в 90 примиритель умирал бы раньше,
+# чем Frigate поднимется, — и именно при холодном старте, где это дольше всего.
+TimeoutStartSec=900
 
 [Install]
 # Один прогон при загрузке: контейнер Frigate объявлен с restart: "no", и без
