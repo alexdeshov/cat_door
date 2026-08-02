@@ -8,6 +8,7 @@ from sqlalchemy import select
 from src.common.camera_discovery import DiscoveredDevice
 from src.common.camera_registry import camera_registry_path, load_registry
 from src.common.capture_mode import CaptureMode, capture_mode_path, load_capture_mode
+from src.common.circuits import circuits_path, load_circuits
 from src.common.database import EvaluationRun, Event, create_session_factory
 from src.common.settings import Settings
 from src.recorder.status import write_recorder_status
@@ -1203,3 +1204,55 @@ def test_discovery_shows_one_row_for_a_camera_on_two_addresses(
     assert len(devices) == 1
     assert devices[0]["host"] == "192.168.1.108"
     assert devices[0]["other_hosts"] == ["192.168.1.106"]
+
+
+def test_gate_tab_is_honest_about_not_being_deployed(runtime_path: Path, monkeypatch) -> None:
+    client = make_client(runtime_path, monkeypatch)
+
+    page = client.get("/gate")
+
+    assert page.status_code == 200
+    assert "Контур не развёрнут" in page.text
+    assert 'class="circuit-choice" data-circuit="gate"' in page.text
+    # Верхний уровень навигации — контуры, второй появляется только у котов.
+    assert 'href="/gate"' in page.text
+    assert 'class="subnav"' not in page.text
+    assert 'class="subnav"' in client.get("/").text
+
+
+def test_node_switch_gives_the_processor_to_one_circuit(runtime_path: Path, monkeypatch) -> None:
+    client = make_client(runtime_path, monkeypatch)
+
+    assert client.get("/api/circuits").json()["active"] == ["cats"]
+
+    response = client.put("/api/circuits", json={"active": "gate"})
+
+    assert response.status_code == 200
+    assert response.json()["active"] == ["gate"]
+    assert load_circuits(circuits_path(runtime_path)).is_active("cats") is False
+
+
+def test_stopped_cat_circuit_keeps_its_mode(runtime_path: Path, monkeypatch) -> None:
+    """Выключение с уровня узла не стирает выбранный режим наблюдения."""
+    client = make_client(runtime_path, monkeypatch)
+    client.put("/api/capture-mode", json={"state": "record"})
+
+    client.put("/api/circuits", json={"active": "gate"})
+
+    assert client.get("/api/capture-mode").json()["state"] == "record"
+
+
+def test_gate_recording_defaults_to_events_and_is_switchable(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    client = make_client(runtime_path, monkeypatch)
+
+    assert client.get("/api/circuits").json()["gate_recording"] == "events"
+
+    response = client.put("/api/circuits", json={"gate_recording": "continuous"})
+
+    assert response.status_code == 200
+    assert response.json()["gate_recording"] == "continuous"
+    # Переключение записи не трогает, какому контуру отдан узел.
+    assert response.json()["active"] == ["cats"]

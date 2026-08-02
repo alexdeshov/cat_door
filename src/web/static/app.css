@@ -209,6 +209,29 @@ kbd {
   font-weight: 550;
 }
 
+/* Второй уровень навигации: страницы внутри выбранного контура. Отделён
+   фоном, а не отступом, чтобы разница уровней читалась сразу. */
+.subnav-outer { background: var(--surface-sunken); border-top: 1px solid var(--line); }
+
+.subnav {
+  width: min(1180px, calc(100% - 32px));
+  margin: 0 auto;
+  display: flex;
+  gap: 2px;
+  padding: 4px 0;
+}
+
+.subnav a {
+  padding: 5px 10px;
+  border-radius: var(--radius);
+  color: var(--text-muted);
+  text-decoration: none;
+  font-size: 13px;
+}
+
+.subnav a:hover { background: var(--surface); color: var(--text); }
+.subnav a[aria-current="page"] { background: var(--surface); color: var(--text); font-weight: 550; }
+
 .masthead-tools {
   display: flex;
   align-items: center;

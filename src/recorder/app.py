@@ -25,6 +25,7 @@ from src.common.camera_registry import (
     save_registry,
 )
 from src.common.capture_mode import CaptureMode, capture_mode_path, load_capture_mode
+from src.common.circuits import circuits_path, load_circuits
 from src.common.database import create_session_factory
 from src.common.detection_config import (
     CameraDetectionConfig,
@@ -466,11 +467,21 @@ def stream_targets_from_registry(registry: CameraRegistry) -> dict[str, StreamTa
 
 
 def current_capture_mode(settings: Settings) -> CaptureMode:
-    """Режим с диска, а при его отсутствии — заданный окружением."""
-    return load_capture_mode(
+    """Режим кошачьего контура с учётом того, разрешён ли он на уровне узла.
+
+    Два источника вместо одного намеренно: переключатель узла говорит, какому
+    контуру сейчас отдан процессор, а режим — как работать, когда разрешено.
+    Так выключение калиткой не стирает выбранное наблюдение или запись, и после
+    возврата контур поднимается ровно в том режиме, в каком его оставили.
+    """
+    mode = load_capture_mode(
         capture_mode_path(settings.data_dir),
         CaptureMode.from_settings(settings),
     )
+    circuits = load_circuits(circuits_path(settings.data_dir))
+    if not circuits.is_active("cats"):
+        return mode.model_copy(update={"enabled": False})
+    return mode
 
 
 def publish_heartbeat(
