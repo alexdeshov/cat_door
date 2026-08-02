@@ -19,19 +19,37 @@
   </script>
 </head>
 <body>
+{# Навигация двухуровневая: сверху контур узла, ниже его страницы. Контуров
+   на узле два и они делят один процессор, поэтому выбор контура — вопрос
+   более высокого порядка, чем выбор страницы внутри него. #}
+{% set circuit = circuit | default("cats") %}
 <header class="masthead">
   <div class="masthead-inner">
     <a class="brand" href="/"><span class="brand-mark" aria-hidden="true"></span>CatDoor</a>
     <nav class="nav">
-      <a href="/" {% if page == "passes" %}aria-current="page"{% endif %}>Проходы</a>
-      <a href="/cameras" {% if page == "cameras" %}aria-current="page"{% endif %}>Камеры</a>
-      <a href="/metrics" {% if page == "metrics" %}aria-current="page"{% endif %}>Метрики</a>
+      <a href="/" {% if circuit == "cats" %}aria-current="page"{% endif %}>
+        {{ circuit_titles["cats"] }}
+      </a>
+      <a href="/gate" {% if circuit == "gate" %}aria-current="page"{% endif %}>
+        {{ circuit_titles["gate"] }}
+      </a>
     </nav>
     <div class="masthead-tools">
-      <span class="chip" title="Система не отправляет команды двери">Дверь не управляется</span>
+      <span class="chip" title="Система не отправляет команды двери и калитке">
+        Механика не управляется
+      </span>
       <button id="theme-toggle" type="button" aria-label="Переключить тему">Тема</button>
     </div>
   </div>
+  {% if circuit == "cats" %}
+    <div class="subnav-outer">
+      <nav class="subnav">
+        <a href="/" {% if page == "passes" %}aria-current="page"{% endif %}>Проходы</a>
+        <a href="/cameras" {% if page == "cameras" %}aria-current="page"{% endif %}>Камеры</a>
+        <a href="/metrics" {% if page == "metrics" %}aria-current="page"{% endif %}>Метрики</a>
+      </nav>
+    </div>
+  {% endif %}
 </header>
 <main>
 {% block content %}{% endblock %}
