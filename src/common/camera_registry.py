@@ -25,6 +25,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from src.common.durable_write import write_text_durably
 from src.common.settings import Settings
 
 CameraRole = Literal["face", "side"]
@@ -313,24 +314,17 @@ def load_registry(path: Path) -> CameraRegistry | None:
 
 
 def save_registry(path: Path, registry: CameraRegistry) -> None:
-    """Записать инвентарь целиком и только для владельца.
+    """Записать инвентарь целиком, только для владельца и до самого диска.
 
-    Здесь лежат пароли камер, поэтому права выставляются до того, как в файл
-    попадёт содержимое, а замена делается атомарной: recorder читает этот файл
-    на ходу и не должен наткнуться на половину записи.
+    Здесь лежат пароли камер: потерять этот файл при обрыве питания — значит
+    потерять доступ ко всем камерам, поэтому запись идёт через
+    `write_text_durably`, а не через обычное переименование.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
-    try:
-        temporary.touch(mode=0o600)
-        temporary.chmod(0o600)
-        temporary.write_text(
-            json.dumps(registry.model_dump(), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        temporary.replace(path)
-    finally:
-        temporary.unlink(missing_ok=True)
+    write_text_durably(
+        path,
+        json.dumps(registry.model_dump(), ensure_ascii=False, indent=2),
+        mode=0o600,
+    )
 
 
 def ensure_registry(path: Path, settings: Settings) -> CameraRegistry:

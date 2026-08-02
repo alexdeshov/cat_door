@@ -3,22 +3,26 @@ from __future__ import annotations
 import argparse
 import queue
 import sqlite3
+import subprocess
 import threading
 import time
 from collections import deque
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
 from sqlalchemy.exc import SQLAlchemyError
 
+from src.common.camera_discovery import addresses_from_leases, read_dhcp_leases
 from src.common.camera_registry import (
     ROLES,
     CameraRegistry,
     camera_registry_path,
     ensure_registry,
     load_registry,
+    save_registry,
 )
 from src.common.database import create_session_factory
 from src.common.detection_config import (
@@ -42,6 +46,7 @@ from src.inference.preprocessing import (
     prepare_detector_frame,
 )
 from src.recorder.automatic import AutomaticEventConfig, AutomaticEventMachine
+from src.recorder.cleanup import sweep_incomplete_files
 from src.recorder.detection_journal import DetectionJournal
 from src.recorder.events import (
     AutomaticEventPrediction,
@@ -58,6 +63,13 @@ RECORDER_RETRY_SECONDS = 5.0
 # Пауза воркера роли, у которой сейчас нет камеры. Назначение роли приходит
 # файлом инвентаря, а не сигналом, поэтому проверять чаще смысла нет.
 CAMERA_WAIT_SECONDS = 2.0
+# Как часто перечитываются аренды DHCP в поисках уехавшего адреса. Камера
+# поднимается после подачи питания не мгновенно, гнаться незачем.
+LEASE_CHECK_SECONDS = 15.0
+# Верхняя граница времени загрузки моделей, в течение которой watchdog кормится
+# отдельным потоком. Дальше пинги прекращаются, и systemd имеет полное право
+# счесть процесс зависшим: загрузка, которая идёт пять минут, уже не загрузка.
+MODEL_LOAD_GRACE_SECONDS = 300.0
 
 
 @dataclass(frozen=True)
@@ -71,6 +83,140 @@ class StreamTarget:
     rtsp_url: str = ""
     rotate_180: bool = False
     camera_id: str | None = None
+
+
+@dataclass
+class StreamState:
+    """Признаки жизни потока роли и способ его разбудить.
+
+    Чтение кадра блокирующее: камера, исчезнувшая без закрытия TCP-сессии,
+    оставляет поток роли в `read` навсегда. Главный цикл при этом продолжает
+    работать и исправно кормит watchdog, поэтому systemd такой отказ не увидит
+    — заметить и прервать его может только тот, кто помнит время последнего
+    кадра и держит сам процесс ffmpeg.
+    """
+
+    started_at: float = 0.0
+    last_frame_at: float = 0.0
+    process: subprocess.Popen[bytes] | None = None
+
+    def silent_for(self, now: float) -> float:
+        reference = max(self.started_at, self.last_frame_at)
+        return 0.0 if reference <= 0 else now - reference
+
+
+def restart_stalled_streams(
+    stream_states: dict[str, StreamState],
+    stream_targets: dict[str, StreamTarget],
+    frame_queues: dict[str, queue.Queue[Any]],
+    reload_events: dict[str, threading.Event],
+    config_lock: threading.Lock,
+    stall_seconds: float,
+    now: float,
+) -> list[str]:
+    """Прервать потоки, из которых давно не приходило кадров. Вернуть их роли.
+
+    Процесс именно убивается, а не завершается вежливо: он застрял в системном
+    вызове, и смысл сигнала в том, чтобы чтение в воркере вернуло конец файла и
+    цикл переподключения пошёл заново. Отметки времени сдвигаются здесь же,
+    иначе роль убивали бы на каждой итерации, пока новый поток поднимается.
+    """
+    stalled: list[str] = []
+    with config_lock:
+        for role, state in stream_states.items():
+            if not stream_targets[role].rtsp_url:
+                continue
+            if state.silent_for(now) < stall_seconds:
+                continue
+            stalled.append(role)
+            state.started_at = now
+            state.last_frame_at = now
+            if state.process is not None:
+                with suppress(OSError):
+                    state.process.kill()
+                state.process = None
+    for role in stalled:
+        _clear_queue(frame_queues[role])
+        reload_events[role].set()
+    return stalled
+
+
+def recover_stalled_addresses(
+    registry: CameraRegistry,
+    registry_path: Path,
+    leases_path: Path,
+    stream_targets: dict[str, StreamTarget],
+    roles: Sequence[str],
+) -> tuple[CameraRegistry, dict[str, str]]:
+    """Подставить молчащим камерам адрес, под которым их видит DHCP.
+
+    Единственный случай, когда система правит инвентарь сама. Основание для
+    этого сильное: MAC совпал, значит это та же камера, а старый адрес молчит
+    уже дольше допустимого. Ждать здесь решения владельца означало бы, что
+    ночной перебой питания стоит записей до утра.
+    """
+    camera_ids = [
+        stream_targets[role].camera_id
+        for role in roles
+        if stream_targets[role].camera_id is not None
+    ]
+    if not camera_ids:
+        return registry, {}
+    updates = addresses_from_leases(
+        registry,
+        read_dhcp_leases(leases_path),
+        [camera_id for camera_id in camera_ids if camera_id is not None],
+    )
+    if not updates:
+        return registry, {}
+    updated = registry
+    for camera_id, host in updates.items():
+        camera = updated.get(camera_id)
+        if camera is None:
+            continue
+        updated = updated.with_camera(camera.model_copy(update={"host": host}))
+    try:
+        save_registry(registry_path, updated)
+    except OSError:
+        # Записать не удалось — инвентарь на диске остаётся прежним, и попытка
+        # повторится на следующем застое. Отдавать наружу изменение, которого
+        # нет в файле, нельзя: админка показала бы несуществующий адрес.
+        return registry, {}
+    return updated, updates
+
+
+@contextmanager
+def _watchdog_during_startup(notifier: Notifier | None) -> Iterator[None]:
+    """Кормить watchdog, пока грузятся модели, но не бесконечно.
+
+    Между `READY=1` и первой публикацией статуса стоит загрузка OpenVINO-модели
+    и регистрация её в базе. На холодном старте после отключения питания, когда
+    диск ещё занят проверкой файловой системы, это может занять больше отпущенных
+    systemd шестидесяти секунд — и служба попадёт в петлю: убита как зависшая,
+    перезапущена, снова убита на том же месте.
+
+    Пинги отсюда идут по таймеру, а не по факту работы, поэтому они ограничены
+    сверху: загрузка, которая идёт пять минут, зависла по-настоящему, и мешать
+    systemd её прервать больше не нужно.
+    """
+    interval = notifier.watchdog_interval_seconds if notifier is not None else None
+    if notifier is None or interval is None:
+        yield
+        return
+    finished = threading.Event()
+
+    def keep_alive() -> None:
+        deadline = time.monotonic() + MODEL_LOAD_GRACE_SECONDS
+        while not finished.wait(interval) and time.monotonic() < deadline:
+            notifier.watchdog()
+
+    pinger = threading.Thread(target=keep_alive, daemon=True, name="catdoor-startup-watchdog")
+    pinger.start()
+    try:
+        yield
+    finally:
+        finished.set()
+        pinger.join(timeout=1)
 
 
 def recorder_status_path(settings: Settings) -> Path:
@@ -349,6 +495,7 @@ def _frame_worker(
     output: queue.Queue[tuple[str, Any, Any, Any, float, CameraDetectionConfig]],
     camera_configs: dict[str, CameraDetectionConfig],
     stream_targets: dict[str, StreamTarget],
+    stream_states: dict[str, StreamState],
     config_lock: threading.Lock,
     reload_stream: threading.Event,
     stop: threading.Event,
@@ -357,15 +504,29 @@ def _frame_worker(
     detector_resize_mode: str,
     detector_letterbox_alignment: str,
 ) -> None:
+    state = stream_states[role]
+
+    def remember_process(process: subprocess.Popen[bytes]) -> None:
+        with config_lock:
+            state.process = process
+
     while not stop.is_set():
         with config_lock:
             camera_config = camera_configs[role]
             target = stream_targets[role]
+            state.process = None
+            # Отсчёт молчания начинается с попытки подключиться, а не с первого
+            # кадра: камера, которая приняла соединение и не отдала ни одного
+            # кадра, — такой же застой, как и оборвавшаяся посреди потока.
+            state.started_at = time.monotonic()
+            state.last_frame_at = 0.0
             reload_stream.clear()
         if not target.rtsp_url:
             # Роль без камеры — это ожидание назначения, а не конец работы.
             # Раньше воркер здесь завершался, и камера, подключённая позже,
             # начинала отдавать кадры только после перезапуска службы.
+            with config_lock:
+                state.started_at = 0.0
             stop.wait(CAMERA_WAIT_SECONDS)
             continue
         try:
@@ -378,11 +539,14 @@ def _frame_worker(
                 retention_seconds=settings.ring_retention_seconds,
                 roi=camera_config.roi,
                 rotate_180=target.rotate_180,
+                on_process=remember_process,
             ):
                 if stop.is_set():
                     return
                 if reload_stream.is_set():
                     break
+                with config_lock:
+                    state.last_frame_at = time.monotonic()
                 item = (
                     role,
                     prepare_detector_frame(
@@ -418,16 +582,17 @@ def monitor_automatic(
         max_bytes=settings.detection_log_max_bytes,
         backup_count=settings.detection_log_backup_count,
     )
-    detector = OpenVinoCatDetector(settings.detector_model_path, settings.detector_device)
-    identity_models = {
-        role: OpenVinoCatIdentity(path, settings.detector_device)
-        for role, path in (
-            ("face", settings.identity_face_model_path),
-            ("side", settings.identity_side_model_path),
-        )
-        if path is not None
-    }
-    model_versions = _register_loaded_models(settings, identity_models)
+    with _watchdog_during_startup(notifier):
+        detector = OpenVinoCatDetector(settings.detector_model_path, settings.detector_device)
+        identity_models = {
+            role: OpenVinoCatIdentity(path, settings.detector_device)
+            for role, path in (
+                ("face", settings.identity_face_model_path),
+                ("side", settings.identity_side_model_path),
+            )
+            if path is not None
+        }
+        model_versions = _register_loaded_models(settings, identity_models)
     machine = AutomaticEventMachine(runtime_config.event_config())
     trackers = {
         role: CameraConfirmationTracker(getattr(runtime_config, role))
@@ -445,6 +610,7 @@ def monitor_automatic(
         for role in ("face", "side")
     }
     stream_targets = stream_targets_from_registry(registry)
+    stream_states = {role: StreamState() for role in ("face", "side")}
     config_lock = threading.Lock()
     reload_events = {
         role: threading.Event()
@@ -460,6 +626,7 @@ def monitor_automatic(
                 frame_queues[role],
                 worker_configs,
                 stream_targets,
+                stream_states,
                 config_lock,
                 reload_events[role],
                 stop,
@@ -510,10 +677,52 @@ def monitor_automatic(
         },
     )
     last_config_check_at = 0.0
+    last_lease_check_at = 0.0
     next_camera = "face"
     try:
         while duration_seconds is None or time.monotonic() - started_at < duration_seconds:
             now = time.monotonic()
+            # Проверка застоя идёт вне зависимости от состояния автомата:
+            # камера, замолчавшая посреди прохода, — это как раз тот момент,
+            # когда ждать возврата в ожидание бессмысленно.
+            stalled = restart_stalled_streams(
+                stream_states,
+                stream_targets,
+                frame_queues,
+                reload_events,
+                config_lock,
+                settings.camera_stall_seconds,
+                now,
+            )
+            if stalled:
+                journal.write(
+                    "stream_stalled",
+                    roles=stalled,
+                    silent_seconds=round(settings.camera_stall_seconds, 1),
+                    cameras={
+                        role: stream_targets[role].camera_id for role in stalled
+                    },
+                )
+                if now - last_lease_check_at >= LEASE_CHECK_SECONDS:
+                    last_lease_check_at = now
+                    registry, moved = recover_stalled_addresses(
+                        registry,
+                        registry_path,
+                        settings.camera_dhcp_leases_path,
+                        stream_targets,
+                        stalled,
+                    )
+                    if moved:
+                        # Новый адрес подставляется сразу, а не ждёт обычной
+                        # сверки инвентаря: та сравнивает файл с уже обновлённой
+                        # копией в памяти и разницы не увидит.
+                        recovered_targets = stream_targets_from_registry(registry)
+                        with config_lock:
+                            for role in stalled:
+                                stream_targets[role] = recovered_targets[role]
+                        # Адреса в журнал не пишутся: достаточно того, какая
+                        # камера переехала. Точное значение видно в админке.
+                        journal.write("camera_address_recovered", cameras=sorted(moved))
             if now - last_config_check_at >= 1 and machine.state.value == "idle":
                 updated_config = load_detection_config(config_path, runtime_config)
                 if updated_config != runtime_config:
@@ -824,6 +1033,10 @@ def _persist_after_segment_close(
 def run(*, once: bool = False, probe_seconds: float | None = None) -> None:
     settings = Settings()
     validate_runtime_paths(settings)
+    # Единственный момент, когда точно известно, что прерванная запись уже не
+    # продолжится: процесс только что стартовал. Пропажа питания не исполняет
+    # ни одного блока `finally`, поэтому её следы убираются здесь.
+    sweep_incomplete_files(settings.data_dir)
     notifier = Notifier.from_environment()
     if probe_seconds is not None:
         settings.automatic_capture_enabled = True

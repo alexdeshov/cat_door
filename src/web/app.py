@@ -659,6 +659,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 rtsp_url,
                 settings.preview_fps,
                 rotate_180=camera.rotate_180,
+                idle_timeout_seconds=settings.preview_idle_timeout_seconds,
             )
         )
         return StreamingResponse(

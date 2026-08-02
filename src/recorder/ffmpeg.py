@@ -2,7 +2,9 @@ import logging
 import re
 import subprocess
 import threading
+import time
 from collections.abc import Iterator
+from contextlib import suppress
 from pathlib import Path
 
 logger = logging.getLogger("catdoor.ffmpeg")
@@ -136,12 +138,34 @@ def probe_stream(
     return mask_credentials(complaints[-1]) if complaints else "ffmpeg ничего не сообщил"
 
 
+def _terminate_when_idle(
+    process: subprocess.Popen[bytes],
+    progress: list[float],
+    idle_timeout_seconds: float,
+) -> None:
+    """Прервать поток, который перестал отдавать кадры.
+
+    Чтение из ffmpeg блокирующее, поэтому заметить молчание может только кто-то
+    снаружи. Без этого забытая вкладка админки с мёртвой камерой держала бы свой
+    процесс ffmpeg до перезапуска веб-службы, а таких вкладок за вечер
+    накапливается сколько угодно.
+    """
+    while process.poll() is None:
+        if time.monotonic() - progress[0] < idle_timeout_seconds:
+            time.sleep(min(1.0, idle_timeout_seconds))
+            continue
+        with suppress(OSError):
+            process.terminate()
+        return
+
+
 def mjpeg_stream(
     ffmpeg_path: str,
     rtsp_url: str,
     fps: int,
     *,
     rotate_180: bool = False,
+    idle_timeout_seconds: float = 20.0,
 ) -> Iterator[bytes]:
     # Same pair of flips the detector pipeline uses in src/recorder/frames.py,
     # so an upside-down camera looks the same while being aimed as it will once
@@ -177,11 +201,22 @@ def mjpeg_stream(
         name="catdoor-ffmpeg-stderr",
     )
     drain.start()
+    # Отсчёт молчания начинается с запуска: камера, которая приняла соединение
+    # и не отдала ни одного кадра, ничем не лучше замолчавшей посреди потока.
+    progress = [time.monotonic()]
+    idle_guard = threading.Thread(
+        target=_terminate_when_idle,
+        args=(process, progress, idle_timeout_seconds),
+        daemon=True,
+        name="catdoor-preview-idle",
+    )
+    idle_guard.start()
     frames_sent = 0
     buffer = bytearray()
     try:
         assert process.stdout is not None
         while chunk := process.stdout.read(8192):
+            progress[0] = time.monotonic()
             buffer.extend(chunk)
             while True:
                 start = buffer.find(b"\xff\xd8")
@@ -206,6 +241,7 @@ def mjpeg_stream(
         except subprocess.TimeoutExpired:
             process.kill()
         drain.join(timeout=2)
+        idle_guard.join(timeout=2)
         # A stream that produced nothing is the case worth explaining: in the
         # browser it looks exactly like a working camera showing black.
         if not frames_sent:

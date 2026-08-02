@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from uuid import uuid4
 
 from pydantic import BaseModel, Field, model_validator
 
+from src.common.durable_write import write_text_durably
 from src.common.settings import Settings
 from src.recorder.automatic import AutomaticEventConfig
 
@@ -135,13 +135,14 @@ def load_detection_config(path: Path, defaults: DetectionConfig) -> DetectionCon
 
 
 def save_detection_config(path: Path, config: DetectionConfig) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
-    try:
-        temporary.write_text(
-            json.dumps(config.model_dump(), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        temporary.replace(path)
-    finally:
-        temporary.unlink(missing_ok=True)
+    """Записать настройки так, чтобы их не потеряла пропажа питания.
+
+    Recorder перечитывает этот файл на ходу, поэтому подмена обязана быть
+    атомарной, а обрыв через секунду после нажатия «Сохранить» не должен
+    оставлять файл нулевой длины: тогда детекция молча вернулась бы к
+    значениям из окружения.
+    """
+    write_text_durably(
+        path,
+        json.dumps(config.model_dump(), ensure_ascii=False, indent=2),
+    )

@@ -74,12 +74,19 @@ def test_only_the_data_volume_is_writable(name: str) -> None:
 
 @pytest.mark.parametrize("name", UNITS)
 def test_service_never_stops_retrying(name: str) -> None:
-    """No start limit: an unattended node must keep trying after a bad night."""
-    service = _unit(name)["Service"]
+    """No start limit: an unattended node must keep trying after a bad night.
+
+    Отключение лимита задаётся явно: умолчание systemd — пять запусков за
+    десять секунд, после чего юнит остаётся в `failed` и узел молча перестаёт
+    подниматься.
+    """
+    unit = _unit(name)
+    service = unit["Service"]
 
     assert service["Restart"] == "always"
     assert int(service["RestartMaxDelaySec"]) == 1800
     assert "StartLimitBurst" not in service
+    assert int(unit["Unit"]["StartLimitIntervalSec"]) == 0
 
 
 def test_installer_is_executable() -> None:
