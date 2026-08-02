@@ -7,6 +7,7 @@ from sqlalchemy import select
 
 from src.common.camera_discovery import DiscoveredDevice
 from src.common.camera_registry import camera_registry_path, load_registry
+from src.common.capture_mode import CaptureMode, capture_mode_path, load_capture_mode
 from src.common.database import EvaluationRun, Event, create_session_factory
 from src.common.settings import Settings
 from src.recorder.status import write_recorder_status
@@ -1135,3 +1136,43 @@ def test_discovery_form_is_on_the_camera_tab(runtime_path: Path, monkeypatch) ->
     assert 'id="discovery-form"' in page.text
     assert '[data-field="password"]' in page.text
     assert "Добавить как новую" in page.text
+
+
+def test_capture_mode_is_switched_from_the_admin(runtime_path: Path, monkeypatch) -> None:
+    """Включение сбора больше не требует SSH и перезапуска службы."""
+    client = make_client(runtime_path, monkeypatch)
+
+    assert client.get("/api/capture-mode").json() == {
+        "state": "off",
+        "enabled": False,
+        "record_events": False,
+    }
+
+    response = client.put("/api/capture-mode", json={"state": "record"})
+
+    assert response.status_code == 200
+    assert response.json() == {"state": "record", "enabled": True, "record_events": True}
+    assert load_capture_mode(
+        capture_mode_path(runtime_path),
+        CaptureMode(),
+    ).state == "record"
+    assert client.get("/api/capture-mode").json()["state"] == "record"
+
+
+def test_capture_mode_rejects_states_that_do_not_exist(runtime_path: Path, monkeypatch) -> None:
+    client = make_client(runtime_path, monkeypatch)
+
+    assert client.put("/api/capture-mode", json={"state": "куда-то ещё"}).status_code == 422
+
+
+def test_switch_shows_the_current_mode(runtime_path: Path, monkeypatch) -> None:
+    client = make_client(runtime_path, monkeypatch)
+    client.put("/api/capture-mode", json={"state": "observe"})
+
+    page = client.get("/")
+
+    assert 'class="capture-choice" data-state="observe"' in page.text
+    assert page.text.count('class="capture-choice"') == 3
+    # Нажатое положение приходит с сервера, а не выставляется скриптом после
+    # загрузки: иначе переключатель на секунду показывал бы чужое состояние.
+    assert 'data-state="observe"\n        aria-pressed="true"' in page.text

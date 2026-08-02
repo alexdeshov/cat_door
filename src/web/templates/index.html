@@ -10,9 +10,20 @@
   </div>
   <div class="readouts" id="detector-readouts">
     <div class="readout">
-      <span class="readout-key">Режим</span>
+      <span class="readout-key">режим</span>
       <span class="readout-value">{{ "запись событий" if not automatic_capture_dry_run else "наблюдение" }}</span>
     </div>
+  </div>
+  <div class="statusbar-switch">
+    <div class="segmented" role="group" aria-label="Автоматический сбор">
+      <button type="button" class="capture-choice" data-state="off"
+        aria-pressed="{{ 'true' if capture_state == 'off' else 'false' }}">выключен</button>
+      <button type="button" class="capture-choice" data-state="observe"
+        aria-pressed="{{ 'true' if capture_state == 'observe' else 'false' }}">наблюдение</button>
+      <button type="button" class="capture-choice" data-state="record"
+        aria-pressed="{{ 'true' if capture_state == 'record' else 'false' }}">запись</button>
+    </div>
+    <span id="capture-mode-status" class="muted data" style="font-size: 12px"></span>
   </div>
 </section>
 
@@ -604,6 +615,39 @@
     setTimeout(refreshTrainingStatus, 3000);
   }
   refreshTrainingStatus();
+
+  const captureStateNames = {off: "выключен", observe: "наблюдение", record: "запись"};
+  const captureChoices = document.querySelectorAll(".capture-choice");
+
+  captureChoices.forEach(choice => {
+    choice.addEventListener("click", async () => {
+      const status = document.querySelector("#capture-mode-status");
+      const state = choice.dataset.state;
+      const previous = [...captureChoices].find(
+        item => item.getAttribute("aria-pressed") === "true");
+      captureChoices.forEach(item => item.setAttribute("aria-pressed", "false"));
+      choice.setAttribute("aria-pressed", "true");
+      status.textContent = "…";
+      status.classList.remove("bad");
+      try {
+        const response = await fetch("/api/capture-mode", {
+          method: "PUT",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({state})
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.detail || "не сохранилось");
+        // Recorder перечитывает файл раз в секунду и только в ожидании,
+        // поэтому переключение посреди прохода вступит в силу чуть позже.
+        status.textContent = `${captureStateNames[result.state]} — recorder применит`;
+      } catch (error) {
+        captureChoices.forEach(item => item.setAttribute("aria-pressed", "false"));
+        previous?.setAttribute("aria-pressed", "true");
+        status.textContent = error.message;
+        status.classList.add("bad");
+      }
+    });
+  });
 
   const detectorStateLabels = {
     idle: "Ожидание",

@@ -139,6 +139,12 @@ sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.ta
 `git pull` и не видит никто, кроме root и служебного пользователя. В файле
 находится RTSP-пароль камеры — но только для первого запуска.
 
+Режим автоматического сбора переключается на главной странице админки и
+хранится в `/var/lib/catdoor/runtime/capture-mode.json`. Переменные
+`CATDOOR_AUTOMATIC_CAPTURE_ENABLED` и `CATDOOR_AUTOMATIC_CAPTURE_DRY_RUN`
+задают только начальное положение; после первого переключения они не читаются.
+Recorder подхватывает смену в течение секунды и без перезапуска.
+
 Инвентарь камер живёт в `/var/lib/catdoor/runtime/cameras.json` с правами
 `0600` и владельцем `catdoor`. Он создаётся при первом старте из переменных
 `CATDOOR_CAMERA_*`, после чего адреса, учётные данные и роли правятся на

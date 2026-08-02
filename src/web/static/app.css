@@ -265,7 +265,7 @@ main {
 
 .statusbar {
   display: grid;
-  grid-template-columns: minmax(220px, auto) 1fr;
+  grid-template-columns: minmax(200px, auto) minmax(0, 1fr) auto;
   gap: 0;
   background: var(--surface);
   border: 1px solid var(--line);
@@ -317,6 +317,16 @@ main {
 }
 
 .readout { display: grid; gap: 1px; }
+
+/* Переключатель сбора стоит в той же строке, но вне области, которую скрипт
+   перерисовывает каждую секунду: нажатие не должно спорить с обновлением. */
+.statusbar-switch {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 18px;
+  border-left: 1px solid var(--line);
+}
 
 .readout-key {
   font-size: 11px;
@@ -663,6 +673,7 @@ progress { width: 100%; height: 6px; }
   .pass { grid-template-columns: 1fr; }
   .statusbar { grid-template-columns: 1fr; }
   .statusbar-state { border-right: 0; border-bottom: 1px solid var(--line); }
+  .statusbar-switch { border-left: 0; border-top: 1px solid var(--line); }
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -43,6 +43,13 @@ from src.common.camera_registry import (
     save_registry,
     slugify_camera_id,
 )
+from src.common.capture_mode import (
+    CaptureMode,
+    CaptureState,
+    capture_mode_path,
+    load_capture_mode,
+    save_capture_mode,
+)
 from src.common.database import (
     EvaluationRun,
     Event,
@@ -199,6 +206,10 @@ class CameraPayload(BaseModel):
     enabled: bool = True
     note: str = ""
     rtsp_url: str = ""
+
+
+class CaptureModePayload(BaseModel):
+    state: CaptureState
 
 
 class DiscoveryPayload(BaseModel):
@@ -386,6 +397,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             DetectionConfig.from_settings(settings),
         )
 
+    def current_capture_mode() -> CaptureMode:
+        return load_capture_mode(
+            capture_mode_path(settings.data_dir),
+            CaptureMode.from_settings(settings),
+        )
+
     def current_registry() -> CameraRegistry:
         """Инвентарь читается на каждый запрос.
 
@@ -498,6 +515,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             else settings.automatic_capture_dry_run
         )
         registry = current_registry()
+        capture_mode = current_capture_mode()
         return templates.TemplateResponse(
             request=request,
             name="index.html",
@@ -515,6 +533,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "recorder_status": recorder_status,
                 "automatic_capture_enabled": recorder_enabled,
                 "automatic_capture_dry_run": recorder_dry_run,
+                "capture_state": capture_mode.state,
                 "stream_version": uuid4().hex,
                 "detection_config": current_detection_config(),
             },
@@ -711,6 +730,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except ValueError:
             stale = True
         return {**status, "stale": stale}
+
+    @app.get("/api/capture-mode")
+    def get_capture_mode() -> dict[str, object]:
+        mode = current_capture_mode()
+        return {"state": mode.state, "enabled": mode.enabled, "record_events": mode.record_events}
+
+    @app.put("/api/capture-mode")
+    def update_capture_mode(payload: CaptureModePayload) -> dict[str, object]:
+        mode = CaptureMode.from_state(payload.state)
+        try:
+            save_capture_mode(capture_mode_path(settings.data_dir), mode)
+        except OSError as exc:
+            raise HTTPException(500, "Не удалось сохранить режим сбора") from exc
+        return {"state": mode.state, "enabled": mode.enabled, "record_events": mode.record_events}
 
     @app.get("/api/detection/settings")
     def get_detection_settings() -> DetectionConfig:

@@ -17,6 +17,7 @@ from src.common.camera_registry import (
     load_registry,
     save_registry,
 )
+from src.common.capture_mode import CaptureMode, capture_mode_path, save_capture_mode
 from src.common.detection_config import CameraDetectionConfig
 from src.common.sd_notify import Notifier
 from src.common.settings import Settings
@@ -32,6 +33,8 @@ from src.recorder.app import (
     _put_latest,
     _register_loaded_models,
     build_automatic_config,
+    current_capture_mode,
+    monitor_automatic,
     publish_heartbeat,
     recorder_status_path,
     recover_stalled_addresses,
@@ -628,3 +631,71 @@ def test_worker_reconnects_after_a_wedged_process_is_killed(
                 states["face"].process.kill()
         worker.join(timeout=15)
         assert not worker.is_alive()
+
+
+def test_recorder_picks_the_mode_from_disk_not_from_the_environment(
+    runtime_path: Path,
+) -> None:
+    """Переключение из админки должно доходить до recorder без перезапуска."""
+    settings = Settings(data_dir=runtime_path, automatic_capture_enabled=False)
+
+    assert current_capture_mode(settings).state == "off"
+
+    save_capture_mode(capture_mode_path(runtime_path), CaptureMode.from_state("record"))
+
+    assert current_capture_mode(settings).state == "record"
+
+
+def test_heartbeat_reports_the_switched_mode(runtime_path: Path) -> None:
+    settings = Settings(data_dir=runtime_path, automatic_capture_enabled=False)
+    save_capture_mode(capture_mode_path(runtime_path), CaptureMode.from_state("record"))
+
+    publish_heartbeat(settings)
+
+    payload = json.loads(recorder_status_path(settings).read_text(encoding="utf-8"))
+    assert payload["state"] == "waiting_for_detector"
+    assert payload["automatic_capture_enabled"] is True
+    assert payload["dry_run"] is False
+
+
+def test_disabling_from_the_admin_stops_the_running_monitor(
+    runtime_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Выключение посреди работы: монитор обязан выйти сам, а не повиснуть.
+
+    Без этого переключатель работал бы только в одну сторону — включить можно,
+    а выключить лишь перезапуском службы.
+    """
+    save_capture_mode(capture_mode_path(runtime_path), CaptureMode.from_state("observe"))
+    # Роли нужен адрес: без него воркер ждёт назначения и до подключения, на
+    # котором построена проверка, не доходит.
+    settings = Settings(
+        data_dir=runtime_path,
+        automatic_capture_enabled=True,
+        camera_face_rtsp="rtsp://10.0.0.5:554/one",
+    )
+
+    class SilentDetector:
+        device = "CPU"
+        input_size = 320
+        letterbox_value = 114
+        resize_mode = "letterbox"
+        letterbox_alignment = "center"
+
+    monkeypatch.setattr("src.recorder.app.OpenVinoCatDetector", lambda *args: SilentDetector())
+    monkeypatch.setattr("src.recorder.app._register_loaded_models", lambda *args: {"detector": 1})
+
+    def switch_off_once_running(*args, **kwargs):
+        # Кадров не будет: монитор крутится вхолостую, и это ровно то
+        # состояние ожидания, в котором переключение должно применяться.
+        save_capture_mode(capture_mode_path(runtime_path), CaptureMode.from_state("off"))
+        raise OSError("камер нет")
+
+    monkeypatch.setattr("src.recorder.app.rgb_frame_stream", switch_off_once_running)
+
+    monitor_automatic(settings, 30.0, None)
+
+    payload = json.loads(recorder_status_path(settings).read_text(encoding="utf-8"))
+    assert payload["state"] == "disabled"
+    assert payload["automatic_capture_enabled"] is False
