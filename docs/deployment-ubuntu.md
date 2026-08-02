@@ -204,6 +204,37 @@ backoff от 5 секунд до 30 минут без потолка попыт�
 за десять секунд оставляет юнит в `failed` — то есть обещание «служба не
 сдаётся» держалось бы лишь на том, что `RestartSec` больше этого окна.
 
+## Контур калитки и примиритель
+
+Какой контур работает, решает переключатель в админке; он записывает выбор в
+`/var/lib/catdoor/runtime/circuits.json`. Приводит службу Frigate к этому
+выбору отдельная пара юнитов:
+
+```sh
+sudo cp install/catdoor-gate-sync.service install/catdoor-gate-sync.path \
+        /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now catdoor-gate-sync.path
+sudo systemctl enable catdoor-gate-sync.service
+```
+
+`.path` следит за файлом и запускает `.service` при каждом изменении;
+`enable` у самой службы нужен для одного прогона при загрузке — контейнер
+Frigate объявлен с `restart: "no"`, и без этого узел, отданный калитке,
+поднялся бы с остановленным контуром.
+
+Управлять службой из веб-процесса нельзя: в его юните стоит
+`NoNewPrivileges=true`, поэтому `sudo` оттуда не работает. Это не обходится
+правилом `sudoers` — и не должно: у админки нет аутентификации, а значит и
+привилегий у неё быть не должно.
+
+Проверка:
+
+```sh
+systemctl status catdoor-gate-sync.path --no-pager | head -4
+journalctl -u catdoor-gate-sync -n 5 --no-pager
+```
+
 ## Что происходит при отключении питания
 
 Проверять восстановление имеет смысл по трём отдельным сценариям — они ломаются

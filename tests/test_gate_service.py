@@ -61,15 +61,19 @@ def test_failed_service_is_visible(monkeypatch) -> None:
     assert gate_status("frigate.service").state == "failed"
 
 
-def test_starting_goes_through_sudo_with_a_narrow_command(monkeypatch) -> None:
-    """Доступ к сокету Docker не выдаётся: он равносилен root на узле."""
+def test_starting_calls_systemctl_directly(monkeypatch) -> None:
+    """Без sudo: команду исполняет примиритель, который и так работает от root.
+
+    Через веб-процесс это не сработало бы в принципе — `NoNewPrivileges` в его
+    юните запрещает любое повышение прав, включая setuid у sudo.
+    """
     calls = _fake_run(
         monkeypatch,
-        {("sudo", "-n", "systemctl", "start", "frigate.service"): (0, "")},
+        {("systemctl", "start", "frigate.service"): (0, "")},
     )
 
     assert set_gate_running("frigate.service", True) is None
-    assert calls == [["sudo", "-n", "systemctl", "start", "frigate.service"]]
+    assert calls == [["systemctl", "start", "frigate.service"]]
 
 
 def test_refused_sudo_is_reported_not_swallowed(monkeypatch) -> None:

@@ -1309,50 +1309,29 @@ def test_a_gate_camera_is_never_used_by_the_cat_recorder(
     assert registry.get("test-cam").role is None
 
 
-def test_switching_to_the_gate_starts_its_service(runtime_path: Path, monkeypatch) -> None:
-    """Пульт не только запоминает выбор, но и приводит службу к нему."""
-    started: list[tuple[str, bool]] = []
-    monkeypatch.setattr("src.web.app.gate_status", lambda unit: GateStatus("stopped"))
-    monkeypatch.setattr(
-        "src.web.app.set_gate_running",
-        lambda unit, running: started.append((unit, running)) or None,
-    )
-    client = make_client(runtime_path, monkeypatch)
-
-    response = client.put("/api/circuits", json={"active": "gate"})
-
-    assert response.status_code == 200
-    assert started == [("frigate.service", True)]
-    assert response.json()["gate_error"] is None
-
-
-def test_a_refusal_from_systemd_is_shown_not_swallowed(
+def test_the_panel_records_the_choice_without_touching_the_service(
     runtime_path: Path,
     monkeypatch,
 ) -> None:
-    """Состояние узла сохранено, служба к нему не приведена — это видно."""
+    """У веб-процесса нет привилегий: он пишет состояние, а не исполняет его.
+
+    `NoNewPrivileges` в его юните запрещает любое повышение прав, поэтому
+    попытка управлять службой отсюда была бы обречена в любом случае.
+    """
     monkeypatch.setattr("src.web.app.gate_status", lambda unit: GateStatus("stopped"))
-    monkeypatch.setattr(
-        "src.web.app.set_gate_running",
-        lambda unit, running: "sudo: a password is required",
-    )
     client = make_client(runtime_path, monkeypatch)
 
     response = client.put("/api/circuits", json={"active": "gate"})
 
     assert response.status_code == 200
-    assert response.json()["gate_error"] == "sudo: a password is required"
     assert load_circuits(circuits_path(runtime_path)).gate is True
+    assert response.json()["gate_state"] == "stopped"
 
 
-def test_an_undeployed_circuit_is_not_an_error_when_left_alone(
-    runtime_path: Path,
-    monkeypatch,
-) -> None:
+def test_an_undeployed_circuit_is_reported_as_such(runtime_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("src.web.app.gate_status", lambda unit: GateStatus("absent"))
     client = make_client(runtime_path, monkeypatch)
 
     response = client.put("/api/circuits", json={"active": "cats"})
 
-    assert response.json()["gate_error"] is None
     assert response.json()["gate_deployed"] is False

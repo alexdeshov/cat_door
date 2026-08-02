@@ -1,0 +1,12 @@
+[Unit]
+Description=CatDoor — следить за состоянием контуров узла
+Documentation=https://github.com/alexdeshov/cat_door/blob/main/docs/two-circuits-plan.md
+
+[Path]
+# Файл переписывается атомарной подменой имени, поэтому PathChanged: он
+# срабатывает и на замену файла целиком, в отличие от PathModified.
+PathChanged=/var/lib/catdoor/runtime/circuits.json
+Unit=catdoor-gate-sync.service
+
+[Install]
+WantedBy=multi-user.target
