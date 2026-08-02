@@ -50,6 +50,17 @@ from src.common.capture_mode import (
     load_capture_mode,
     save_capture_mode,
 )
+from src.common.circuits import (
+    CIRCUIT_TITLES,
+    CircuitConflict,
+    CircuitName,
+    GateRecording,
+    NodeCircuits,
+    circuits_path,
+    ensure_allowed,
+    load_circuits,
+    save_circuits,
+)
 from src.common.database import (
     EvaluationRun,
     Event,
@@ -210,6 +221,19 @@ class CameraPayload(BaseModel):
 
 class CaptureModePayload(BaseModel):
     state: CaptureState
+
+
+class CircuitsPayload(BaseModel):
+    """Что просит пульт узла.
+
+    `active` — контур, которому отдаётся узел; остальные останавливаются. Поле
+    отдельно от «включить/выключить», потому что до переезда работать может
+    только один, и запрос вида «включи калитку» без указания, что делать с
+    котами, не имеет однозначного смысла.
+    """
+
+    active: CircuitName | None = None
+    gate_recording: GateRecording | None = None
 
 
 class DiscoveryPayload(BaseModel):
@@ -390,12 +414,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings
     app.state.session_factory = factory
     templates.env.globals["asset_version"] = asset_version
+    templates.env.globals["circuit_titles"] = CIRCUIT_TITLES
 
     def current_detection_config() -> DetectionConfig:
         return load_detection_config(
             detection_config_path(settings.data_dir),
             DetectionConfig.from_settings(settings),
         )
+
+    def current_circuits() -> NodeCircuits:
+        return load_circuits(circuits_path(settings.data_dir))
+
+    def circuits_view(circuits: NodeCircuits) -> dict[str, object]:
+        return {
+            "cats": circuits.cats,
+            "gate": circuits.gate,
+            "exclusive": circuits.exclusive,
+            "gate_recording": circuits.gate_recording,
+            "active": list(circuits.active_names),
+        }
 
     def current_capture_mode() -> CaptureMode:
         return load_capture_mode(
@@ -534,6 +571,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "automatic_capture_enabled": recorder_enabled,
                 "automatic_capture_dry_run": recorder_dry_run,
                 "capture_state": capture_mode.state,
+                "circuits": circuits_view(current_circuits()),
                 "stream_version": uuid4().hex,
                 "detection_config": current_detection_config(),
             },
@@ -731,6 +769,39 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except ValueError:
             stale = True
         return {**status, "stale": stale}
+
+    @app.get("/api/circuits")
+    def get_circuits() -> dict[str, object]:
+        return circuits_view(current_circuits())
+
+    @app.put("/api/circuits")
+    def update_circuits(payload: CircuitsPayload) -> dict[str, object]:
+        circuits = current_circuits()
+        if payload.active is not None:
+            circuits = circuits.with_only(payload.active)
+        if payload.gate_recording is not None:
+            circuits = circuits.model_copy(update={"gate_recording": payload.gate_recording})
+        try:
+            ensure_allowed(circuits)
+        except CircuitConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        try:
+            save_circuits(circuits_path(settings.data_dir), circuits)
+        except OSError as exc:
+            raise HTTPException(500, "Не удалось сохранить состояние узла") from exc
+        return circuits_view(circuits)
+
+    @app.get("/gate", response_class=HTMLResponse)
+    def gate_page(request: Request) -> HTMLResponse:
+        circuits = current_circuits()
+        return templates.TemplateResponse(
+            request,
+            "gate.html",
+            {
+                "circuits": circuits_view(circuits),
+                "circuit_titles": CIRCUIT_TITLES,
+            },
+        )
 
     @app.get("/api/capture-mode")
     def get_capture_mode() -> dict[str, object]:

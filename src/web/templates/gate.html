@@ -1,0 +1,150 @@
+{% extends "_base.html" %}
+{% set circuit = "gate" %}
+{% block title %}CatDoor — калитка{% endblock %}
+
+{% block content %}
+<section class="statusbar">
+  <div class="statusbar-state">
+    <span class="beacon {{ 'beacon-ok' if circuits.gate else '' }}" aria-hidden="true"></span>
+    <span class="statusbar-label">{{ "включён" if circuits.gate else "остановлен" }}</span>
+  </div>
+  <div class="readouts">
+    <div class="readout">
+      <span class="readout-key">контур</span>
+      <span class="readout-value">не развёрнут</span>
+    </div>
+    <div class="readout">
+      <span class="readout-key">распознавание</span>
+      <span class="readout-value">Frigate</span>
+    </div>
+    <div class="readout">
+      <span class="readout-key">механика</span>
+      <span class="readout-value">не управляется</span>
+    </div>
+  </div>
+  <div class="statusbar-switch">
+    <div class="segmented" role="group" aria-label="Активный контур узла">
+      <button type="button" class="circuit-choice" data-circuit="cats"
+        aria-pressed="{{ 'true' if circuits.cats else 'false' }}">{{ circuit_titles["cats"] }}</button>
+      <button type="button" class="circuit-choice" data-circuit="gate"
+        aria-pressed="{{ 'true' if circuits.gate else 'false' }}">{{ circuit_titles["gate"] }}</button>
+    </div>
+    <span id="circuits-status" class="muted data" style="font-size: 12px"></span>
+  </div>
+</section>
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>Контур не развёрнут</h2>
+  </div>
+  <div class="panel-body">
+    <p class="notice notice-signal">
+      Распознавание людей выполняет Frigate — отдельная служба в Docker. На узле
+      она пока не установлена, поэтому переключатель контура сохраняет выбор, но
+      включать ему нечего.
+    </p>
+    <p class="muted">
+      Здесь появятся состояние камеры калитки, число распознанных проходов и
+      ссылка в интерфейс Frigate. Работа с библиотекой лиц останется во Frigate:
+      дублировать её в этой админке незачем.
+    </p>
+    <p class="muted" style="font-size: 13px">
+      Порядок работ — <code>docs/two-circuits-plan.md</code>. Развёртывание
+      Frigate относится к репозиторию <code>gate_access</code>.
+    </p>
+  </div>
+</section>
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>Ресурсы узла</h2>
+  </div>
+  <div class="panel-body">
+    <p class="muted">
+      До переезда на новое железо работает только один контур. Встроенная
+      графика этого узла сломана драйвером, поэтому детекцию и декодирование
+      считает процессор, и одновременная работа деградировала бы оба контура
+      незаметно: кадры начали бы стареть, а проходы пропускаться.
+    </p>
+    <p class="muted">
+      Переключение обратимо и ничего не стирает: кошачий контур помнит свой
+      режим наблюдения или записи и поднимется в нём же.
+    </p>
+  </div>
+</section>
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>Запись калитки</h2>
+    <span class="muted">применится при развёртывании контура</span>
+  </div>
+  <div class="panel-body">
+    <div class="segmented" role="group" aria-label="Режим записи калитки">
+      <button type="button" class="recording-choice" data-recording="events"
+        aria-pressed="{{ 'true' if circuits.gate_recording == 'events' else 'false' }}">
+        только события
+      </button>
+      <button type="button" class="recording-choice" data-recording="continuous"
+        aria-pressed="{{ 'true' if circuits.gate_recording == 'continuous' else 'false' }}">
+        круглосуточно
+      </button>
+    </div>
+    <p class="muted" style="font-size: 13px">
+      Круглосуточная запись заполняет диск предсказуемо и быстро. Для сбора
+      библиотеки лиц и оценки точности достаточно клипов вокруг событий,
+      поэтому по умолчанию выбраны они.
+    </p>
+    <span id="recording-status" class="muted data" style="font-size: 12px"></span>
+  </div>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  async function putCircuits(body, status) {
+    status.textContent = "…";
+    status.classList.remove("bad");
+    try {
+      const response = await fetch("/api/circuits", {
+        method: "PUT",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(body)
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.detail || "не сохранилось");
+      return result;
+    } catch (error) {
+      status.textContent = error.message;
+      status.classList.add("bad");
+      return null;
+    }
+  }
+
+  function press(buttons, matches) {
+    buttons.forEach(button => button.setAttribute("aria-pressed", String(matches(button))));
+  }
+
+  const circuitChoices = [...document.querySelectorAll(".circuit-choice")];
+  circuitChoices.forEach(choice => {
+    choice.addEventListener("click", async () => {
+      const status = document.querySelector("#circuits-status");
+      const result = await putCircuits({active: choice.dataset.circuit}, status);
+      if (!result) return;
+      press(circuitChoices, button => result[button.dataset.circuit] === true);
+      status.textContent = "сохранено";
+      if (result.gate === false) location.reload();
+    });
+  });
+
+  const recordingChoices = [...document.querySelectorAll(".recording-choice")];
+  recordingChoices.forEach(choice => {
+    choice.addEventListener("click", async () => {
+      const status = document.querySelector("#recording-status");
+      const result = await putCircuits({gate_recording: choice.dataset.recording}, status);
+      if (!result) return;
+      press(recordingChoices, button => button.dataset.recording === result.gate_recording);
+      status.textContent = "сохранено — применится при развёртывании";
+    });
+  });
+</script>
+{% endblock %}
