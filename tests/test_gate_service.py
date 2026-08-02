@@ -1,0 +1,81 @@
+from types import SimpleNamespace
+
+from src.common.gate_service import GateStatus, gate_status, set_gate_running
+
+
+def _fake_run(monkeypatch, answers: dict[tuple[str, ...], tuple[int, str]]) -> list[list[str]]:
+    calls: list[list[str]] = []
+
+    def run(command, **options):
+        calls.append(command)
+        code, output = answers.get(tuple(command), (1, ""))
+        return SimpleNamespace(returncode=code, stdout=output, stderr="")
+
+    monkeypatch.setattr("src.common.gate_service.subprocess.run", run)
+    return calls
+
+
+def test_running_service_is_reported_running(monkeypatch) -> None:
+    _fake_run(monkeypatch, {("systemctl", "is-active", "frigate.service"): (0, "active")})
+
+    assert gate_status("frigate.service") == GateStatus("running")
+
+
+def test_absent_service_is_not_the_same_as_stopped(monkeypatch) -> None:
+    """Отсутствующую службу нельзя включить, и обещать это пользователю нельзя."""
+    _fake_run(
+        monkeypatch,
+        {
+            ("systemctl", "is-active", "frigate.service"): (3, "inactive"),
+            ("systemctl", "show", "frigate.service", "-p", "LoadState", "--value"): (
+                0,
+                "not-found",
+            ),
+        },
+    )
+
+    status = gate_status("frigate.service")
+
+    assert status.state == "absent"
+    assert status.deployed is False
+
+
+def test_stopped_service_can_be_started(monkeypatch) -> None:
+    _fake_run(
+        monkeypatch,
+        {
+            ("systemctl", "is-active", "frigate.service"): (3, "inactive"),
+            ("systemctl", "show", "frigate.service", "-p", "LoadState", "--value"): (0, "loaded"),
+        },
+    )
+
+    status = gate_status("frigate.service")
+
+    assert status.state == "stopped"
+    assert status.deployed is True
+
+
+def test_failed_service_is_visible(monkeypatch) -> None:
+    _fake_run(monkeypatch, {("systemctl", "is-active", "frigate.service"): (3, "failed")})
+
+    assert gate_status("frigate.service").state == "failed"
+
+
+def test_starting_goes_through_sudo_with_a_narrow_command(monkeypatch) -> None:
+    """Доступ к сокету Docker не выдаётся: он равносилен root на узле."""
+    calls = _fake_run(
+        monkeypatch,
+        {("sudo", "-n", "systemctl", "start", "frigate.service"): (0, "")},
+    )
+
+    assert set_gate_running("frigate.service", True) is None
+    assert calls == [["sudo", "-n", "systemctl", "start", "frigate.service"]]
+
+
+def test_refused_sudo_is_reported_not_swallowed(monkeypatch) -> None:
+    _fake_run(monkeypatch, {})
+
+    reason = set_gate_running("frigate.service", False)
+
+    assert reason is not None
+    assert "systemctl stop" in reason

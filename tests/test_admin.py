@@ -10,6 +10,7 @@ from src.common.camera_registry import camera_registry_path, load_registry
 from src.common.capture_mode import CaptureMode, capture_mode_path, load_capture_mode
 from src.common.circuits import circuits_path, load_circuits
 from src.common.database import EvaluationRun, Event, create_session_factory
+from src.common.gate_service import GateStatus
 from src.common.settings import Settings
 from src.recorder.status import write_recorder_status
 from src.web.app import create_app
@@ -1209,10 +1210,17 @@ def test_discovery_shows_one_row_for_a_camera_on_two_addresses(
 def test_gate_tab_is_honest_about_not_being_deployed(runtime_path: Path, monkeypatch) -> None:
     client = make_client(runtime_path, monkeypatch)
 
+    monkeypatch.setattr(
+        "src.web.app.gate_status",
+        lambda unit: GateStatus("absent", "служба не установлена на узле"),
+    )
+
     page = client.get("/gate")
 
     assert page.status_code == 200
-    assert "Контур не развёрнут" in page.text
+    # Не развёрнутый контур страница называет прямо, а не делает вид, что его
+    # можно включить.
+    assert "Служба Frigate на узле не установлена" in page.text
     assert 'class="circuit-choice" data-circuit="gate"' in page.text
     # Верхний уровень навигации — контуры, второй появляется только у котов.
     assert 'href="/gate"' in page.text
@@ -1299,3 +1307,52 @@ def test_a_gate_camera_is_never_used_by_the_cat_recorder(
     assert registry.by_role("face").id == "face"
     assert registry.by_role("side").id == "side"
     assert registry.get("test-cam").role is None
+
+
+def test_switching_to_the_gate_starts_its_service(runtime_path: Path, monkeypatch) -> None:
+    """Пульт не только запоминает выбор, но и приводит службу к нему."""
+    started: list[tuple[str, bool]] = []
+    monkeypatch.setattr("src.web.app.gate_status", lambda unit: GateStatus("stopped"))
+    monkeypatch.setattr(
+        "src.web.app.set_gate_running",
+        lambda unit, running: started.append((unit, running)) or None,
+    )
+    client = make_client(runtime_path, monkeypatch)
+
+    response = client.put("/api/circuits", json={"active": "gate"})
+
+    assert response.status_code == 200
+    assert started == [("frigate.service", True)]
+    assert response.json()["gate_error"] is None
+
+
+def test_a_refusal_from_systemd_is_shown_not_swallowed(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    """Состояние узла сохранено, служба к нему не приведена — это видно."""
+    monkeypatch.setattr("src.web.app.gate_status", lambda unit: GateStatus("stopped"))
+    monkeypatch.setattr(
+        "src.web.app.set_gate_running",
+        lambda unit, running: "sudo: a password is required",
+    )
+    client = make_client(runtime_path, monkeypatch)
+
+    response = client.put("/api/circuits", json={"active": "gate"})
+
+    assert response.status_code == 200
+    assert response.json()["gate_error"] == "sudo: a password is required"
+    assert load_circuits(circuits_path(runtime_path)).gate is True
+
+
+def test_an_undeployed_circuit_is_not_an_error_when_left_alone(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr("src.web.app.gate_status", lambda unit: GateStatus("absent"))
+    client = make_client(runtime_path, monkeypatch)
+
+    response = client.put("/api/circuits", json={"active": "cats"})
+
+    assert response.json()["gate_error"] is None
+    assert response.json()["gate_deployed"] is False
