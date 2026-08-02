@@ -58,11 +58,11 @@ def test_capture_and_label_known_cat(runtime_path: Path, monkeypatch) -> None:
     page = client.get("/")
     assert page.status_code == 200
     assert "Барсик" in page.text
-    assert 'class="stream"' in page.text
-    assert 'class="event camera-grid"' in page.text
-    assert ".camera-grid { grid-template-columns: minmax(0, 1fr) minmax(220px, 360px); }" in (
-        page.text
-    )
+    assert 'class="viewport"' in page.text
+    assert 'class="pass"' in page.text
+    # Оформление переехало в одну таблицу стилей: в разметке его больше нет.
+    assert "<style>" not in page.text
+    assert '<link rel="stylesheet" href="/static/app.css?v=' in page.text
     assert 'id="swap-cameras"' in page.text
     assert 'localStorage.setItem(cameraLayoutKey, swapped ? "swapped" : "default")' in page.text
     assert page.text.count('class="rotate-camera"') == 1
@@ -72,14 +72,16 @@ def test_capture_and_label_known_cat(runtime_path: Path, monkeypatch) -> None:
     assert 'cameraRotations[role] = (cameraRotations[role] + 90) % 360' in page.text
     assert 'localStorage.setItem(cameraRotationKey, JSON.stringify(cameraRotations))' in page.text
     assert 'const cameraRotationKey = "catdoor-camera-rotations-v2"' in page.text
-    assert "Автоматический сбор событий" in page.text
+    assert 'id="detector-status"' in page.text
+    # Разметка сохраняется нажатием по переключателю, отдельной кнопки нет.
+    assert 'class="label-choice" data-label="known_cat"' in page.text
+    assert "save-label" not in page.text
     # Настройки детекции переехали на вкладку камер: там же список камер и их
     # роли, поэтому редактировать их в двух местах больше не нужно.
     assert 'id="detection-face-confirmation-frames"' not in page.text
-    assert '<a href="/cameras">вкладке «Камеры»</a>' in page.text
     assert '<video preload="metadata"' in page.text
     assert "<video controls" not in page.text
-    assert 'class="video-controls"' in page.text
+    assert 'class="player-bar"' in page.text
     assert 'class="video-seek"' in page.text
     assert 'document.querySelectorAll(".event-player")' in page.text
     assert 'data-camera-role="face"' in page.text
@@ -115,12 +117,14 @@ def test_summary_is_above_cameras_and_counts_all_events(
     page = client.get("/")
 
     assert page.status_code == 200
-    assert page.text.index("Автоматический сбор событий") < page.text.index("<h2>Камеры</h2>")
-    assert "<strong>2</strong><span class=\"muted\">всего проходов</span>" in page.text
-    assert "<strong>1</strong><span class=\"muted\">записано автоматически</span>" in page.text
-    assert "<strong>1</strong><span class=\"muted\">ждут разметки</span>" in page.text
-    assert "Известные коты: <strong>Барсик</strong>" in page.text
-    assert "Независимый CatDoorRecorder ещё не запущен." in page.text
+    # Счётчики стоят выше камер: первый вопрос к странице — сколько накопилось
+    # неразмеченного, а не как выглядит крыльцо прямо сейчас.
+    assert page.text.index("ждут разметки") < page.text.index("<h2>Камеры</h2>")
+    assert '<span class="tally-value">2</span>' in page.text
+    assert '<span class="tally-key">проходов</span>' in page.text
+    # Имена известных котов подсказываются в поле ввода, а не перечисляются
+    # отдельным абзацем.
+    assert '<option value="Барсик">' in page.text
 
 
 def test_known_cat_requires_name(runtime_path: Path, monkeypatch) -> None:
@@ -191,10 +195,10 @@ def test_page_shows_detector_probe_metrics(runtime_path: Path, monkeypatch) -> N
 
     assert page.status_code == 200
     assert page.text.count('class="rotate-camera"') == 2
-    assert "Кадры face/side:" in page.text
-    assert "OpenVINO: GPU.0" in page.text
-    assert "10/11" in page.text
-    assert "0.25/0.5" in page.text
+    # Показания детектора рисует строка состояния по данным API, а не сервер:
+    # раньше та же строка печаталась дважды — в разметке и поверх неё скриптом.
+    assert "Кадры face/side:" not in page.text
+    assert 'id="detector-readouts"' in page.text
 
     status = client.get("/api/recorder/status")
     assert status.status_code == 200
@@ -419,11 +423,11 @@ def test_metrics_page_shows_online_detection_and_evaluation_sections(
 
     assert page.status_code == 200
     assert "Последние 7 дней" in page.text
-    assert "Без предсказаний активной версии" in page.text
+    assert "Нет размеченных событий с online-предсказаниями" in page.text
     assert "Детекция по камерам" in page.text
     assert "Новая офлайн-оценка" in page.text
     assert 'option value="detector"' in page.text
-    assert "Сравнить два завершённых запуска" in page.text
+    assert "Сравнить два завершённых" in page.text
     assert client.get("/").text.count('href="/metrics"') == 1
 
 
@@ -681,7 +685,7 @@ def test_macbook_export_download(runtime_path: Path, monkeypatch) -> None:
 def test_start_local_training_is_detached(runtime_path: Path, monkeypatch) -> None:
     client = make_client(runtime_path, monkeypatch)
     page = client.get("/")
-    assert "Отчёт о процессе обучения" in page.text
+    assert 'id="training-report-state"' in page.text
     assert 'id="training-progress"' in page.text
     assert 'id="training-report-warnings"' in page.text
 

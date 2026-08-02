@@ -1,264 +1,202 @@
-<!doctype html>
-<html lang="ru">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>CatDoor — камеры</title>
-  <style>
-    :root { color-scheme: dark; font-family: system-ui, sans-serif; }
-    body { margin: 0; background: #111827; color: #e5e7eb; }
-    header, main { width: min(1100px, calc(100% - 32px)); margin: 24px auto; }
-    header { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
-    h1 { font-size: 22px; margin: 0; }
-    .panel { background: #1f2937; border: 1px solid #374151; border-radius: 14px; padding: 18px; margin-bottom: 20px; }
-    .camera { border-top: 1px solid #374151; padding-top: 16px; margin-top: 16px; }
-    .camera:first-of-type { border-top: 0; padding-top: 0; margin-top: 0; }
-    .camera-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
-    .camera-head h3 { margin: 0; font-size: 17px; }
-    .camera-body { display: grid; grid-template-columns: minmax(0, 320px) minmax(0, 1fr); gap: 18px; align-items: start; }
-    .stream { width: 100%; aspect-ratio: 16/9; object-fit: contain; background: #030712; border-radius: 9px; }
-    .no-stream { display: grid; place-items: center; width: 100%; aspect-ratio: 16/9; background: #030712; border-radius: 9px; color: #9ca3af; text-align: center; padding: 8px; }
-    .id { color: #6b7280; font-size: 12px; font-family: ui-monospace, monospace; }
-    .badge { padding: 4px 9px; border-radius: 999px; background: #1e3a8a; color: #bfdbfe; font-size: 12px; }
-    .badge.free { background: #374151; color: #d1d5db; }
-    .badge.off { background: #7f1d1d; color: #fecaca; }
-    .settings-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; }
-    .settings-grid label { display: grid; gap: 6px; font-size: 14px; }
-    .settings-grid label.wide { grid-column: 1 / -1; }
-    .controls { display: flex; gap: 10px; align-items: center; margin-top: 14px; flex-wrap: wrap; }
-    button, select, input { font: inherit; border-radius: 8px; border: 1px solid #4b5563; padding: 8px 11px; }
-    button { background: #2563eb; color: white; cursor: pointer; }
-    button.secondary { background: #374151; }
-    button.danger { background: #991b1b; }
-    button:disabled { opacity: .55; cursor: wait; }
-    select, input { background: #111827; color: #e5e7eb; }
-    input[type="checkbox"] { justify-self: start; width: 18px; height: 18px; }
-    .muted { color: #9ca3af; font-size: 14px; }
-    .error { color: #fca5a5; }
-    .found { width: 100%; border-collapse: collapse; margin-top: 14px; font-size: 14px; }
-    .found th, .found td { text-align: left; padding: 8px 10px; border-top: 1px solid #374151; vertical-align: top; }
-    .found th { color: #9ca3af; font-weight: 600; }
-    .found code { font-family: ui-monospace, monospace; }
-    .found-scroll { overflow-x: auto; }
-    a { color: #93c5fd; }
-    .setting-title { display: flex; align-items: center; gap: 6px; }
-    .setting-help {
-      position: relative; display: inline-grid; place-items: center; width: 18px; height: 18px;
-      flex: 0 0 18px; border: 1px solid #6b7280; border-radius: 50%; color: #bfdbfe;
-      font-size: 12px; font-weight: 700; line-height: 1; cursor: help;
-    }
-    .setting-help::after {
-      content: attr(data-tooltip); position: absolute; z-index: 20; left: 50%; bottom: calc(100% + 9px);
-      width: min(300px, 75vw); padding: 9px 11px; border: 1px solid #64748b; border-radius: 8px;
-      background: #020617; color: #e5e7eb; font-size: 13px; font-weight: 400; line-height: 1.35;
-      box-shadow: 0 8px 24px rgb(0 0 0 / .35); opacity: 0; pointer-events: none;
-      transform: translate(-50%, 4px); transition: opacity .12s, transform .12s;
-    }
-    .setting-help:hover::after, .setting-help:focus::after { opacity: 1; transform: translate(-50%, 0); }
-    .setting-help:focus { outline: 2px solid #60a5fa; outline-offset: 2px; }
-    @media (max-width: 760px) { .camera-body { grid-template-columns: 1fr; } }
-  </style>
-</head>
-<body>
-<header>
-  <h1>Камеры</h1>
-  <div><a href="/">К админке</a> · <a href="/metrics">Метрики</a></div>
-</header>
-<main>
-  <section class="panel">
+{% extends "_base.html" %}
+{% set page = "cameras" %}
+{% block title %}CatDoor — камеры{% endblock %}
+
+{% macro hint(label, text) -%}
+<span class="hint" tabindex="0" role="note" aria-label="Подсказка: {{ label }}"
+  data-tooltip="{{ text }}">?</span>
+{%- endmacro %}
+
+{% block content %}
+<section class="panel">
+  <div class="panel-head">
     <h2>Роли</h2>
-    <p class="muted">
-      Роли <code>face</code> и <code>side</code> живут отдельно от камер: на них
-      завязаны детектор, таблицы событий и модели идентификации. Перестановка
-      камер местами — это смена роли в карточке, а не правка адресов. Настройки
-      детекции остаются за ролью: они описывают сцену, а не железку.
-    </p>
-    <ul class="muted">
-      {% for role in roles %}
-        {% set assigned = cameras | selectattr("role", "equalto", role) | list %}
-        <li>
-          <strong>{{ role }}</strong> — {{ role_titles[role] }}:
-          {% if assigned %}
-            {{ assigned[0].display_title }}
-            {% if not assigned[0].configured %}<span class="error">(адрес не задан)</span>{% endif %}
-          {% else %}
-            <span class="error">камера не назначена</span>
-          {% endif %}
-        </li>
-      {% endfor %}
-    </ul>
-    {% if recorder_status and recorder_status.cameras %}
-      <p class="muted">
-        Recorder видит:
-        {% for role, state in recorder_status.cameras.items() %}
-          {{ role }} — {{ state.camera_id or "нет камеры" }}{{ ", адрес не задан" if not state.configured else "" }}{{ "; " if not loop.last }}
-        {% endfor %}
-      </p>
-    {% endif %}
-    <div class="controls">
+    <div class="controls" style="margin-left: auto">
       <button id="swap-roles" type="button">Поменять роли местами</button>
       <span id="swap-status" class="muted"></span>
     </div>
-  </section>
-
-  <section class="panel">
-    <h2>Список камер</h2>
-    <p class="muted">
-      Каждый открытый поток — отдельный процесс ffmpeg на сервере, поэтому
-      держите открытым только то, что смотрите. Камера остаётся в списке, даже
-      когда её не видно в сети: запись переживает и смену адреса, и отключение
-      питания.
-    </p>
-    {% if not cameras %}
-      <p class="error">Список пуст. Добавьте камеру формой ниже.</p>
-    {% endif %}
-    {% for camera in cameras %}
-      <article class="camera" data-camera-id="{{ camera.id }}">
-        <div class="camera-head">
-          <h3>{{ camera.display_title }}</h3>
-          <span class="id">{{ camera.id }}</span>
-          {% if camera.role %}
-            <span class="badge">роль {{ camera.role }}</span>
-          {% else %}
-            <span class="badge free">без роли</span>
-          {% endif %}
-          {% if not camera.enabled %}<span class="badge off">выключена</span>{% endif %}
-        </div>
-        <div class="camera-body">
-          <div>
-            {% if camera.configured and camera.enabled %}
-              <img class="stream" alt="Поток камеры {{ camera.display_title }}"
-                   src="/stream/{{ camera.id }}.mjpeg?v={{ stream_version }}">
+  </div>
+  <div class="panel-body">
+    <div class="tallies">
+      {% for role in roles %}
+        {% set assigned = cameras | selectattr("role", "equalto", role) | list %}
+        {% set state = recorder_status.cameras.get(role) if recorder_status and recorder_status.cameras else None %}
+        <div class="tally">
+          <span class="tally-value" style="font-size: 15px">{{ role }}</span>
+          <span class="tally-key">{{ role_titles[role] }}</span>
+          {# Название камеры по умолчанию совпадает с названием роли, и печатать
+             его второй раз бессмысленно — тогда полезнее идентификатор. #}
+          {% set assigned_name = assigned[0].display_title
+             if assigned and assigned[0].display_title != role_titles[role]
+             else (assigned[0].id if assigned else "") %}
+          <span class="{{ 'muted' if assigned and assigned[0].configured else 'bad' }}"
+            style="font-size: 13px">
+            {% if not assigned %}
+              камера не назначена
+            {% elif not assigned[0].configured %}
+              {{ assigned_name }} — адрес не задан
             {% else %}
-              <div class="no-stream">
-                {{ "Адрес не задан" if not camera.configured else "Камера выключена" }}
-              </div>
+              {{ assigned_name }}
             {% endif %}
-          </div>
-          <div>
-            <div class="settings-grid">
-              <label>Название
-                <input data-field="title" type="text" value="{{ camera.title }}">
-              </label>
-              <label>Адрес (IP или имя)
-                <input data-field="host" type="text" value="{{ camera.host }}">
-              </label>
-              <label>Порт
-                <input data-field="port" type="number" min="1" max="65535" value="{{ camera.port }}">
-              </label>
-              <label>Путь потока
-                <input data-field="stream_path" type="text" value="{{ camera.stream_path }}"
-                       placeholder="/Streaming/Channels/101">
-              </label>
-              <label>Логин
-                <input data-field="username" type="text" value="{{ camera.username }}"
-                       autocomplete="off">
-              </label>
-              <label>
-                <span class="setting-title">Пароль
-                  <span class="setting-help" tabindex="0" role="note"
-                    aria-label="Подсказка: пароль камеры"
-                    data-tooltip="Сохранённый пароль наружу не отдаётся. Пустое поле означает «оставить прежний»; чтобы отключить авторизацию, очистите логин.">?</span>
-                </span>
-                <input data-field="password" type="password" value="" autocomplete="new-password"
-                       placeholder="{{ "сохранён" if camera.has_password else "не задан" }}">
-              </label>
-              <label>
-                <span class="setting-title">MAC
-                  <span class="setting-help" tabindex="0" role="note"
-                    aria-label="Подсказка: MAC-адрес"
-                    data-tooltip="Постоянный признак камеры: IP выдаётся по DHCP и меняется при перевключении, MAC — нет. По нему камера опознаётся после перестановки.">?</span>
-                </span>
-                <input data-field="mac" type="text" value="{{ camera.mac }}"
-                       placeholder="aa:bb:cc:dd:ee:ff">
-              </label>
-              <label>Роль
-                <select data-field="role">
-                  <option value="" {{ "selected" if not camera.role }}>без роли</option>
-                  {% for role in roles %}
-                    <option value="{{ role }}" {{ "selected" if camera.role == role }}>
-                      {{ role }} — {{ role_titles[role] }}
-                    </option>
-                  {% endfor %}
-                </select>
-              </label>
-              <label>Поворот на 180°
-                <input data-field="rotate_180" type="checkbox" {{ "checked" if camera.rotate_180 }}>
-              </label>
-              <label>Включена
-                <input data-field="enabled" type="checkbox" {{ "checked" if camera.enabled }}>
-              </label>
-              <label class="wide">Заметка
-                <input data-field="note" type="text" value="{{ camera.note }}"
-                       placeholder="Где висит, чем питается">
-              </label>
-              <label class="wide">
-                <span class="setting-title">Вставить RTSP целиком
-                  <span class="setting-help" tabindex="0" role="note"
-                    aria-label="Подсказка: RTSP-адрес целиком"
-                    data-tooltip="Строка вида rtsp://логин:пароль@адрес:554/путь. При сохранении она разбирается на поля выше и перекрывает их.">?</span>
-                </span>
-                <input data-field="rtsp_url" type="text" value="" autocomplete="off"
-                       placeholder="rtsp://логин:пароль@192.168.1.101:554/Streaming/Channels/101">
-              </label>
-            </div>
-            <div class="controls">
-              <button class="save-camera" type="button">Сохранить</button>
-              <button class="test-camera secondary" type="button">Проверить поток</button>
-              <button class="delete-camera danger" type="button">Удалить</button>
-              <span class="camera-status muted"></span>
-            </div>
-          </div>
+          </span>
+          {% if state %}
+            <span class="faint data" style="font-size: 12px">
+              recorder: {{ state.camera_id or "нет камеры" }}{{ ", без адреса" if not state.configured }}
+            </span>
+          {% endif %}
         </div>
-      </article>
-    {% endfor %}
-  </section>
-
-  <section class="panel">
-    <h2>Поиск камер</h2>
-    <p class="muted">
-      Опрашиваются аренды DHCP, ARP-таблица, ONVIF и, если задана подсеть,
-      RTSP-порт каждого её адреса. Найденная камера опознаётся по MAC, поэтому
-      переставленная находится как уже заведённая, а не как новая. Ничего не
-      применяется само: кнопки ниже подставляют найденное в карточку, сохранять
-      всё равно вам.
+      {% endfor %}
+    </div>
+    <p class="muted" style="font-size: 13px">
+      Роли живут отдельно от камер: на них завязаны детектор, таблицы событий и
+      модели по ракурсам. Переставили камеры местами — смените роль, адреса
+      трогать не нужно. Настройки детекции остаются за ролью: они описывают
+      сцену, а не железку.
     </p>
-    <div class="settings-grid" id="discovery-form">
+  </div>
+</section>
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>Поиск камер</h2>
+    <span class="muted">аренды DHCP · ARP · ONVIF · обход подсети</span>
+  </div>
+  <div class="panel-body">
+    <div class="field-grid" id="discovery-form">
       <label>Логин камер
         <input data-field="username" type="text" autocomplete="off" placeholder="admin">
       </label>
       <label>
-        <span class="setting-title">Пароль камер
-          <span class="setting-help" tabindex="0" role="note"
-            aria-label="Подсказка: пароль для поиска"
-            data-tooltip="Нужен, чтобы подобрать рабочий путь потока. Для уже заведённой камеры при пустом поле берётся сохранённый пароль. Введённое здесь никуда не сохраняется.">?</span>
+        <span class="label-with-hint">Пароль камер
+          {{ hint("пароль для поиска", "Нужен, чтобы подобрать рабочий путь потока. Для уже заведённой камеры при пустом поле берётся сохранённый пароль. Введённое здесь никуда не сохраняется.") }}
         </span>
         <input data-field="password" type="password" autocomplete="new-password">
       </label>
       <label>
-        <span class="setting-title">Подсеть камер
-          <span class="setting-help" tabindex="0" role="note"
-            aria-label="Подсказка: подсеть для обхода"
-            data-tooltip="Например 192.168.1.0/24. Без неё поиск ограничен арендами, ARP и ONVIF: обходить сеть, через которую вы пришли на сервер, он не станет.">?</span>
+        <span class="label-with-hint">Подсеть камер
+          {{ hint("подсеть для обхода", "Например 192.168.1.0/24. Без неё поиск ограничен арендами, ARP и ONVIF: обходить сеть, через которую вы пришли на сервер, он не станет.") }}
         </span>
         <input data-field="subnet" type="text" value="{{ discovery_subnet }}"
-               placeholder="192.168.1.0/24">
+          placeholder="192.168.1.0/24">
       </label>
     </div>
     <div class="controls">
-      <button id="discover" type="button">Найти камеры</button>
+      <button id="discover" class="primary" type="button">Найти камеры</button>
       <span id="discovery-status" class="muted"></span>
     </div>
     <div id="discovery-results"></div>
-  </section>
+  </div>
+</section>
 
-  <section class="panel">
+<section class="panel">
+  <div class="panel-head">
+    <h2>Камеры</h2>
+    <span class="muted">{{ cameras | length }} в списке</span>
+  </div>
+  {% if not cameras %}
+    <div class="panel-body">
+      <p class="notice notice-bad">Список пуст. Добавьте камеру формой ниже или найдите поиском.</p>
+    </div>
+  {% endif %}
+  {% for camera in cameras %}
+    <article class="pass" data-camera-id="{{ camera.id }}">
+      <div class="pass-media">
+        {% if camera.configured and camera.enabled %}
+          <img class="viewport" alt="Живое изображение камеры {{ camera.display_title }}"
+            src="/stream/{{ camera.id }}.mjpeg?v={{ stream_version }}">
+        {% else %}
+          <div class="viewport viewport-empty">
+            {{ "Адрес не задан" if not camera.configured else "Камера выключена" }}
+          </div>
+        {% endif %}
+        <div class="viewport-caption">
+          <strong>{{ camera.display_title }}</strong>
+          <span class="faint data">{{ camera.id }}</span>
+          {% if camera.role %}
+            <span class="chip chip-signal">роль {{ camera.role }}</span>
+          {% else %}
+            <span class="chip">без роли</span>
+          {% endif %}
+          {% if not camera.enabled %}<span class="chip chip-bad">выключена</span>{% endif %}
+        </div>
+      </div>
+      <div class="pass-body">
+        <div class="field-grid">
+          <label>Название
+            <input data-field="title" type="text" value="{{ camera.title }}">
+          </label>
+          <label>Адрес (IP или имя)
+            <input data-field="host" type="text" value="{{ camera.host }}">
+          </label>
+          <label>Порт
+            <input data-field="port" type="number" min="1" max="65535" value="{{ camera.port }}">
+          </label>
+          <label>Путь потока
+            <input data-field="stream_path" type="text" value="{{ camera.stream_path }}"
+              placeholder="/Streaming/Channels/101">
+          </label>
+          <label>Логин
+            <input data-field="username" type="text" value="{{ camera.username }}" autocomplete="off">
+          </label>
+          <label>
+            <span class="label-with-hint">Пароль
+              {{ hint("пароль камеры", "Сохранённый пароль наружу не отдаётся. Пустое поле означает «оставить прежний»; чтобы отключить авторизацию, очистите логин.") }}
+            </span>
+            <input data-field="password" type="password" value="" autocomplete="new-password"
+              placeholder="{{ "сохранён" if camera.has_password else "не задан" }}">
+          </label>
+          <label>
+            <span class="label-with-hint">MAC
+              {{ hint("MAC-адрес", "Постоянный признак камеры: IP выдаётся по DHCP и меняется при перевключении, MAC — нет. По нему камера опознаётся после перестановки, и по нему же recorder сам чинит адрес после обрыва питания.") }}
+            </span>
+            <input data-field="mac" type="text" value="{{ camera.mac }}" placeholder="aa:bb:cc:dd:ee:ff">
+          </label>
+          <label>Роль
+            <select data-field="role">
+              <option value="" {{ "selected" if not camera.role }}>без роли</option>
+              {% for role in roles %}
+                <option value="{{ role }}" {{ "selected" if camera.role == role }}>
+                  {{ role }} — {{ role_titles[role] }}
+                </option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>Поворот на 180°
+            <input data-field="rotate_180" type="checkbox" {{ "checked" if camera.rotate_180 }}>
+          </label>
+          <label>Участвует в работе
+            <input data-field="enabled" type="checkbox" {{ "checked" if camera.enabled }}>
+          </label>
+          <label class="wide">Заметка
+            <input data-field="note" type="text" value="{{ camera.note }}"
+              placeholder="Где висит, чем питается">
+          </label>
+          <label class="wide">
+            <span class="label-with-hint">Вставить RTSP целиком
+              {{ hint("RTSP-адрес целиком", "Строка вида rtsp://логин:пароль@адрес:554/путь. При сохранении она разбирается на поля выше и перекрывает их.") }}
+            </span>
+            <input data-field="rtsp_url" type="text" value="" autocomplete="off"
+              placeholder="rtsp://логин:пароль@192.168.1.101:554/Streaming/Channels/101">
+          </label>
+        </div>
+        <div class="pass-actions">
+          <button class="save-camera primary" type="button">Сохранить</button>
+          <button class="test-camera" type="button">Проверить поток</button>
+          <span class="camera-status muted" style="font-size: 13px"></span>
+          <button class="delete-camera danger" type="button" style="margin-left: auto">Удалить</button>
+        </div>
+      </div>
+    </article>
+  {% endfor %}
+</section>
+
+<section class="panel">
+  <div class="panel-head">
     <h2>Добавить камеру</h2>
-    <p class="muted">
-      Идентификатор попадает в адрес потока. Если оставить его пустым, он будет
-      собран из названия.
-    </p>
-    <div class="settings-grid" id="new-camera">
+    <span class="muted">идентификатор попадает в адрес потока; пустой — соберётся из названия</span>
+  </div>
+  <div class="panel-body">
+    <div class="field-grid" id="new-camera">
       <label>Идентификатор
         <input data-field="id" type="text" placeholder="hiwatch-2">
       </label>
@@ -296,84 +234,74 @@
       </label>
       <label class="wide">RTSP-адрес целиком
         <input data-field="rtsp_url" type="text" autocomplete="off"
-               placeholder="rtsp://логин:пароль@192.168.1.101:554/Streaming/Channels/101">
+          placeholder="rtsp://логин:пароль@192.168.1.101:554/Streaming/Channels/101">
       </label>
     </div>
     <div class="controls">
-      <button id="add-camera" type="button">Добавить</button>
+      <button id="add-camera" class="primary" type="button">Добавить</button>
       <span id="add-status" class="muted"></span>
     </div>
-  </section>
+  </div>
+</section>
 
-  <section class="panel">
+<section class="panel">
+  <div class="panel-head">
     <h2>Настройки детекции</h2>
-    <p class="muted">
-      Настройки принадлежат роли, а не камере: при перестановке они продолжают
-      описывать ту же сцену. Recorder применяет их на ходу, когда автомат
-      событий находится в состоянии ожидания.
-    </p>
+    <span class="muted">принадлежат роли, а не камере</span>
+    <div class="controls" style="margin-left: auto">
+      <button id="save-detection-settings" class="primary" type="button">Сохранить</button>
+      <span id="detection-settings-status" class="muted"></span>
+    </div>
+  </div>
+  <div class="panel-body">
     {% for role in roles %}
     {% set camera_config = detection_config[role] %}
     {% set assigned = cameras | selectattr("role", "equalto", role) | list %}
-    <h3>{{ role }} — {{ role_titles[role] }}
-      <span class="muted">{{ assigned[0].display_title if assigned else "камера не назначена" }}</span>
+    <h3>
+      {{ role }} — {{ role_titles[role] }}
+      <span class="muted" style="font-weight: 400">
+        {{ assigned[0].display_title if assigned else "камера не назначена" }}
+      </span>
     </h3>
-    <div class="settings-grid">
+    <div class="field-grid">
       <label>
-        <span class="setting-title">Рабочий confidence
-          <span class="setting-help" tabindex="0" role="note"
-            aria-label="Подсказка: рабочий confidence"
-            data-tooltip="Минимальная уверенность модели, при которой кадр считается обнаружением кота. Ниже — детекция быстрее и чаще, но больше ложных срабатываний. Выше — строже, но кот может быть пропущен.">?</span>
+        <span class="label-with-hint">Рабочий confidence
+          {{ hint("рабочий confidence", "Минимальная уверенность модели, при которой кадр считается обнаружением кота. Ниже — детекция быстрее и чаще, но больше ложных срабатываний. Выше — строже, но кот может быть пропущен.") }}
         </span>
-        <input id="detection-{{ role }}-confidence-threshold"
-          type="number" min="0" max="1" step="0.01"
+        <input id="detection-{{ role }}-confidence-threshold" type="number" min="0" max="1" step="0.01"
           value="{{ camera_config.confidence_threshold }}">
       </label>
       <label>
-        <span class="setting-title">Минимум для рамки
-          <span class="setting-help" tabindex="0" role="note"
-            aria-label="Подсказка: минимум для рамки"
-            data-tooltip="Минимальная уверенность для показа цветной рамки на превью. На запуск события не влияет. Ниже — видно больше слабых гипотез модели, выше — только уверенные рамки.">?</span>
+        <span class="label-with-hint">Минимум для рамки
+          {{ hint("минимум для рамки", "Минимальная уверенность для показа цветной рамки на превью. На запуск события не влияет. Ниже — видно больше слабых гипотез модели, выше — только уверенные рамки.") }}
         </span>
-        <input id="detection-{{ role }}-box-min-confidence"
-          type="number" min="0" max="1" step="0.01"
+        <input id="detection-{{ role }}-box-min-confidence" type="number" min="0" max="1" step="0.01"
           value="{{ camera_config.box_min_confidence }}">
       </label>
       <label>
-        <span class="setting-title">Подтверждений
-          <span class="setting-help" tabindex="0" role="note"
-            aria-label="Подсказка: число подтверждений"
-            data-tooltip="Сколько кадров в окне должны превысить рабочий confidence. Меньше — реакция быстрее, но чувствительнее к одиночным ошибкам. Больше — стабильнее, но детекция начинается позже.">?</span>
+        <span class="label-with-hint">Подтверждений
+          {{ hint("число подтверждений", "Сколько кадров в окне должны превысить рабочий confidence. Меньше — реакция быстрее, но чувствительнее к одиночным ошибкам. Больше — стабильнее, но детекция начинается позже.") }}
         </span>
-        <input id="detection-{{ role }}-confirmation-frames"
-          type="number" min="1" max="20"
+        <input id="detection-{{ role }}-confirmation-frames" type="number" min="1" max="20"
           value="{{ camera_config.confirmation_frames }}">
       </label>
       <label>
-        <span class="setting-title">Размер окна кадров
-          <span class="setting-help" tabindex="0" role="note"
-            aria-label="Подсказка: размер окна кадров"
-            data-tooltip="Число последних обработанных кадров, среди которых ищутся подтверждения. Большее окно допускает паузы между удачными кадрами, но дольше помнит старые обнаружения. Окно не должно быть меньше числа подтверждений.">?</span>
+        <span class="label-with-hint">Размер окна кадров
+          {{ hint("размер окна кадров", "Число последних обработанных кадров, среди которых ищутся подтверждения. Большее окно допускает паузы между удачными кадрами, но дольше помнит старые обнаружения. Окно не должно быть меньше числа подтверждений.") }}
         </span>
-        <input id="detection-{{ role }}-window-frames"
-          type="number" min="1" max="30"
+        <input id="detection-{{ role }}-window-frames" type="number" min="1" max="30"
           value="{{ camera_config.window_frames }}">
       </label>
       <label>
-        <span class="setting-title">Кадров детектора в секунду
-          <span class="setting-help" tabindex="0" role="note"
-            aria-label="Подсказка: частота детектора"
-            data-tooltip="Сколько кадров этой камеры анализировать каждую секунду. Больше — выше шанс поймать быстро проходящего кота, но выше нагрузка на процессор. Камере идентификации обычно полезны 6–8 FPS, камере подхода достаточно 3 FPS.">?</span>
+        <span class="label-with-hint">Кадров в секунду
+          {{ hint("частота детектора", "Сколько кадров этой камеры анализировать каждую секунду. Больше — выше шанс поймать быстро проходящего кота, но выше нагрузка на процессор. Камере идентификации обычно полезны 6–8 FPS, камере подхода достаточно 3 FPS.") }}
         </span>
-        <input id="detection-{{ role }}-sample-fps"
-          type="number" min="0.1" max="10" step="0.1"
+        <input id="detection-{{ role }}-sample-fps" type="number" min="0.1" max="10" step="0.1"
           value="{{ camera_config.sample_fps }}">
       </label>
       <label>
-        <span class="setting-title">Использовать ROI
-          <span class="setting-help" tabindex="0" role="note"
-            aria-label="Подсказка: область интереса"
-            data-tooltip="ROI обрезает для детектора только полезную часть кадра до масштабирования, поэтому кот становится крупнее. Превью и записи остаются полнокадровыми. Координаты задаются долями от 0 до 1.">?</span>
+        <span class="label-with-hint">Использовать ROI
+          {{ hint("область интереса", "ROI обрезает для детектора только полезную часть кадра до масштабирования, поэтому кот становится крупнее. Превью и записи остаются полнокадровыми. Координаты задаются долями от 0 до 1.") }}
         </span>
         <input id="detection-{{ role }}-roi-enabled" type="checkbox"
           {{ "checked" if camera_config.roi else "" }}>
@@ -388,62 +316,55 @@
           value="{{ roi.y if roi else 0 }}">
       </label>
       <label>ROI ширина
-        <input id="detection-{{ role }}-roi-width"
-          type="number" min="0.01" max="1" step="0.01"
+        <input id="detection-{{ role }}-roi-width" type="number" min="0.01" max="1" step="0.01"
           value="{{ roi.width if roi else 1 }}">
       </label>
       <label>ROI высота
-        <input id="detection-{{ role }}-roi-height"
-          type="number" min="0.01" max="1" step="0.01"
+        <input id="detection-{{ role }}-roi-height" type="number" min="0.01" max="1" step="0.01"
           value="{{ roi.height if roi else 1 }}">
       </label>
     </div>
     {% endfor %}
     <h3>Общие тайминги события</h3>
-    <div class="settings-grid">
+    <div class="field-grid">
       <label>
-        <span class="setting-title">Таймаут кандидата, сек.
-          <span class="setting-help" tabindex="0" role="note"
-            aria-label="Подсказка: таймаут кандидата"
-            data-tooltip="Сколько времени после первого возможного обнаружения система ждёт остальные подтверждения. Больше — легче поймать быстро исчезающего или плохо видимого кота. Меньше — быстрее сбрасываются случайные гипотезы.">?</span>
+        <span class="label-with-hint">Таймаут кандидата, сек.
+          {{ hint("таймаут кандидата", "Сколько времени после первого возможного обнаружения система ждёт остальные подтверждения. Больше — легче поймать быстро исчезающего или плохо видимого кота. Меньше — быстрее сбрасываются случайные гипотезы.") }}
         </span>
         <input id="detection-candidate-timeout" type="number" min="0.1" max="30" step="0.1"
           value="{{ detection_config.candidate_timeout_seconds }}">
       </label>
       <label>
-        <span class="setting-title">До потери кота, сек.
-          <span class="setting-help" tabindex="0" role="note"
-            aria-label="Подсказка: время до потери кота"
-            data-tooltip="Сколько секунд без подтверждённого кота ждать перед завершением активной части события. Больше — терпимее к кратким пропаданиям из кадра, но запись получается длиннее.">?</span>
+        <span class="label-with-hint">До потери кота, сек.
+          {{ hint("время до потери кота", "Сколько секунд без подтверждённого кота ждать перед завершением активной части события. Больше — терпимее к кратким пропаданиям из кадра, но запись получается длиннее.") }}
         </span>
         <input id="detection-absence-seconds" type="number" min="0.1" max="60" step="0.1"
           value="{{ detection_config.absence_seconds }}">
       </label>
       <label>
-        <span class="setting-title">Хвост события, сек.
-          <span class="setting-help" tabindex="0" role="note"
-            aria-label="Подсказка: хвост события"
-            data-tooltip="Сколько видео сохранить после того, как отсутствие кота подтверждено. Большее значение лучше захватывает уход кота, но увеличивает длительность и размер записи.">?</span>
+        <span class="label-with-hint">Хвост события, сек.
+          {{ hint("хвост события", "Сколько видео сохранить после того, как отсутствие кота подтверждено. Большее значение лучше захватывает уход кота, но увеличивает длительность и размер записи.") }}
         </span>
         <input id="detection-tail-seconds" type="number" min="0" max="60" step="0.1"
           value="{{ detection_config.tail_seconds }}">
       </label>
       <label>
-        <span class="setting-title">Пауза после события, сек.
-          <span class="setting-help" tabindex="0" role="note"
-            aria-label="Подсказка: пауза после события"
-            data-tooltip="Период после завершения события, когда новые детекции не создают следующую запись. Больше — меньше дубликатов одного прохода, но можно пропустить следующий близкий проход.">?</span>
+        <span class="label-with-hint">Пауза после события, сек.
+          {{ hint("пауза после события", "Период после завершения события, когда новые детекции не создают следующую запись. Больше — меньше дубликатов одного прохода, но можно пропустить следующий близкий проход.") }}
         </span>
         <input id="detection-cooldown-seconds" type="number" min="0" max="300" step="0.1"
           value="{{ detection_config.cooldown_seconds }}">
       </label>
     </div>
-    <div class="controls">
-      <button id="save-detection-settings" type="button">Сохранить настройки детекции</button>
-      <span id="detection-settings-status" class="muted"></span>
-    </div>
-  </section>
-</main>
+    <p class="muted" style="font-size: 13px">
+      Recorder применяет настройки на ходу, когда автомат событий находится
+      в состоянии ожидания.
+    </p>
+  </div>
+</section>
+{% endblock %}
+
+{% block scripts %}
 <script>
   const roles = {{ roles | tojson }};
 
@@ -484,18 +405,18 @@
   async function withButton(button, status, action, successText) {
     button.disabled = true;
     status.textContent = "…";
-    status.classList.remove("error");
+    status.classList.remove("bad");
     try {
       status.textContent = (await action()) || successText;
     } catch (error) {
-      status.textContent = `Ошибка: ${error.message}`;
-      status.classList.add("error");
+      status.textContent = error.message;
+      status.classList.add("bad");
     } finally {
       button.disabled = false;
     }
   }
 
-  document.querySelectorAll(".camera").forEach(card => {
+  document.querySelectorAll("[data-camera-id]").forEach(card => {
     const cameraId = card.dataset.cameraId;
     const status = card.querySelector(".camera-status");
 
@@ -547,7 +468,7 @@
 
   function applyDiscovered(device) {
     const target = device.matched_camera_id
-      ? document.querySelector(`.camera[data-camera-id="${device.matched_camera_id}"]`)
+      ? document.querySelector(`[data-camera-id="${device.matched_camera_id}"]`)
       : document.querySelector("#new-camera");
     if (!target) return;
     setField(target, "host", device.host);
@@ -560,8 +481,7 @@
       setField(target, "password", document.querySelector(
         '#discovery-form [data-field="password"]').value);
     }
-    const status = target.closest("section, article").querySelector(
-      ".camera-status, #add-status");
+    const status = target.closest("section, article").querySelector(".camera-status, #add-status");
     if (status) status.textContent = "Подставлено — проверьте поля и сохраните";
     target.scrollIntoView({behavior: "smooth", block: "center"});
   }
@@ -592,7 +512,6 @@
       return;
     }
     const table = document.createElement("table");
-    table.className = "found";
     const head = document.createElement("tr");
     for (const title of ["Адрес", "MAC", "Имя", "Найдено через", "Состояние", ""]) {
       const th = document.createElement("th");
@@ -602,15 +521,14 @@
     table.append(head);
     for (const device of devices) {
       const row = document.createElement("tr");
-      cell(row, device.host);
-      cell(row, device.mac || "—");
+      cell(row, device.host, "number");
+      cell(row, device.mac || "—", "number");
       cell(row, device.name || "—");
-      cell(row, device.sources.join(", "));
+      cell(row, device.sources.join(", "), "muted");
       cell(row, describeDevice(device), device.stream_path ? "" : "muted");
       const actions = cell(row, "");
       const button = document.createElement("button");
       button.type = "button";
-      button.className = device.matched_camera_id ? "" : "secondary";
       button.textContent = device.matched_camera_id
         ? `${device.moved ? "Новый адрес" : "Подставить"} → ${device.matched_camera_title}`
         : "Добавить как новую";
@@ -619,7 +537,7 @@
       table.append(row);
     }
     const scroll = document.createElement("div");
-    scroll.className = "found-scroll";
+    scroll.className = "table-scroll";
     scroll.append(table);
     container.append(scroll);
   }
@@ -636,8 +554,7 @@
     }, "Поиск завершён");
   });
 
-  document.querySelector("#save-detection-settings").addEventListener("click", async event => {
-    const button = event.currentTarget;
+  document.querySelector("#save-detection-settings").addEventListener("click", event => {
     const status = document.querySelector("#detection-settings-status");
     const number = id => Number(document.querySelector(id).value);
     const cameraSettings = role => {
@@ -663,22 +580,10 @@
       cooldown_seconds: number("#detection-cooldown-seconds")
     };
     for (const role of roles) payload[role] = cameraSettings(role);
-    button.disabled = true;
-    try {
-      const response = await fetch("/api/detection/settings", {
-        method: "PUT",
-        headers: {"Content-Type": "application/json"},
-        body: JSON.stringify(payload)
-      });
-      const result = await response.json();
-      if (!response.ok) throw new Error(result.detail || "ошибка проверки");
-      status.textContent = "Сохранено — recorder применит настройки в состоянии idle";
-    } catch (error) {
-      status.textContent = `Ошибка: ${error.message}`;
-    } finally {
-      button.disabled = false;
-    }
+    withButton(event.currentTarget, status, async () => {
+      await send("PUT", "/api/detection/settings", payload);
+      return "Сохранено — recorder применит в состоянии ожидания";
+    }, "Сохранено");
   });
 </script>
-</body>
-</html>
+{% endblock %}

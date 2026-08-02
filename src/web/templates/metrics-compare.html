@@ -1,27 +1,13 @@
-<!doctype html>
-<html lang="ru">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Сравнение моделей — CatDoor AI</title>
-  <style>
-    :root { color-scheme: dark; font-family: system-ui, sans-serif; }
-    body { margin: 0; background: #111827; color: #e5e7eb; }
-    header, main { width: min(900px, calc(100% - 32px)); margin: 24px auto; }
-    a { color: #93c5fd; }
-    .panel { background: #1f2937; border: 1px solid #374151; border-radius: 14px; padding: 18px; margin-bottom: 20px; }
-    select, button { font: inherit; border-radius: 8px; border: 1px solid #4b5563; padding: 9px 12px; background: #111827; color: #e5e7eb; }
-    button { background: #2563eb; cursor: pointer; }
-    table { width: 100%; border-collapse: collapse; }
-    th, td { padding: 10px; border-bottom: 1px solid #374151; text-align: left; }
-    .good { color: #86efac; }
-    .bad { color: #fca5a5; }
-  </style>
-</head>
-<body>
-<header><h1>Сравнение запусков</h1><a href="/metrics">← Все метрики</a></header>
-<main>
-  <section class="panel">
+{% extends "_base.html" %}
+{% set page = "metrics" %}
+{% block title %}CatDoor — Сравнение запусков{% endblock %}
+
+{% block content %}
+<div class="row">
+  <h1>Сравнение запусков</h1>
+  <a href="/metrics" style="margin-left: auto">Все метрики</a>
+</div>
+  <section class="panel padded">
     <form method="get">
       <label>Базовый:
         <select name="left" required>
@@ -39,7 +25,7 @@
     </form>
   </section>
   {% if selected[0] and selected[1] %}
-    <section class="panel">
+    <section class="panel padded">
       {% if comparison_kind == "detector" %}
         <p>Сравниваются miss rate, false trigger rate и latency на чистых событиях.</p>
       {% elif comparison_kind == "identity" %}
@@ -62,6 +48,4 @@
       </table>
     </section>
   {% endif %}
-</main>
-</body>
-</html>
+{% endblock %}

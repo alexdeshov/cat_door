@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator, Generator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 from pathlib import Path
 from typing import Annotated, Literal
 from uuid import uuid4
@@ -14,6 +15,7 @@ from uuid import uuid4
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import func, select
@@ -77,6 +79,18 @@ HEARTBEAT_STALE_AFTER = timedelta(minutes=10)
 DISCOVERY_PROBE_LIMIT = 16
 DISCOVERY_PROBE_SECONDS = 6.0
 INTERRUPTED_MESSAGE = "Прерван без завершения: heartbeat не обновлялся более 10 минут"
+
+
+def _asset_version(path: Path) -> str:
+    """Короткая контрольная сумма файла стилей для адреса.
+
+    Время изменения не годится: `git pull` на сервере переписывает файл, но
+    может сохранить прежнюю метку, и браузер оставит старые стили.
+    """
+    try:
+        return sha256(path.read_bytes()).hexdigest()[:12]
+    except OSError:
+        return "dev"
 
 
 def _read_status(path: Path) -> dict[str, object] | None:
@@ -351,12 +365,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     factory = create_session_factory(settings.resolved_database_path)
     templates = Jinja2Templates(directory=Path(__file__).parent / "templates")
+    # Общая таблица стилей вместо инлайнового блока в каждом шаблоне: правка
+    # темы или отступа не должна означать четыре одинаковые правки. Версия в
+    # адресе — контрольная сумма файла, поэтому после обновления служб браузер
+    # не показывает вчерашние стили и при этом кэширует их между заходами.
+    static_dir = Path(__file__).parent / "static"
+    asset_version = _asset_version(static_dir / "app.css")
     registry_path = camera_registry_path(settings.data_dir)
     ensure_registry(registry_path, settings)
 
     app = FastAPI(title="CatDoor AI", version="0.1.0", lifespan=_notify_systemd)
+    app.mount("/static", StaticFiles(directory=static_dir), name="static")
     app.state.settings = settings
     app.state.session_factory = factory
+    templates.env.globals["asset_version"] = asset_version
 
     def current_detection_config() -> DetectionConfig:
         return load_detection_config(
