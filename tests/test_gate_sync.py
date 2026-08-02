@@ -48,6 +48,11 @@ def test_nothing_is_done_when_the_state_already_matches(
     """Примиритель срабатывает на каждое изменение файла, в том числе чужое."""
     actions: list[tuple[str, bool]] = []
     monkeypatch.setattr("src.common.gate_sync.gate_status", lambda unit: GateStatus("running"))
+    # Проверка контейнера мокается обязательно: без мока тест зовёт настоящий
+    # Docker и на узле с остановленным контейнером Frigate честно его
+    # «перезапускает». Ровно так тест и упал на сервере, пройдя на маке,
+    # где Docker просто нет.
+    monkeypatch.setattr("src.common.gate_sync._container_running", lambda name: True)
     monkeypatch.setattr(
         "src.common.gate_sync.set_gate_running",
         lambda unit, running: actions.append((unit, running)) or None,
