@@ -5,6 +5,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
+from src.common.camera_discovery import DiscoveredDevice
 from src.common.camera_registry import camera_registry_path, load_registry
 from src.common.database import EvaluationRun, Event, create_session_factory
 from src.common.settings import Settings
@@ -1015,3 +1016,118 @@ def test_stream_probe_reports_the_reason(runtime_path: Path, monkeypatch) -> Non
     assert response.status_code == 200
     assert response.json() == {"ok": False, "reason": "401 Unauthorized"}
     assert client.post("/api/cameras/side/test").status_code == 422
+
+
+def test_discovery_recognises_a_moved_camera_by_mac(runtime_path: Path, monkeypatch) -> None:
+    """Переставленная камера должна узнаваться, а не заводиться заново."""
+    client = make_client(runtime_path, monkeypatch)
+    client.put("/api/cameras/face", json={"mac": "44:47:cc:11:22:33"})
+    monkeypatch.setattr(
+        "src.web.app.discover_devices",
+        lambda **options: [
+            DiscoveredDevice(
+                host="192.168.1.131",
+                mac="44:47:cc:11:22:33",
+                name="HiWatch",
+                sources=("dhcp", "onvif"),
+            ),
+            DiscoveredDevice(host="192.168.1.140", sources=("scan",)),
+        ],
+    )
+    monkeypatch.setattr("src.web.app.port_is_open", lambda host, port, **options: True)
+    monkeypatch.setattr(
+        "src.web.app.probe_stream",
+        lambda ffmpeg_path, url, **options: (
+            None if url.endswith("/media/video1") else "404 Not Found"
+        ),
+    )
+
+    response = client.post("/api/cameras/discover", json={"password": "secret"})
+
+    assert response.status_code == 200
+    found = {device["host"]: device for device in response.json()["devices"]}
+    moved = found["192.168.1.131"]
+    assert moved["matched_camera_id"] == "face"
+    assert moved["moved"] is True
+    assert moved["stream_path"] == "/media/video1"
+    assert moved["sources"] == ["dhcp", "onvif"]
+    assert found["192.168.1.140"]["matched_camera_id"] is None
+    assert "secret" not in response.text
+
+
+def test_discovery_reports_a_wrong_password_instead_of_a_silent_miss(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    client = make_client(runtime_path, monkeypatch)
+    monkeypatch.setattr(
+        "src.web.app.discover_devices",
+        lambda **options: [DiscoveredDevice(host="192.168.1.131", sources=("scan",))],
+    )
+    monkeypatch.setattr("src.web.app.port_is_open", lambda host, port, **options: True)
+    monkeypatch.setattr(
+        "src.web.app.probe_stream",
+        lambda ffmpeg_path, url, **options: "401 Unauthorized",
+    )
+
+    device = client.post("/api/cameras/discover", json={}).json()["devices"][0]
+
+    assert device["needs_credentials"] is True
+    assert device["reason"] == "401 Unauthorized"
+    assert device["stream_path"] == ""
+
+
+def test_discovery_does_not_probe_devices_without_an_rtsp_port(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    """В сети камер живёт и сам сервер, и коммутатор — их незачем опрашивать."""
+    probed: list[str] = []
+    client = make_client(runtime_path, monkeypatch)
+    monkeypatch.setattr(
+        "src.web.app.discover_devices",
+        lambda **options: [DiscoveredDevice(host="192.168.1.1", sources=("arp",))],
+    )
+    monkeypatch.setattr("src.web.app.port_is_open", lambda host, port, **options: False)
+    monkeypatch.setattr(
+        "src.web.app.probe_stream",
+        lambda ffmpeg_path, url, **options: probed.append(url),
+    )
+
+    device = client.post("/api/cameras/discover", json={}).json()["devices"][0]
+
+    assert device["rtsp_open"] is False
+    assert probed == []
+
+
+def test_found_camera_is_applied_through_the_ordinary_edit(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    """Обнаружение только предлагает: адрес записывает обычное сохранение."""
+    client = make_client(runtime_path, monkeypatch)
+
+    client.put(
+        "/api/cameras/face",
+        json={
+            "host": "192.168.1.131",
+            "stream_path": "/media/video1",
+            "mac": "44:47:cc:11:22:33",
+        },
+    )
+
+    camera = load_registry(camera_registry_path(runtime_path)).get("face")
+    assert camera.host == "192.168.1.131"
+    assert camera.mac == "44:47:cc:11:22:33"
+    assert camera.password == "password"
+
+
+def test_discovery_form_is_on_the_camera_tab(runtime_path: Path, monkeypatch) -> None:
+    client = make_client(runtime_path, monkeypatch)
+
+    page = client.get("/cameras")
+
+    assert 'id="discover"' in page.text
+    assert 'id="discovery-form"' in page.text
+    assert '[data-field="password"]' in page.text
+    assert "Добавить как новую" in page.text

@@ -53,6 +53,13 @@ class Settings(BaseSettings):
     camera_face_rotate_180: bool = True
     camera_side_rotate_180: bool = True
     cameras: list[CameraConfig] = Field(default_factory=list)
+    # Источники поиска камер. Файл аренд и ARP-таблица читаются как есть;
+    # подсеть задаётся отдельно, потому что обход по портам должен идти по сети
+    # камер, а не по той, через которую администратор пришёл на сервер.
+    camera_dhcp_leases_path: Path = Path("/var/lib/misc/dnsmasq.leases")
+    camera_arp_table_path: Path = Path("/proc/net/arp")
+    camera_discovery_subnet: str = ""
+    camera_discovery_timeout_seconds: float = Field(default=3.0, gt=0.0, le=15.0)
     data_dir: Path = Path("data")
     database_path: Path | None = None
     ffmpeg_path: str = "ffmpeg"
