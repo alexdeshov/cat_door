@@ -1,126 +1,134 @@
-<!doctype html>
-<html lang="ru">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Метрики — CatDoor AI</title>
-  <style>
-    :root { color-scheme: dark; font-family: system-ui, sans-serif; }
-    body { margin: 0; background: #111827; color: #e5e7eb; }
-    header, main { width: min(1100px, calc(100% - 32px)); margin: 24px auto; }
-    header { display: flex; justify-content: space-between; gap: 16px; align-items: center; }
-    a { color: #93c5fd; }
-    .panel { background: #1f2937; border: 1px solid #374151; border-radius: 14px; padding: 18px; margin-bottom: 20px; }
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
-    .card { padding: 14px; border-radius: 10px; background: #111827; border: 1px solid #374151; }
-    .card strong { display: block; font-size: 1.55rem; }
-    .muted { color: #9ca3af; }
-    .warning { color: #fde68a; }
-    .error { color: #fca5a5; }
-    table { width: 100%; border-collapse: collapse; }
-    th, td { padding: 9px; border-bottom: 1px solid #374151; text-align: left; }
-    input, select, button { font: inherit; border-radius: 8px; border: 1px solid #4b5563; padding: 9px 12px; }
-    input, select { background: #111827; color: #e5e7eb; }
-    button { background: #2563eb; color: white; cursor: pointer; }
-    .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 10px; }
-  </style>
-</head>
-<body>
-<header>
-  <h1>Метрики моделей</h1>
-  <a href="/">← Камеры и события</a>
-</header>
-<main>
-  {% for key, title in [("7_days", "Последние 7 дней"), ("30_days", "Последние 30 дней")] %}
-    {% set window = online.windows[key] %}
-    {% set metrics = window.metrics %}
-    <section class="panel">
-      <h2>{{ title }}</h2>
-      {% if metrics %}
-        <div class="grid">
-          <div class="card">
-            <strong>{{ window.coverage.with_active_model_predictions }} / {{ window.labelled_identity_events }}</strong>
-            <span>
-              покрытие активной версии · без предсказаний:
-              {{ window.coverage.without_active_model_predictions }}
-            </span>
-          </div>
-          <div class="card">
-            <strong>{{ "%.2f%%"|format(metrics.false_accept_rate * 100) if metrics.false_accept_rate is not none else "—" }}</strong>
-            <span>FAR · {{ metrics.false_accepts }} из {{ metrics.foreign_samples }}</span>
-          </div>
-          <div class="card">
-            <strong>{{ "%.2f%%"|format(metrics.false_reject_rate * 100) if metrics.false_reject_rate is not none else "—" }}</strong>
-            <span>FRR · {{ metrics.false_rejects }} из {{ metrics.known_samples }}</span>
-          </div>
-          <div class="card">
-            <strong>{{ metrics.misidentified_known }}</strong>
-            <span>известных котов названы неверно</span>
-          </div>
-          <div class="card">
-            <strong>{{ "%.2f%%"|format(metrics.uncertain_rate * 100) }}</strong>
-            <span>uncertain · {{ metrics.uncertain }} из {{ metrics.samples }}</span>
-          </div>
-        </div>
-      {% else %}
-        <p class="muted">Нет размеченных событий с online-предсказаниями.</p>
-        <p class="muted">
-          Без предсказаний активной версии:
-          {{ window.coverage.without_active_model_predictions }}
-          из {{ window.labelled_identity_events }} размеченных событий.
-        </p>
-      {% endif %}
-      <p class="muted">
-        Всего событий: {{ window.events }} · ждут разметки: {{ window.pending }} ·
-        identity-оценок: {{ window.labelled_identity_events }}
-      </p>
-    </section>
-  {% endfor %}
+{% extends "_base.html" %}
+{% set page = "metrics" %}
+{% block title %}CatDoor — метрики{% endblock %}
 
+{% block content %}
+{% for key, title in [("7_days", "Последние 7 дней"), ("30_days", "Последние 30 дней")] %}
+  {% set window = online.windows[key] %}
+  {% set metrics = window.metrics %}
   <section class="panel">
-    <h2>Детекция по камерам</h2>
+    <div class="panel-head">
+      <h2>{{ title }}</h2>
+      <span class="muted data">
+        событий {{ window.events }} · ждут разметки {{ window.pending }} ·
+        identity-оценок {{ window.labelled_identity_events }}
+      </span>
+    </div>
+    {% if metrics %}
+      <div class="tallies" style="border: 0; border-radius: 0">
+        <div class="tally">
+          <span class="tally-value" style="font-size: 19px">
+            {{ window.coverage.with_active_model_predictions }} / {{ window.labelled_identity_events }}
+          </span>
+          <span class="tally-key">
+            покрытие активной версии · без предсказаний
+            {{ window.coverage.without_active_model_predictions }}
+          </span>
+        </div>
+        <div class="tally">
+          <span class="tally-value" style="font-size: 19px">
+            {{ "%.2f%%"|format(metrics.false_accept_rate * 100) if metrics.false_accept_rate is not none else "—" }}
+          </span>
+          <span class="tally-key">FAR · {{ metrics.false_accepts }} из {{ metrics.foreign_samples }}</span>
+        </div>
+        <div class="tally">
+          <span class="tally-value" style="font-size: 19px">
+            {{ "%.2f%%"|format(metrics.false_reject_rate * 100) if metrics.false_reject_rate is not none else "—" }}
+          </span>
+          <span class="tally-key">FRR · {{ metrics.false_rejects }} из {{ metrics.known_samples }}</span>
+        </div>
+        <div class="tally">
+          <span class="tally-value" style="font-size: 19px">{{ metrics.misidentified_known }}</span>
+          <span class="tally-key">своих котов названы неверно</span>
+        </div>
+        <div class="tally">
+          <span class="tally-value" style="font-size: 19px">
+            {{ "%.2f%%"|format(metrics.uncertain_rate * 100) }}
+          </span>
+          <span class="tally-key">uncertain · {{ metrics.uncertain }} из {{ metrics.samples }}</span>
+        </div>
+      </div>
+    {% else %}
+      <div class="panel-body">
+        <p class="muted">
+          Нет размеченных событий с online-предсказаниями. Без предсказаний
+          активной версии: {{ window.coverage.without_active_model_predictions }}
+          из {{ window.labelled_identity_events }} размеченных.
+        </p>
+      </div>
+    {% endif %}
+  </section>
+{% endfor %}
+
+<section class="panel">
+  <div class="panel-head"><h2>Детекция по камерам</h2></div>
+  <div class="table-scroll">
     <table>
-      <thead><tr><th>Камера</th><th>Наблюдений</th><th>Выше порога</th><th>Медиана inference</th><th>Медиана возраста кадра</th></tr></thead>
+      <thead>
+        <tr>
+          <th>Роль</th><th>Наблюдений</th><th>Выше порога</th>
+          <th>Медиана inference</th><th>Медиана возраста кадра</th>
+        </tr>
+      </thead>
       <tbody>
       {% for role, values in detection.items() %}
         <tr>
-          <td>{{ "Hikvision" if role == "face" else "Ursa Minor" }}</td>
-          <td>{{ values.observations }}</td>
-          <td>{{ values.above_threshold }}</td>
-          <td>{{ "%.1f мс"|format(values.median_inference_ms) if values.median_inference_ms is not none else "—" }}</td>
-          <td>{{ "%.1f мс"|format(values.median_frame_age_ms) if values.median_frame_age_ms is not none else "—" }}</td>
+          <td>{{ role }}</td>
+          <td class="number">{{ values.observations }}</td>
+          <td class="number">{{ values.above_threshold }}</td>
+          <td class="number">{{ "%.1f мс"|format(values.median_inference_ms) if values.median_inference_ms is not none else "—" }}</td>
+          <td class="number">{{ "%.1f мс"|format(values.median_frame_age_ms) if values.median_frame_age_ms is not none else "—" }}</td>
         </tr>
+      {% else %}
+        <tr><td colspan="5" class="muted">Журнал детекции пока пуст.</td></tr>
       {% endfor %}
       </tbody>
     </table>
-  </section>
+  </div>
+</section>
 
-  <section class="panel">
-    <h2>Прогресс датасета</h2>
-    {% set progress = online.windows.all.dataset_progress %}
-    {% if progress %}
+<section class="panel">
+  <div class="panel-head"><h2>Прогресс датасета</h2><span class="muted">цель — 100+ событий на кота</span></div>
+  {% set progress = online.windows.all.dataset_progress %}
+  {% if progress %}
+    <div class="table-scroll">
       <table>
-        <thead><tr><th>Кот</th><th>Независимых событий</th><th>Кадров identity в online-событиях</th><th>Цель</th></tr></thead>
+        <thead>
+          <tr><th>Кот</th><th>Независимых проходов</th><th>Кадров identity</th></tr>
+        </thead>
         <tbody>
         {% for name, values in progress.items() %}
-          <tr><td>{{ name }}</td><td>{{ values.events }}</td><td>{{ values.identity_frames }}</td><td>100+ событий</td></tr>
+          <tr>
+            <td>{{ name }}</td>
+            <td class="number">{{ values.events }}</td>
+            <td class="number">{{ values.identity_frames }}</td>
+          </tr>
         {% endfor %}
         </tbody>
       </table>
-    {% else %}
-      <p class="muted">Размеченных домашних котов пока нет.</p>
-    {% endif %}
-  </section>
+    </div>
+  {% else %}
+    <div class="panel-body"><p class="muted">Своих котов пока не размечено.</p></div>
+  {% endif %}
+</section>
 
-  <section class="panel">
+<section class="panel">
+  <div class="panel-head">
     <h2>Новая офлайн-оценка</h2>
-    <p class="muted">Последовательный replay выполняется отдельным процессом на OpenVINO CPU. Он ничего не активирует.</p>
+    <div class="controls" style="margin-left: auto">
+      <button id="start-evaluation" class="primary" type="button">Запустить оценку</button>
+      <span id="evaluation-status" class="muted"></span>
+    </div>
+  </div>
+  <div class="panel-body">
     {% if not detector_ready %}
-      <p class="warning">Detector не настроен. Укажите имя ONNX из локального каталога models ниже.</p>
+      <p class="notice notice-bad">
+        Detector не настроен. Укажите имя ONNX из локального каталога models ниже.
+      </p>
     {% elif not identity_ready %}
-      <p class="muted">Identity-модели не настроены; detector-only replay всё равно доступен.</p>
+      <p class="notice">Identity-модели не настроены; detector-only replay всё равно доступен.</p>
     {% endif %}
-    <div class="form-grid">
+    <div class="field-grid">
       <label>Режим
         <select id="evaluation-kind">
           <option value="identity">Identity + detector</option>
@@ -133,29 +141,41 @@
       <label>Face identity ONNX <input id="evaluation-face" placeholder="текущая модель"></label>
       <label>Side identity ONNX <input id="evaluation-side" placeholder="текущая модель"></label>
     </div>
-    <p><button id="start-evaluation">Запустить оценку</button> <span id="evaluation-status" class="muted"></span></p>
-  </section>
+    <p class="muted" style="font-size: 13px">
+      Replay выполняется отдельным процессом на OpenVINO CPU и ничего не активирует.
+    </p>
+  </div>
+</section>
 
-  <section class="panel">
+<section class="panel">
+  <div class="panel-head">
     <h2>Запуски оценки</h2>
-    <p><a href="/metrics/compare">Сравнить два завершённых запуска</a></p>
-    {% if runs %}
+    <a href="/metrics/compare" style="margin-left: auto">Сравнить два завершённых</a>
+  </div>
+  {% if runs %}
+    <div class="table-scroll">
       <table>
-        <thead><tr><th>ID</th><th>Создан</th><th>Тип</th><th>Статус</th><th>Отчёт</th></tr></thead>
+        <thead><tr><th>ID</th><th>Создан</th><th>Тип</th><th>Статус</th><th></th></tr></thead>
         <tbody>
         {% for run in runs %}
           <tr>
-            <td>#{{ run.id }}</td><td>{{ run.created_at }}</td><td>{{ run.run_kind }}</td>
-            <td>{{ run.status }}</td><td><a href="/metrics/runs/{{ run.id }}">Открыть</a></td>
+            <td class="number">#{{ run.id }}</td>
+            <td class="number">{{ run.created_at.strftime("%d.%m %H:%M") }}</td>
+            <td>{{ run.run_kind }}</td>
+            <td class="{{ 'bad' if run.status == 'failed' else '' }}">{{ run.status }}</td>
+            <td><a href="/metrics/runs/{{ run.id }}">Открыть</a></td>
           </tr>
         {% endfor %}
         </tbody>
       </table>
-    {% else %}
-      <p class="muted">Оценки ещё не запускались.</p>
-    {% endif %}
-  </section>
-</main>
+    </div>
+  {% else %}
+    <div class="panel-body"><p class="muted">Оценки ещё не запускались.</p></div>
+  {% endif %}
+</section>
+{% endblock %}
+
+{% block scripts %}
 <script>
   const evaluationKind = document.querySelector("#evaluation-kind");
   const identityInputs = [
@@ -197,5 +217,4 @@
     status.innerHTML = `Запуск #${result.run_id} создан. <a href="/metrics/runs/${result.run_id}">Открыть статус</a>`;
   });
 </script>
-</body>
-</html>
+{% endblock %}

@@ -1,31 +1,15 @@
-<!doctype html>
-<html lang="ru">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Оценка #{{ run.id }} — CatDoor AI</title>
-  <style>
-    :root { color-scheme: dark; font-family: system-ui, sans-serif; }
-    body { margin: 0; background: #111827; color: #e5e7eb; }
-    header, main { width: min(1100px, calc(100% - 32px)); margin: 24px auto; }
-    a { color: #93c5fd; }
-    .panel { background: #1f2937; border: 1px solid #374151; border-radius: 14px; padding: 18px; margin-bottom: 20px; overflow-x: auto; }
-    .muted { color: #9ca3af; }
-    .error { color: #fca5a5; }
-    table { width: 100%; border-collapse: collapse; }
-    th, td { padding: 9px; border-bottom: 1px solid #374151; text-align: left; }
-    code { color: #bfdbfe; }
-  </style>
-</head>
-<body>
-<header>
+{% extends "_base.html" %}
+{% set page = "metrics" %}
+{% block title %}CatDoor — Оценка #{{ run.id }}{% endblock %}
+
+{% block content %}
+<div class="row">
   <h1>Оценка #{{ run.id }}</h1>
-  <p><a href="/metrics">← Все метрики</a></p>
-</header>
-<main>
-  <section class="panel">
+  <a href="/metrics" style="margin-left: auto">Все метрики</a>
+</div>
+  <section class="panel padded">
     <p>Статус: <strong>{{ run.status }}</strong> · создана {{ run.created_at }}</p>
-    {% if run.error_message %}<p class="error">{{ run.error_message }}</p>{% endif %}
+    {% if run.error_message %}<p class="bad">{{ run.error_message }}</p>{% endif %}
     <p class="muted">
       Detector:
       {{ versions[run.detector_model_version_id].file_name if run.detector_model_version_id in versions else "—" }};
@@ -36,7 +20,7 @@
     </p>
   </section>
   {% if report %}
-    <section class="panel">
+    <section class="panel padded">
       <h2>Охват</h2>
       <p>
         Обработано: {{ report.events_processed }} · identity-событий:
@@ -46,7 +30,7 @@
     </section>
 
     {% for section_key, section_title in [("clean_metrics", "Чистые события"), ("metrics", "Все события"), ("night_metrics", "Ночные события")] %}
-      <section class="panel">
+      <section class="panel padded">
         <h2>{{ section_title }}</h2>
         <table>
           <thead><tr><th>Ракурс</th><th>FAR</th><th>FRR</th><th>Ошибочное имя</th><th>Uncertain</th><th>Accuracy</th><th>Inference</th></tr></thead>
@@ -71,7 +55,7 @@
       </section>
     {% endfor %}
 
-    <section class="panel">
+    <section class="panel padded">
       <h2>Detection miss</h2>
       <table>
         <thead><tr><th>Камера</th><th>Событий</th><th>Пропусков</th><th>Miss rate</th><th>Средний inference</th><th>Порог</th></tr></thead>
@@ -90,7 +74,7 @@
 
     {% for view, values in report.clean_metrics.items() %}
       {% if values %}
-        <section class="panel">
+        <section class="panel padded">
           <h2>Threshold sweep: {{ view }} (чистые события)</h2>
           <table>
             <thead><tr><th>Порог</th><th>FAR</th><th>FRR</th><th>Uncertain</th></tr></thead>
@@ -120,8 +104,6 @@
       {% endif %}
     {% endfor %}
   {% else %}
-    <section class="panel"><p class="muted">Отчёт ещё не сформирован. Обновите страницу после завершения процесса.</p></section>
+    <section class="panel padded"><p class="muted">Отчёт ещё не сформирован. Обновите страницу после завершения процесса.</p></section>
   {% endif %}
-</main>
-</body>
-</html>
+{% endblock %}
