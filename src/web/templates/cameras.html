@@ -88,17 +88,27 @@
   </div>
 </section>
 
-<section class="panel">
-  <div class="panel-head">
-    <h2>Камеры</h2>
-    <span class="muted">{{ cameras | length }} в списке</span>
-  </div>
-  {% if not cameras %}
+{% if not cameras %}
+  <section class="panel">
     <div class="panel-body">
       <p class="notice notice-bad">Список пуст. Добавьте камеру формой ниже или найдите поиском.</p>
     </div>
-  {% endif %}
-  {% for camera in cameras %}
+  </section>
+{% endif %}
+
+{% for group in circuit_groups %}
+{% if group.cameras %}
+<section class="panel">
+  <div class="panel-head">
+    <h2>{{ group.title }}</h2>
+    <span class="muted">
+      {{ group.cameras | length }}
+      {%- if group.circuit == "gate" %} · распознавание выполняет Frigate
+      {%- elif group.circuit is none %} · камере не назначен контур, ею никто не пользуется
+      {%- endif %}
+    </span>
+  </div>
+  {% for camera in group.cameras %}
     <article class="pass" data-camera-id="{{ camera.id }}">
       <div class="pass-media">
         {% if camera.configured and camera.enabled %}
@@ -151,7 +161,17 @@
             </span>
             <input data-field="mac" type="text" value="{{ camera.mac }}" placeholder="aa:bb:cc:dd:ee:ff">
           </label>
-          <label>Роль
+          <label>
+            <span class="label-with-hint">Контур
+              {{ hint("контур камеры", "Кому принадлежит камера: дверце или калитке. Роли face и side существуют только у дверцы — это понятия кошачьего контура, на них завязаны детектор, таблицы событий и модели по ракурсам.") }}
+            </span>
+            <select data-field="circuit" class="camera-circuit">
+              <option value="" {{ "selected" if not camera.circuit }}>без контура</option>
+              <option value="cats" {{ "selected" if camera.circuit == "cats" }}>{{ circuit_titles["cats"] }}</option>
+              <option value="gate" {{ "selected" if camera.circuit == "gate" }}>{{ circuit_titles["gate"] }}</option>
+            </select>
+          </label>
+          <label class="role-field" {{ "hidden" if camera.circuit != "cats" }}>Роль
             <select data-field="role">
               <option value="" {{ "selected" if not camera.role }}>без роли</option>
               {% for role in roles %}
@@ -189,6 +209,8 @@
     </article>
   {% endfor %}
 </section>
+{% endif %}
+{% endfor %}
 
 <section class="panel">
   <div class="panel-head">
@@ -203,7 +225,14 @@
       <label>Название
         <input data-field="title" type="text" placeholder="HiWatch у столба">
       </label>
-      <label>Роль
+      <label>Контур
+        <select data-field="circuit" class="camera-circuit">
+          <option value="" selected>без контура</option>
+          <option value="cats">{{ circuit_titles["cats"] }}</option>
+          <option value="gate">{{ circuit_titles["gate"] }}</option>
+        </select>
+      </label>
+      <label class="role-field" hidden>Роль
         <select data-field="role">
           <option value="" selected>без роли</option>
           {% for role in roles %}
@@ -382,11 +411,23 @@
     return payload;
   }
 
+  // Роль показывается только у камеры дверцы: face и side — понятия кошачьего
+  // контура, и предлагать их камере калитки значит подталкивать к ошибке.
+  document.querySelectorAll(".camera-circuit").forEach(select => {
+    const field = select.closest("section, article").querySelector(".role-field");
+    const sync = () => {
+      field.hidden = select.value !== "cats";
+      if (field.hidden) field.querySelector("select").value = "";
+    };
+    select.addEventListener("change", sync);
+  });
+
   function normalizeCameraPayload(payload) {
     // Пустой пароль — «оставить прежний»: сохранённый наружу не отдаётся, и
     // форма не может отправить его обратно неизменным.
     payload.password = payload.password ? payload.password : null;
     payload.role = payload.role || null;
+    payload.circuit = payload.circuit || null;
     return payload;
   }
 
