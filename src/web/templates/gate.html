@@ -3,19 +3,27 @@
 {% block title %}CatDoor — калитка{% endblock %}
 
 {% block content %}
+{% set state_names = {
+  "running": "работает", "stopped": "остановлен", "failed": "отказ",
+  "absent": "не развёрнут", "unknown": "состояние неизвестно"
+} %}
 <section class="statusbar">
   <div class="statusbar-state">
-    <span class="beacon {{ 'beacon-ok' if circuits.gate else '' }}" aria-hidden="true"></span>
-    <span class="statusbar-label">{{ "включён" if circuits.gate else "остановлен" }}</span>
+    <span class="beacon {{ 'beacon-ok' if circuits.gate_state == 'running'
+      else 'beacon-bad' if circuits.gate_state in ['failed', 'unknown'] else '' }}"
+      aria-hidden="true"></span>
+    <span class="statusbar-label">{{ state_names[circuits.gate_state] }}</span>
   </div>
   <div class="readouts">
     <div class="readout">
-      <span class="readout-key">контур</span>
-      <span class="readout-value">не развёрнут</span>
+      <span class="readout-key">служба</span>
+      <span class="readout-value">{{ circuits.gate_detail or "frigate.service" }}</span>
     </div>
     <div class="readout">
-      <span class="readout-key">распознавание</span>
-      <span class="readout-value">Frigate</span>
+      <span class="readout-key">запись</span>
+      <span class="readout-value">
+        {{ "только события" if circuits.gate_recording == "events" else "круглосуточно" }}
+      </span>
     </div>
     <div class="readout">
       <span class="readout-key">механика</span>
@@ -35,22 +43,34 @@
 
 <section class="panel">
   <div class="panel-head">
-    <h2>Контур не развёрнут</h2>
+    <h2>Распознавание людей</h2>
+    {% if circuits.gate_ui_url %}
+      <a class="button" href="{{ circuits.gate_ui_url }}" target="_blank" rel="noreferrer"
+        style="margin-left: auto">Открыть Frigate</a>
+    {% endif %}
   </div>
   <div class="panel-body">
-    <p class="notice notice-signal">
-      Распознавание людей выполняет Frigate — отдельная служба в Docker. На узле
-      она пока не установлена, поэтому переключатель контура сохраняет выбор, но
-      включать ему нечего.
-    </p>
+    {% if circuits.gate_state == "absent" %}
+      <p class="notice notice-signal">
+        Служба Frigate на узле не установлена, поэтому переключатель контура
+        сохраняет выбор, но включать ему нечего. Развёртывание описано в
+        репозитории <code>gate_access</code>, файл <code>docs/frigate.md</code>.
+      </p>
+    {% elif circuits.gate_state == "unknown" %}
+      <p class="notice notice-bad">
+        Не удалось опросить systemd о состоянии службы. Так бывает, когда
+        админка запущена не на том узле, где стоит Frigate.
+      </p>
+    {% elif circuits.gate_state == "failed" %}
+      <p class="notice notice-bad">
+        Служба завершилась с ошибкой. Причина — в журнале:
+        <code>journalctl -u frigate -n 50</code>.
+      </p>
+    {% endif %}
     <p class="muted">
-      Здесь появятся состояние камеры калитки, число распознанных проходов и
-      ссылка в интерфейс Frigate. Работа с библиотекой лиц останется во Frigate:
-      дублировать её в этой админке незачем.
-    </p>
-    <p class="muted" style="font-size: 13px">
-      Порядок работ — <code>docs/two-circuits-plan.md</code>. Развёртывание
-      Frigate относится к репозиторию <code>gate_access</code>.
+      События, лица и архив живут в интерфейсе Frigate — у него есть
+      собственная аутентификация, и дублировать его в этой админке незачем.
+      Отсюда контур только включается и выключается.
     </p>
   </div>
 </section>
@@ -131,8 +151,14 @@
       const result = await putCircuits({active: choice.dataset.circuit}, status);
       if (!result) return;
       press(circuitChoices, button => result[button.dataset.circuit] === true);
-      status.textContent = "сохранено";
-      if (result.gate === false) location.reload();
+      if (result.gate_error) {
+        // Состояние узла сохранено, но служба к нему не приведена. Расхождение
+        // показывается, а не прячется за успешным ответом.
+        status.textContent = result.gate_error;
+        status.classList.add("bad");
+        return;
+      }
+      location.reload();
     });
   });
 

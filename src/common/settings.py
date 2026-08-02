@@ -68,6 +68,10 @@ class Settings(BaseSettings):
     # вкладку; без этого предела забытая вкладка с мёртвой камерой держала бы
     # его до перезапуска веб-службы.
     preview_idle_timeout_seconds: float = Field(default=20.0, ge=5.0, le=300.0)
+    # Контур калитки: служба systemd, поднимающая Frigate, и адрес его
+    # интерфейса для ссылки с пульта. Пустой адрес — ссылка не показывается.
+    gate_service_unit: str = "frigate.service"
+    gate_ui_url: str = ""
     data_dir: Path = Path("data")
     database_path: Path | None = None
     ffmpeg_path: str = "ffmpeg"

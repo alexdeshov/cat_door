@@ -1,0 +1,10 @@
+# Право пульта CatDoor включать и выключать контур калитки.
+#
+# Копируется в /etc/sudoers.d/catdoor-gate с правами 440 и проверяется visudo:
+#   sudo install -m 440 install/catdoor-gate.sudoers /etc/sudoers.d/catdoor-gate
+#   sudo visudo -c
+#
+# Разрешены ровно две команды над одной службой. Альтернатива — выдать
+# веб-процессу доступ к сокету Docker — равносильна выдаче root на узле:
+# любой, кто дотянулся до админки без аутентификации, получил бы весь узел.
+catdoor ALL=(root) NOPASSWD: /usr/bin/systemctl start frigate.service, /usr/bin/systemctl stop frigate.service
