@@ -301,12 +301,28 @@ sudo apt install -y dnsmasq
 sudo cp /opt/catdoor/install/dnsmasq-catdoor-cameras.conf \
         /etc/dnsmasq.d/catdoor-cameras.conf
 sudo ufw allow in on eno1 to any port 67 proto udp
+echo 'DNSMASQ_EXCEPT="lo"' | sudo tee -a /etc/default/dnsmasq
 sudo systemctl restart dnsmasq
 ```
 
 Правило `ufw` обязательно и легко забывается: DHCP-запрос приходит **входящим**
 пакетом, а политика по умолчанию его отбрасывает. Без правила камеры молча не
 получат адреса.
+
+Две записи в журнале при установке выглядят отказом, но им и положено там быть:
+
+- `failed to create listening socket for port 53: Address already in use` —
+  пакет пытается запустить службу сразу после распаковки, когда конфига с
+  `port=0` в `/etc/dnsmasq.d/` ещё нет, и упирается в `systemd-resolved`.
+  Следующий запуск, уже с конфигом, проходит штатно;
+- `resolvconf: Failed to set DNS configuration: Link lo is loopback device` —
+  обвязка пакета пытается зарегистрировать dnsmasq системным резолвером, то
+  есть ровно то, что здесь отключено намеренно. `DNSMASQ_EXCEPT="lo"` выше
+  убирает эту строку, чтобы через полгода она не сошла за настоящую ошибку.
+
+Запуск удался, если в журнале есть `DNS disabled` и
+`sockets bound exclusively to interface eno1`, а `ss -lunp` показывает только
+`0.0.0.0%eno1:67`.
 
 Подключённые камеры видны в арендах:
 
