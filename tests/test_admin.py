@@ -1256,3 +1256,46 @@ def test_gate_recording_defaults_to_events_and_is_switchable(
     assert response.json()["gate_recording"] == "continuous"
     # Переключение записи не трогает, какому контуру отдан узел.
     assert response.json()["active"] == ["cats"]
+
+
+def test_cameras_are_grouped_by_circuit(runtime_path: Path, monkeypatch) -> None:
+    """Камера калитки не должна лежать вперемешку с кошачьими."""
+    client = make_client(runtime_path, monkeypatch)
+    client.post("/api/cameras", json={"id": "test-cam", "host": "10.0.0.9", "circuit": "gate"})
+
+    page = client.get("/cameras")
+
+    assert "<h2>Дверца</h2>" in page.text
+    assert "<h2>Калитка 1</h2>" in page.text
+    # Роль предлагается только камерам дверцы, остальным поле скрыто.
+    assert 'class="role-field" hidden' in page.text
+    assert 'data-field="circuit"' in page.text
+
+
+def test_giving_a_role_moves_the_camera_to_the_cat_circuit(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    client = make_client(runtime_path, monkeypatch)
+    client.post("/api/cameras", json={"id": "test-cam", "host": "10.0.0.9", "circuit": "gate"})
+
+    response = client.put("/api/cameras/test-cam", json={"role": "side"})
+
+    assert response.status_code == 200
+    assert response.json()["circuit"] == "cats"
+    assert load_registry(camera_registry_path(runtime_path)).get("test-cam").circuit == "cats"
+
+
+def test_a_gate_camera_is_never_used_by_the_cat_recorder(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    """Проверка того, ради чего заводился контур: роль остаётся у своей камеры."""
+    client = make_client(runtime_path, monkeypatch, side=True)
+    client.post("/api/cameras", json={"id": "test-cam", "host": "10.0.0.9", "circuit": "gate"})
+
+    registry = load_registry(camera_registry_path(runtime_path))
+
+    assert registry.by_role("face").id == "face"
+    assert registry.by_role("side").id == "side"
+    assert registry.get("test-cam").role is None

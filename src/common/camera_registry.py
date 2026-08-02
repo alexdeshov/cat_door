@@ -29,6 +29,11 @@ from src.common.durable_write import write_text_durably
 from src.common.settings import Settings
 
 CameraRole = Literal["face", "side"]
+# Контур, которому принадлежит камера. Совпадает с контурами узла из
+# `src.common.circuits`, но живёт здесь отдельным типом: инвентарь не должен
+# зависеть от состояния узла, чтобы камеру можно было завести до того, как
+# её контур вообще развёрнут.
+CameraCircuit = Literal["cats", "gate"]
 
 # Роли, на которых держатся детектор, таблицы событий и модели идентификации.
 ROLES: tuple[CameraRole, ...] = ("face", "side")
@@ -69,6 +74,7 @@ class CameraRecord(BaseModel):
     username: str = ""
     password: str = ""
     mac: str = ""
+    circuit: CameraCircuit | None = None
     role: CameraRole | None = None
     rotate_180: bool = False
     enabled: bool = True
@@ -108,6 +114,21 @@ class CameraRecord(BaseModel):
         if not path or path.startswith("/"):
             return path
         return f"/{path}"
+
+    @model_validator(mode="after")
+    def _role_implies_cats(self) -> CameraRecord:
+        """Роль бывает только у камеры дверцы.
+
+        `face` и `side` — понятия кошачьего контура: на них завязаны детектор,
+        таблицы событий и модели по ракурсам. Камера с ролью принадлежит ему по
+        определению, поэтому контур подставляется, а не требуется отдельно, —
+        иначе список предлагал бы завести противоречивую запись.
+        """
+        if self.role is not None and self.circuit != "cats":
+            # Меняется сам объект, а не копия: при создании через `__init__`
+            # pydantic отбрасывает всё, кроме `self`, и подстановка пропала бы.
+            self.circuit = "cats"
+        return self
 
     @property
     def display_title(self) -> str:

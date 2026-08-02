@@ -195,3 +195,26 @@ def test_broken_registry_is_moved_aside_instead_of_blocking_startup(runtime_path
     assert registry.by_role("face").host == "10.0.0.5"
     assert json.loads(path.read_text(encoding="utf-8"))["version"] == 1
     assert list(path.parent.glob("cameras.json.invalid-*"))
+
+
+def test_role_belongs_to_the_cat_circuit_and_says_so() -> None:
+    """`face` и `side` — понятия кошачьего контура, не общие.
+
+    Контур подставляется, а не требуется отдельно: иначе список позволял бы
+    завести камеру калитки с ролью детектора котов.
+    """
+    assert CameraRecord(id="hiwatch", role="face").circuit == "cats"
+    assert CameraRecord(id="gate", circuit="gate", role="side").circuit == "cats"
+
+
+def test_a_camera_without_a_role_keeps_the_circuit_it_was_given() -> None:
+    assert CameraRecord(id="gate", circuit="gate").circuit == "gate"
+    assert CameraRecord(id="spare").circuit is None
+
+
+def test_seeded_roles_belong_to_the_cat_circuit() -> None:
+    settings = Settings(camera_face_rtsp="rtsp://10.0.0.5:554/one")
+
+    registry = registry_from_settings(settings)
+
+    assert {camera.circuit for camera in registry.cameras} == {"cats"}

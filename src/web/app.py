@@ -33,6 +33,7 @@ from src.common.camera_discovery import (
 from src.common.camera_registry import (
     ROLE_TITLES,
     ROLES,
+    CameraCircuit,
     CameraRecord,
     CameraRegistry,
     CameraRole,
@@ -212,6 +213,7 @@ class CameraPayload(BaseModel):
     username: str = ""
     password: str | None = None
     mac: str = ""
+    circuit: CameraCircuit | None = None
     role: CameraRole | None = None
     rotate_180: bool = False
     enabled: bool = True
@@ -281,6 +283,7 @@ def _camera_view(camera: CameraRecord) -> dict[str, object]:
         "username": camera.username,
         "has_password": bool(camera.password),
         "mac": camera.mac,
+        "circuit": camera.circuit,
         "role": camera.role,
         "rotate_180": camera.rotate_180,
         "enabled": camera.enabled,
@@ -587,6 +590,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "cameras": [_camera_view(camera) for camera in registry.cameras],
                 "role_titles": ROLE_TITLES,
                 "roles": list(ROLES),
+                "circuit_groups": [
+                    {
+                        "circuit": circuit,
+                        "title": title,
+                        "cameras": [
+                            _camera_view(camera)
+                            for camera in registry.cameras
+                            if camera.circuit == circuit
+                        ],
+                    }
+                    for circuit, title in (
+                        ("cats", CIRCUIT_TITLES["cats"]),
+                        ("gate", CIRCUIT_TITLES["gate"]),
+                        (None, "Без контура"),
+                    )
+                ],
                 "detection_config": current_detection_config(),
                 "recorder_status": read_recorder_status(
                     settings.data_dir / "runtime" / "recorder-status.json"
