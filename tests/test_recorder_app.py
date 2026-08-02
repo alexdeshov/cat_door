@@ -605,6 +605,9 @@ def test_worker_reconnects_after_a_wedged_process_is_killed(
         with lock:
             assert states["face"].process is not None
 
+        # Момент проверки задаётся явно вперёд, а не берётся текущим: иначе
+        # тест держится на том, что между подключением воркера и этой строкой
+        # пройдёт больше порога, а на быстрой машине не проходит.
         stalled = restart_stalled_streams(
             states,
             targets,
@@ -612,7 +615,7 @@ def test_worker_reconnects_after_a_wedged_process_is_killed(
             events,
             lock,
             0.1,
-            time.monotonic(),
+            time.monotonic() + 60,
         )
 
         assert stalled == ["face"]
