@@ -521,7 +521,15 @@
     table.append(head);
     for (const device of devices) {
       const row = document.createElement("tr");
-      cell(row, device.host, "number");
+      const address = cell(row, device.host, "number");
+      if (device.other_hosts.length) {
+        // Тот же MAC отвечал и по другим адресам — чаще всего заводскому,
+        // с которого камера ещё не ушла. Прятать это незачем.
+        const also = document.createElement("div");
+        also.className = "faint";
+        also.textContent = `также ${device.other_hosts.join(", ")}`;
+        address.append(also);
+      }
       cell(row, device.mac || "—", "number");
       cell(row, device.name || "—");
       cell(row, device.sources.join(", "), "muted");

@@ -57,14 +57,31 @@ _HOST_IN_URL = re.compile(r"//(?:[^/@]*@)?([^/:]+)")
 _EMPTY_MAC = "00:00:00:00:00:00"
 
 
+# Насколько источник ручается, что устройство живо прямо сейчас. Открытый
+# RTSP-порт — самое сильное свидетельство для камеры; аренда DHCP самое слабое:
+# её могли взять один раз при сбросе и уйти на заводской адрес.
+_SOURCE_LIVENESS = {"scan": 4, "onvif": 3, "arp": 2, "dhcp": 1}
+
+
 @dataclass(frozen=True)
 class DiscoveredDevice:
-    """Устройство, замеченное в сети. Ещё не камера проекта."""
+    """Устройство, замеченное в сети. Ещё не камера проекта.
+
+    `other_hosts` — прочие адреса того же MAC. Камера после заводского сброса
+    успевает засветиться сразу на двух: разово спрашивает DHCP и продолжает
+    отвечать на заводском статическом. Прятать это нельзя, но и предлагать
+    завести одну железку дважды тоже.
+    """
 
     host: str
     mac: str = ""
     name: str = ""
     sources: tuple[str, ...] = ()
+    other_hosts: tuple[str, ...] = ()
+
+    @property
+    def liveness(self) -> int:
+        return max((_SOURCE_LIVENESS.get(source, 0) for source in self.sources), default=0)
 
     def merged_with(self, other: DiscoveredDevice) -> DiscoveredDevice:
         return replace(
@@ -72,6 +89,7 @@ class DiscoveredDevice:
             mac=self.mac or other.mac,
             name=self.name or other.name,
             sources=tuple(dict.fromkeys(self.sources + other.sources)),
+            other_hosts=tuple(dict.fromkeys(self.other_hosts + other.other_hosts)),
         )
 
 
@@ -275,20 +293,51 @@ def ws_discovery(
 
 
 def merge_devices(*groups: list[DiscoveredDevice]) -> list[DiscoveredDevice]:
-    """Свести источники в один список по адресу.
+    """Свести источники в один список: сначала по адресу, затем по MAC.
 
     Один и тот же адрес приходит из аренд, ARP и обхода подсети; MAC знают
-    только первые два, имя — только ONVIF, поэтому склейка идёт по полям, а не
-    выбором победителя.
+    только первые два, имя — только ONVIF, поэтому поля объединяются, а не
+    выбирается победитель.
+
+    Второй проход нужен потому, что одна железка бывает видна сразу на двух
+    адресах, и показывать её двумя строками — значит предлагать завести её
+    дважды. Из адресов остаётся тот, что живее по источнику: открытый
+    RTSP-порт говорит больше, чем разовая аренда.
     """
-    merged: dict[str, DiscoveredDevice] = {}
+    by_host: dict[str, DiscoveredDevice] = {}
     for group in groups:
         for device in group:
-            existing = merged.get(device.host)
-            merged[device.host] = (
+            existing = by_host.get(device.host)
+            by_host[device.host] = (
                 existing.merged_with(device) if existing is not None else device
             )
-    return sorted(merged.values(), key=lambda device: _sort_key(device.host))
+    return sorted(_collapse_by_mac(by_host.values()), key=lambda device: _sort_key(device.host))
+
+
+def _collapse_by_mac(devices: Iterable[DiscoveredDevice]) -> list[DiscoveredDevice]:
+    without_mac = [device for device in devices if not device.mac]
+    by_mac: dict[str, list[DiscoveredDevice]] = {}
+    for device in devices:
+        if device.mac:
+            by_mac.setdefault(device.mac, []).append(device)
+    collapsed: list[DiscoveredDevice] = []
+    for found in by_mac.values():
+        # Ключ сортировки с минусом: сначала самый живой, при равенстве —
+        # меньший адрес, чтобы порядок не зависел от порядка источников.
+        primary, *rest = sorted(found, key=lambda item: (-item.liveness, _sort_key(item.host)))
+        for other in rest:
+            primary = primary.merged_with(other)
+        collapsed.append(
+            replace(
+                primary,
+                other_hosts=tuple(
+                    dict.fromkeys(
+                        [*primary.other_hosts, *(item.host for item in rest)]
+                    )
+                ),
+            )
+        )
+    return [*collapsed, *without_mac]
 
 
 def _sort_key(host: str) -> tuple[int, ...]:

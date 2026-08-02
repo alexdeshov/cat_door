@@ -1176,3 +1176,30 @@ def test_switch_shows_the_current_mode(runtime_path: Path, monkeypatch) -> None:
     # Нажатое положение приходит с сервера, а не выставляется скриптом после
     # загрузки: иначе переключатель на секунду показывал бы чужое состояние.
     assert 'data-state="observe"\n        aria-pressed="true"' in page.text
+
+
+def test_discovery_shows_one_row_for_a_camera_on_two_addresses(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    """Камера после сброса отвечает и по аренде, и по заводскому адресу."""
+    client = make_client(runtime_path, monkeypatch)
+    monkeypatch.setattr(
+        "src.web.app.discover_devices",
+        lambda **options: [
+            DiscoveredDevice(
+                host="192.168.1.108",
+                mac="9c:14:63:41:de:15",
+                sources=("arp", "scan"),
+                other_hosts=("192.168.1.106",),
+            )
+        ],
+    )
+    monkeypatch.setattr("src.web.app.port_is_open", lambda host, port, **options: True)
+    monkeypatch.setattr("src.web.app.probe_stream", lambda ffmpeg_path, url, **options: None)
+
+    devices = client.post("/api/cameras/discover", json={}).json()["devices"]
+
+    assert len(devices) == 1
+    assert devices[0]["host"] == "192.168.1.108"
+    assert devices[0]["other_hosts"] == ["192.168.1.106"]
