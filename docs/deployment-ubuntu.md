@@ -377,6 +377,38 @@ sudo systemctl restart dnsmasq
 `sockets bound exclusively to interface eno1`, а `ss -lunp` показывает только
 `0.0.0.0%eno1:67`.
 
+### Установка Docker ломает DHCP камер
+
+Пакет `docker.io` тянет за собой `ubuntu-fan`, а тот кладёт в каталог dnsmasq
+свой файл `/etc/dnsmasq.d/ubuntu-fan` с директивой `bind-interfaces`. Она
+несовместима с `bind-dynamic` из конфигурации проекта, и dnsmasq отказывается
+стартовать:
+
+```
+dnsmasq: cannot set --bind-interfaces and --bind-dynamic
+```
+
+Отказ **отложенный**: установка проходит успешно, работающий dnsmasq
+продолжает работать, и ломается всё при следующем перезапуске или перезагрузке
+— когда связь между причиной и следствием уже не очевидна.
+
+Fan networking — легаси-оверлей Ubuntu для контейнеров, нашему Docker он не
+нужен и удаляется без последствий:
+
+```sh
+sudo apt-get -s purge ubuntu-fan | grep -A2 REMOVED
+sudo apt-get -y purge ubuntu-fan
+sudo systemctl restart dnsmasq && systemctl is-active dnsmasq
+```
+
+Первая команда проверяет, что за собой пакет ничего не утащит.
+
+`DNSMASQ_EXCEPT="lo"` в `/etc/default/dnsmasq` на это не влияет: узел работает
+с обоими сразу — проверено на живой службе после удаления `ubuntu-fan`.
+Подозрение на него было, но не подтвердилось.
+
+### Проверять после перезагрузки, а не после установки
+
 Проверять dnsmasq нужно **после перезагрузки**, а не только после установки.
 Ручной запуск происходит при давно поднятой сети и потому ничего не доказывает:
 при загрузке dnsmasq стартует раньше, чем netplan настраивает `eno1`. С

@@ -222,6 +222,7 @@ sudo systemctl restart catdoor-web catdoor-recorder
 | Детектор не запускается | нет модели или OpenVINO | `sudo ls /var/lib/catdoor/models/` |
 | Кончилось место | накопились видео | `df -h /var/lib/catdoor` |
 | `dnsmasq` в `failed` после перезагрузки | стартовал раньше сети | `journalctl -u dnsmasq -b`, затем `sudo systemctl restart dnsmasq` |
+| `dnsmasq` в `failed` после установки пакетов | `ubuntu-fan` добавил свой конфликтующий конфиг | `sudo apt-get -y purge ubuntu-fan` |
 
 Служба, упавшая с ошибкой, перезапускается сама с нарастающей паузой от 5 секунд
 до получаса и не сдаётся никогда. Если состояние «Перезапуск» держится, причина
