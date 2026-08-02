@@ -35,6 +35,11 @@
     input[type="checkbox"] { justify-self: start; width: 18px; height: 18px; }
     .muted { color: #9ca3af; font-size: 14px; }
     .error { color: #fca5a5; }
+    .found { width: 100%; border-collapse: collapse; margin-top: 14px; font-size: 14px; }
+    .found th, .found td { text-align: left; padding: 8px 10px; border-top: 1px solid #374151; vertical-align: top; }
+    .found th { color: #9ca3af; font-weight: 600; }
+    .found code { font-family: ui-monospace, monospace; }
+    .found-scroll { overflow-x: auto; }
     a { color: #93c5fd; }
     .setting-title { display: flex; align-items: center; gap: 6px; }
     .setting-help {
@@ -210,6 +215,44 @@
   </section>
 
   <section class="panel">
+    <h2>Поиск камер</h2>
+    <p class="muted">
+      Опрашиваются аренды DHCP, ARP-таблица, ONVIF и, если задана подсеть,
+      RTSP-порт каждого её адреса. Найденная камера опознаётся по MAC, поэтому
+      переставленная находится как уже заведённая, а не как новая. Ничего не
+      применяется само: кнопки ниже подставляют найденное в карточку, сохранять
+      всё равно вам.
+    </p>
+    <div class="settings-grid" id="discovery-form">
+      <label>Логин камер
+        <input data-field="username" type="text" autocomplete="off" placeholder="admin">
+      </label>
+      <label>
+        <span class="setting-title">Пароль камер
+          <span class="setting-help" tabindex="0" role="note"
+            aria-label="Подсказка: пароль для поиска"
+            data-tooltip="Нужен, чтобы подобрать рабочий путь потока. Для уже заведённой камеры при пустом поле берётся сохранённый пароль. Введённое здесь никуда не сохраняется.">?</span>
+        </span>
+        <input data-field="password" type="password" autocomplete="new-password">
+      </label>
+      <label>
+        <span class="setting-title">Подсеть камер
+          <span class="setting-help" tabindex="0" role="note"
+            aria-label="Подсказка: подсеть для обхода"
+            data-tooltip="Например 192.168.1.0/24. Без неё поиск ограничен арендами, ARP и ONVIF: обходить сеть, через которую вы пришли на сервер, он не станет.">?</span>
+        </span>
+        <input data-field="subnet" type="text" value="{{ discovery_subnet }}"
+               placeholder="192.168.1.0/24">
+      </label>
+    </div>
+    <div class="controls">
+      <button id="discover" type="button">Найти камеры</button>
+      <span id="discovery-status" class="muted"></span>
+    </div>
+    <div id="discovery-results"></div>
+  </section>
+
+  <section class="panel">
     <h2>Добавить камеру</h2>
     <p class="muted">
       Идентификатор попадает в адрес потока. Если оставить его пустым, он будет
@@ -232,6 +275,24 @@
       </label>
       <label>Поворот на 180°
         <input data-field="rotate_180" type="checkbox">
+      </label>
+      <label>Адрес (IP или имя)
+        <input data-field="host" type="text" placeholder="192.168.1.101">
+      </label>
+      <label>Порт
+        <input data-field="port" type="number" min="1" max="65535" value="554">
+      </label>
+      <label>Путь потока
+        <input data-field="stream_path" type="text" placeholder="/Streaming/Channels/101">
+      </label>
+      <label>Логин
+        <input data-field="username" type="text" autocomplete="off">
+      </label>
+      <label>Пароль
+        <input data-field="password" type="password" autocomplete="new-password">
+      </label>
+      <label>MAC
+        <input data-field="mac" type="text" placeholder="aa:bb:cc:dd:ee:ff">
       </label>
       <label class="wide">RTSP-адрес целиком
         <input data-field="rtsp_url" type="text" autocomplete="off"
@@ -477,6 +538,102 @@
       await send("POST", "/api/cameras", payload);
       location.reload();
     }, "Добавлена");
+  });
+
+  function setField(container, field, value) {
+    const input = container.querySelector(`[data-field="${field}"]`);
+    if (input && value) input.value = value;
+  }
+
+  function applyDiscovered(device) {
+    const target = device.matched_camera_id
+      ? document.querySelector(`.camera[data-camera-id="${device.matched_camera_id}"]`)
+      : document.querySelector("#new-camera");
+    if (!target) return;
+    setField(target, "host", device.host);
+    setField(target, "mac", device.mac);
+    setField(target, "stream_path", device.stream_path);
+    setField(target, "username", device.username || document.querySelector(
+      '#discovery-form [data-field="username"]').value);
+    if (!device.matched_camera_id) {
+      setField(target, "title", device.name);
+      setField(target, "password", document.querySelector(
+        '#discovery-form [data-field="password"]').value);
+    }
+    const status = target.closest("section, article").querySelector(
+      ".camera-status, #add-status");
+    if (status) status.textContent = "Подставлено — проверьте поля и сохраните";
+    target.scrollIntoView({behavior: "smooth", block: "center"});
+  }
+
+  function describeDevice(device) {
+    if (device.stream_path) return `поток найден: ${device.stream_path}`;
+    if (device.needs_credentials) return "не подошёл логин или пароль";
+    if (!device.rtsp_open) return "RTSP-порт закрыт — вероятно, не камера";
+    return device.reason || "поток не проверялся";
+  }
+
+  function cell(row, text, className) {
+    const td = document.createElement("td");
+    td.textContent = text;
+    if (className) td.className = className;
+    row.append(td);
+    return td;
+  }
+
+  function renderDiscovery(devices) {
+    const container = document.querySelector("#discovery-results");
+    container.replaceChildren();
+    if (!devices.length) {
+      const empty = document.createElement("p");
+      empty.className = "muted";
+      empty.textContent = "Ничего не найдено. Проверьте подсеть и питание камер.";
+      container.append(empty);
+      return;
+    }
+    const table = document.createElement("table");
+    table.className = "found";
+    const head = document.createElement("tr");
+    for (const title of ["Адрес", "MAC", "Имя", "Найдено через", "Состояние", ""]) {
+      const th = document.createElement("th");
+      th.textContent = title;
+      head.append(th);
+    }
+    table.append(head);
+    for (const device of devices) {
+      const row = document.createElement("tr");
+      cell(row, device.host);
+      cell(row, device.mac || "—");
+      cell(row, device.name || "—");
+      cell(row, device.sources.join(", "));
+      cell(row, describeDevice(device), device.stream_path ? "" : "muted");
+      const actions = cell(row, "");
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = device.matched_camera_id ? "" : "secondary";
+      button.textContent = device.matched_camera_id
+        ? `${device.moved ? "Новый адрес" : "Подставить"} → ${device.matched_camera_title}`
+        : "Добавить как новую";
+      button.addEventListener("click", () => applyDiscovered(device));
+      actions.append(button);
+      table.append(row);
+    }
+    const scroll = document.createElement("div");
+    scroll.className = "found-scroll";
+    scroll.append(table);
+    container.append(scroll);
+  }
+
+  document.querySelector("#discover").addEventListener("click", event => {
+    const form = document.querySelector("#discovery-form");
+    const status = document.querySelector("#discovery-status");
+    withButton(event.currentTarget, status, async () => {
+      status.textContent = "Опрос сети, это занимает до минуты…";
+      const result = await send("POST", "/api/cameras/discover", collectFields(form));
+      renderDiscovery(result.devices);
+      const known = result.devices.filter(device => device.matched_camera_id).length;
+      return `Найдено устройств: ${result.devices.length}, из них известных: ${known}`;
+    }, "Поиск завершён");
   });
 
   document.querySelector("#save-detection-settings").addEventListener("click", async event => {

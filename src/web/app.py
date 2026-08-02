@@ -19,6 +19,15 @@ from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from src.common.camera_discovery import (
+    RTSP_PORT,
+    DiscoveredDevice,
+    candidate_paths,
+    discover_devices,
+    identify_stream_path,
+    match_camera,
+    port_is_open,
+)
 from src.common.camera_registry import (
     ROLE_TITLES,
     ROLES,
@@ -62,6 +71,11 @@ TRAINING_TARGETS = {"excluded", "macbook", "local"}
 ACTIVE_EVALUATION_STATES = {"starting", "running"}
 ACTIVE_TRAINING_STATES = {"starting", "preparing", "training"}
 HEARTBEAT_STALE_AFTER = timedelta(minutes=10)
+# Подбор пути потока держит запрос открытым, а администратор ждёт ответ
+# страницы. Ограничения переводят «поиск завис» в «часть устройств не
+# проверена», о чём в ответе сказано прямым текстом.
+DISCOVERY_PROBE_LIMIT = 16
+DISCOVERY_PROBE_SECONDS = 6.0
 INTERRUPTED_MESSAGE = "Прерван без завершения: heartbeat не обновлялся более 10 минут"
 
 
@@ -171,6 +185,19 @@ class CameraPayload(BaseModel):
     enabled: bool = True
     note: str = ""
     rtsp_url: str = ""
+
+
+class DiscoveryPayload(BaseModel):
+    """Что администратор задаёт перед поиском.
+
+    Логин и пароль — общие для всех найденных устройств: у новой камеры их
+    взять неоткуда, а у уже заведённой берутся сохранённые, если поля пусты.
+    """
+
+    username: str = ""
+    password: str = ""
+    subnet: str | None = None
+    probe_streams: bool = True
 
 
 def _unique_camera_id(registry: CameraRegistry, candidate: str) -> str:
@@ -485,6 +512,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "recorder_status": read_recorder_status(
                     settings.data_dir / "runtime" / "recorder-status.json"
                 ),
+                "discovery_subnet": settings.camera_discovery_subnet,
                 "stream_version": uuid4().hex,
             },
         )
@@ -533,6 +561,70 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         registry = current_registry().with_swapped_roles()
         store_registry(registry)
         return {"cameras": [_camera_view(camera) for camera in registry.cameras]}
+
+    @app.post("/api/cameras/discover")
+    def discover_cameras(payload: DiscoveryPayload) -> dict[str, object]:
+        registry = current_registry()
+        subnet = (
+            payload.subnet
+            if payload.subnet is not None
+            else settings.camera_discovery_subnet
+        )
+        devices = discover_devices(
+            leases_path=settings.camera_dhcp_leases_path,
+            arp_path=settings.camera_arp_table_path,
+            subnet=subnet,
+            onvif_timeout=settings.camera_discovery_timeout_seconds,
+        )
+        probed = 0
+
+        def examine(device: DiscoveredDevice) -> dict[str, object]:
+            nonlocal probed
+            camera = match_camera(registry, device)
+            rtsp_open = port_is_open(device.host, RTSP_PORT)
+            username = payload.username or (camera.username if camera is not None else "")
+            found: dict[str, object] = {
+                "host": device.host,
+                "mac": device.mac,
+                "name": device.name,
+                "sources": list(device.sources),
+                "matched_camera_id": camera.id if camera is not None else None,
+                "matched_camera_title": camera.display_title if camera is not None else None,
+                "moved": camera is not None and camera.host != device.host,
+                "rtsp_open": rtsp_open,
+                "username": username,
+                "stream_path": "",
+                "reason": "",
+                "needs_credentials": False,
+            }
+            if not rtsp_open or not payload.probe_streams:
+                return found
+            probed += 1
+            if probed > DISCOVERY_PROBE_LIMIT:
+                found["reason"] = "проверка потока пропущена: слишком много устройств"
+                return found
+            guess = identify_stream_path(
+                device.host,
+                probe=lambda url: probe_stream(
+                    settings.ffmpeg_path,
+                    url,
+                    timeout_seconds=DISCOVERY_PROBE_SECONDS,
+                ),
+                username=username,
+                password=payload.password
+                or (camera.password if camera is not None else ""),
+                paths=candidate_paths(camera.stream_path if camera is not None else ""),
+            )
+            found["stream_path"] = guess.stream_path
+            found["reason"] = guess.reason
+            found["needs_credentials"] = guess.needs_credentials
+            return found
+
+        if not devices:
+            return {"subnet": subnet, "devices": []}
+        with ThreadPoolExecutor(max_workers=min(8, len(devices))) as executor:
+            results = list(executor.map(examine, devices))
+        return {"subnet": subnet, "devices": results}
 
     @app.post("/api/cameras/{camera_id}/test")
     def test_camera(camera_id: str) -> dict[str, object]:

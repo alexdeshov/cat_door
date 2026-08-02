@@ -1,0 +1,191 @@
+from pathlib import Path
+
+from src.common.camera_discovery import (
+    RTSP_PATH_CANDIDATES,
+    DiscoveredDevice,
+    candidate_paths,
+    identify_stream_path,
+    is_authentication_failure,
+    match_camera,
+    merge_devices,
+    parse_probe_match,
+    parse_subnet,
+    read_arp_table,
+    read_dhcp_leases,
+)
+from src.common.camera_registry import CameraRecord, CameraRegistry
+
+PROBE_MATCH = """<?xml version="1.0" encoding="UTF-8"?>
+<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://www.w3.org/2003/05/soap-envelope"
+  xmlns:d="http://schemas.xmlsoap.org/ws/2005/04/discovery">
+  <SOAP-ENV:Body><d:ProbeMatches><d:ProbeMatch>
+    <d:Scopes>onvif://www.onvif.org/type/video_encoder
+      onvif://www.onvif.org/name/HiWatch%20DS-T200
+      onvif://www.onvif.org/location/porch</d:Scopes>
+    <d:XAddrs>http://192.168.1.117/onvif/device_service</d:XAddrs>
+  </d:ProbeMatch></d:ProbeMatches></SOAP-ENV:Body>
+</SOAP-ENV:Envelope>"""
+
+
+def test_dhcp_leases_give_mac_and_address(runtime_path: Path) -> None:
+    path = runtime_path / "dnsmasq.leases"
+    path.write_text(
+        "1785600000 44:47:cc:11:22:33 192.168.1.117 HIWATCH 01:44:47:cc:11:22:33\n"
+        "1785600000 aa:bb:cc:dd:ee:ff 192.168.1.118 * *\n"
+        "мусор\n",
+        encoding="utf-8",
+    )
+
+    devices = read_dhcp_leases(path)
+
+    assert [device.host for device in devices] == ["192.168.1.117", "192.168.1.118"]
+    assert devices[0].mac == "44:47:cc:11:22:33"
+    assert devices[0].name == "HIWATCH"
+    assert devices[1].name == ""
+    assert devices[0].sources == ("dhcp",)
+
+
+def test_missing_leases_file_is_not_an_error(runtime_path: Path) -> None:
+    """Отсутствие dnsmasq — обычное состояние, а не отказ поиска."""
+    assert read_dhcp_leases(runtime_path / "нет-такого") == []
+    assert read_arp_table(runtime_path / "нет-такого") == []
+
+
+def test_arp_table_skips_unanswered_entries(runtime_path: Path) -> None:
+    path = runtime_path / "arp"
+    path.write_text(
+        "IP address       HW type     Flags       HW address            Mask     Device\n"
+        "192.168.1.117    0x1         0x2         44:47:cc:11:22:33     *        eno1\n"
+        "192.168.1.150    0x1         0x0         00:00:00:00:00:00     *        eno1\n",
+        encoding="utf-8",
+    )
+
+    devices = read_arp_table(path)
+
+    assert [device.host for device in devices] == ["192.168.1.117"]
+    assert devices[0].mac == "44:47:cc:11:22:33"
+
+
+def test_sources_are_merged_not_chosen() -> None:
+    """У каждого источника своя половина сведений: MAC у DHCP, имя у ONVIF."""
+    merged = merge_devices(
+        [DiscoveredDevice(host="192.168.1.117", mac="44:47:cc:11:22:33", sources=("dhcp",))],
+        [DiscoveredDevice(host="192.168.1.117", name="HiWatch", sources=("onvif",))],
+        [DiscoveredDevice(host="192.168.1.9", sources=("scan",))],
+    )
+
+    assert [device.host for device in merged] == ["192.168.1.9", "192.168.1.117"]
+    camera = merged[1]
+    assert camera.mac == "44:47:cc:11:22:33"
+    assert camera.name == "HiWatch"
+    assert camera.sources == ("dhcp", "onvif")
+
+
+def test_probe_match_yields_address_and_name() -> None:
+    device = parse_probe_match(PROBE_MATCH, "192.168.1.117")
+
+    assert device is not None
+    assert device.host == "192.168.1.117"
+    assert device.name == "HiWatch DS-T200"
+    assert device.sources == ("onvif",)
+
+
+def test_probe_match_falls_back_to_the_sender() -> None:
+    """В XAddrs камеры пишут и адреса, по которым до них не достучаться."""
+    device = parse_probe_match("<d:ProbeMatches></d:ProbeMatches>", "192.168.1.130")
+
+    assert device is not None
+    assert device.host == "192.168.1.130"
+
+
+def test_subnet_is_parsed_leniently_and_rejects_nonsense() -> None:
+    assert parse_subnet("192.168.1.0/24") is not None
+    assert parse_subnet(" 192.168.1.10/24 ") is not None
+    assert parse_subnet("не подсеть") is None
+    assert parse_subnet("") is None
+
+
+def test_camera_is_recognised_by_mac_after_it_changed_address() -> None:
+    """Ради этого и заводился MAC: адрес у переставленной камеры уже чужой."""
+    registry = CameraRegistry(
+        cameras=[
+            CameraRecord(id="hiwatch", host="192.168.1.101", mac="44:47:cc:11:22:33"),
+            CameraRecord(id="ursa", host="192.168.1.117"),
+        ]
+    )
+
+    matched = match_camera(
+        registry,
+        DiscoveredDevice(host="192.168.1.117", mac="44:47:cc:11:22:33"),
+    )
+
+    assert matched is not None
+    assert matched.id == "hiwatch"
+
+
+def test_camera_without_mac_is_recognised_by_address() -> None:
+    registry = CameraRegistry(cameras=[CameraRecord(id="ursa", host="192.168.1.117")])
+
+    matched = match_camera(registry, DiscoveredDevice(host="192.168.1.117"))
+
+    assert matched is not None
+    assert matched.id == "ursa"
+    assert match_camera(registry, DiscoveredDevice(host="192.168.1.200")) is None
+
+
+def test_known_path_is_tried_first() -> None:
+    paths = candidate_paths("/stream1")
+
+    assert paths[0] == "/stream1"
+    assert sorted(paths) == sorted(RTSP_PATH_CANDIDATES)
+    assert candidate_paths() == RTSP_PATH_CANDIDATES
+
+
+def test_stream_path_is_picked_by_the_first_answering_candidate() -> None:
+    tried: list[str] = []
+
+    def probe(url: str) -> str | None:
+        tried.append(url)
+        return None if url.endswith("/stream1") else "404 Not Found"
+
+    guess = identify_stream_path(
+        "192.168.1.117",
+        probe=probe,
+        username="admin",
+        password="secret",
+        paths=("/one", "/stream1", "/two"),
+    )
+
+    assert guess.stream_path == "/stream1"
+    assert guess.found is True
+    assert len(tried) == 2
+    assert tried[0] == "rtsp://admin:secret@192.168.1.117:554/one"
+
+
+def test_wrong_password_stops_the_search_instead_of_trying_every_path() -> None:
+    """Пароль от пути не зависит, а администратор ждёт ответ страницы."""
+    tried: list[str] = []
+
+    def probe(url: str) -> str | None:
+        tried.append(url)
+        return "401 Unauthorized"
+
+    guess = identify_stream_path("192.168.1.117", probe=probe, paths=("/one", "/two", "/three"))
+
+    assert guess.found is False
+    assert guess.needs_credentials is True
+    assert len(tried) == 1
+    assert is_authentication_failure("401 Unauthorized") is True
+    assert is_authentication_failure("Connection timed out") is False
+
+
+def test_unreachable_camera_reports_the_last_reason() -> None:
+    guess = identify_stream_path(
+        "192.168.1.117",
+        probe=lambda _url: "камера не ответила за 6 с",
+        paths=("/one", "/two"),
+    )
+
+    assert guess.found is False
+    assert guess.needs_credentials is False
+    assert guess.reason == "камера не ответила за 6 с"
