@@ -553,7 +553,12 @@ td.number { font-family: var(--font-data); font-variant-numeric: tabular-nums; }
   font-size: 13px;
 }
 
-.viewport-frame { display: grid; gap: 8px; }
+.viewport-frame {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-content: start;
+  gap: 8px;
+}
 
 .viewport-caption {
   display: flex;
@@ -583,7 +588,17 @@ td.number { font-family: var(--font-data); font-variant-numeric: tabular-nums; }
 }
 
 .pass:first-child { border-top: 0; }
-.pass-media { display: grid; gap: 6px; }
+/* Колонка не тянется по высоте соседней и не даёт треку разъехаться шире
+   себя. Иначе заглушка «адрес не задан» растягивалась до высоты формы
+   настроек, а `aspect-ratio` вычислял из этой высоты ширину — и блок вылезал
+   поверх настроек. С `<img>` этого не видно: у картинки есть собственный
+   размер, и подставлять его из высоты нечего. */
+.pass-media {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-content: start;
+  gap: 6px;
+}
 .pass-media video { width: 100%; border-radius: var(--radius); background: #05080a; display: block; }
 
 .pass-head {
