@@ -65,7 +65,7 @@
 <body>
 <header>
   <h1>CatDoor AI</h1>
-  <div><a href="/metrics">Метрики</a> · <span class="badge">Тестовый режим — дверь не управляется</span></div>
+  <div><a href="/cameras">Камеры</a> · <a href="/metrics">Метрики</a> · <span class="badge">Тестовый режим — дверь не управляется</span></div>
 </header>
 <main>
   <section class="panel">
@@ -153,134 +153,10 @@
       </button>
       <span id="camera-layout-status" class="muted"></span>
     </div>
-    <h3>Настройки детекции</h3>
-    {% for role, title in [("face", "Hikvision"), ("side", "Широкоугольная камера")] %}
-    {% set camera_config = detection_config[role] %}
-    <h4>{{ title }}</h4>
-    <div class="settings-grid">
-      <label>
-        <span class="setting-title">Рабочий confidence
-          <span class="setting-help" tabindex="0" role="note"
-            aria-label="Подсказка: рабочий confidence"
-            data-tooltip="Минимальная уверенность модели, при которой кадр считается обнаружением кота. Ниже — детекция быстрее и чаще, но больше ложных срабатываний. Выше — строже, но кот может быть пропущен.">?</span>
-        </span>
-        <input id="detection-{{ role }}-confidence-threshold"
-          type="number" min="0" max="1" step="0.01"
-          value="{{ camera_config.confidence_threshold }}">
-      </label>
-      <label>
-        <span class="setting-title">Минимум для рамки
-          <span class="setting-help" tabindex="0" role="note"
-            aria-label="Подсказка: минимум для рамки"
-            data-tooltip="Минимальная уверенность для показа цветной рамки на превью. На запуск события не влияет. Ниже — видно больше слабых гипотез модели, выше — только уверенные рамки.">?</span>
-        </span>
-        <input id="detection-{{ role }}-box-min-confidence"
-          type="number" min="0" max="1" step="0.01"
-          value="{{ camera_config.box_min_confidence }}">
-      </label>
-      <label>
-        <span class="setting-title">Подтверждений
-          <span class="setting-help" tabindex="0" role="note"
-            aria-label="Подсказка: число подтверждений"
-            data-tooltip="Сколько кадров в окне должны превысить рабочий confidence. Меньше — реакция быстрее, но чувствительнее к одиночным ошибкам. Больше — стабильнее, но детекция начинается позже.">?</span>
-        </span>
-        <input id="detection-{{ role }}-confirmation-frames"
-          type="number" min="1" max="20"
-          value="{{ camera_config.confirmation_frames }}">
-      </label>
-      <label>
-        <span class="setting-title">Размер окна кадров
-          <span class="setting-help" tabindex="0" role="note"
-            aria-label="Подсказка: размер окна кадров"
-            data-tooltip="Число последних обработанных кадров, среди которых ищутся подтверждения. Большее окно допускает паузы между удачными кадрами, но дольше помнит старые обнаружения. Окно не должно быть меньше числа подтверждений.">?</span>
-        </span>
-        <input id="detection-{{ role }}-window-frames"
-          type="number" min="1" max="30"
-          value="{{ camera_config.window_frames }}">
-      </label>
-      <label>
-        <span class="setting-title">Кадров детектора в секунду
-          <span class="setting-help" tabindex="0" role="note"
-            aria-label="Подсказка: частота детектора"
-            data-tooltip="Сколько кадров этой камеры анализировать каждую секунду. Больше — выше шанс поймать быстро проходящего кота, но выше нагрузка на процессор. Центральной камере обычно полезны 6–8 FPS, широкоугольной камере достаточно 3 FPS.">?</span>
-        </span>
-        <input id="detection-{{ role }}-sample-fps"
-          type="number" min="0.1" max="10" step="0.1"
-          value="{{ camera_config.sample_fps }}">
-      </label>
-      <label>
-        <span class="setting-title">Использовать ROI
-          <span class="setting-help" tabindex="0" role="note"
-            aria-label="Подсказка: область интереса"
-            data-tooltip="ROI обрезает для детектора только полезную часть кадра до масштабирования, поэтому кот становится крупнее. Превью и записи остаются полнокадровыми. Координаты задаются долями от 0 до 1.">?</span>
-        </span>
-        <input id="detection-{{ role }}-roi-enabled" type="checkbox"
-          {{ "checked" if camera_config.roi else "" }}>
-      </label>
-      {% set roi = camera_config.roi %}
-      <label>ROI X
-        <input id="detection-{{ role }}-roi-x" type="number" min="0" max="0.99" step="0.01"
-          value="{{ roi.x if roi else 0 }}">
-      </label>
-      <label>ROI Y
-        <input id="detection-{{ role }}-roi-y" type="number" min="0" max="0.99" step="0.01"
-          value="{{ roi.y if roi else 0 }}">
-      </label>
-      <label>ROI ширина
-        <input id="detection-{{ role }}-roi-width"
-          type="number" min="0.01" max="1" step="0.01"
-          value="{{ roi.width if roi else 1 }}">
-      </label>
-      <label>ROI высота
-        <input id="detection-{{ role }}-roi-height"
-          type="number" min="0.01" max="1" step="0.01"
-          value="{{ roi.height if roi else 1 }}">
-      </label>
-    </div>
-    {% endfor %}
-    <h4>Общие тайминги события</h4>
-    <div class="settings-grid">
-      <label>
-        <span class="setting-title">Таймаут кандидата, сек.
-          <span class="setting-help" tabindex="0" role="note"
-            aria-label="Подсказка: таймаут кандидата"
-            data-tooltip="Сколько времени после первого возможного обнаружения система ждёт остальные подтверждения. Больше — легче поймать быстро исчезающего или плохо видимого кота. Меньше — быстрее сбрасываются случайные гипотезы.">?</span>
-        </span>
-        <input id="detection-candidate-timeout" type="number" min="0.1" max="30" step="0.1"
-          value="{{ detection_config.candidate_timeout_seconds }}">
-      </label>
-      <label>
-        <span class="setting-title">До потери кота, сек.
-          <span class="setting-help" tabindex="0" role="note"
-            aria-label="Подсказка: время до потери кота"
-            data-tooltip="Сколько секунд без подтверждённого кота ждать перед завершением активной части события. Больше — терпимее к кратким пропаданиям из кадра, но запись получается длиннее.">?</span>
-        </span>
-        <input id="detection-absence-seconds" type="number" min="0.1" max="60" step="0.1"
-          value="{{ detection_config.absence_seconds }}">
-      </label>
-      <label>
-        <span class="setting-title">Хвост события, сек.
-          <span class="setting-help" tabindex="0" role="note"
-            aria-label="Подсказка: хвост события"
-            data-tooltip="Сколько видео сохранить после того, как отсутствие кота подтверждено. Большее значение лучше захватывает уход кота, но увеличивает длительность и размер записи.">?</span>
-        </span>
-        <input id="detection-tail-seconds" type="number" min="0" max="60" step="0.1"
-          value="{{ detection_config.tail_seconds }}">
-      </label>
-      <label>
-        <span class="setting-title">Пауза после события, сек.
-          <span class="setting-help" tabindex="0" role="note"
-            aria-label="Подсказка: пауза после события"
-            data-tooltip="Период после завершения события, когда новые детекции не создают следующую запись. Больше — меньше дубликатов одного прохода, но можно пропустить следующий близкий проход.">?</span>
-        </span>
-        <input id="detection-cooldown-seconds" type="number" min="0" max="300" step="0.1"
-          value="{{ detection_config.cooldown_seconds }}">
-      </label>
-    </div>
-    <div class="controls">
-      <button id="save-detection-settings" type="button">Сохранить настройки детекции</button>
-      <span id="detection-settings-status" class="muted"></span>
-    </div>
+    <p class="muted">
+      Список камер, их адреса, роли и настройки детекции — на
+      <a href="/cameras">вкладке «Камеры»</a>.
+    </p>
     {% if face_configured %}
       <div class="controls">
         <label>Длительность
@@ -568,51 +444,6 @@
       localStorage.setItem(cameraLayoutKey, swapped ? "swapped" : "default");
     } catch (error) {
       console.warn("Не удалось сохранить настройку расположения камер", error);
-    }
-  });
-
-  document.querySelector("#save-detection-settings")?.addEventListener("click", async event => {
-    const button = event.currentTarget;
-    const status = document.querySelector("#detection-settings-status");
-    const number = id => Number(document.querySelector(id).value);
-    const cameraSettings = role => {
-      const roiEnabled = document.querySelector(`#detection-${role}-roi-enabled`).checked;
-      return {
-        confidence_threshold: number(`#detection-${role}-confidence-threshold`),
-        box_min_confidence: number(`#detection-${role}-box-min-confidence`),
-        confirmation_frames: number(`#detection-${role}-confirmation-frames`),
-        window_frames: number(`#detection-${role}-window-frames`),
-        sample_fps: number(`#detection-${role}-sample-fps`),
-        roi: roiEnabled ? {
-          x: number(`#detection-${role}-roi-x`),
-          y: number(`#detection-${role}-roi-y`),
-          width: number(`#detection-${role}-roi-width`),
-          height: number(`#detection-${role}-roi-height`)
-        } : null
-      };
-    };
-    const payload = {
-      face: cameraSettings("face"),
-      side: cameraSettings("side"),
-      candidate_timeout_seconds: number("#detection-candidate-timeout"),
-      absence_seconds: number("#detection-absence-seconds"),
-      tail_seconds: number("#detection-tail-seconds"),
-      cooldown_seconds: number("#detection-cooldown-seconds")
-    };
-    button.disabled = true;
-    try {
-      const response = await fetch("/api/detection/settings", {
-        method: "PUT",
-        headers: {"Content-Type": "application/json"},
-        body: JSON.stringify(payload)
-      });
-      const result = await response.json();
-      if (!response.ok) throw new Error(result.detail || "ошибка проверки");
-      status.textContent = "Сохранено — recorder применит настройки в состоянии idle";
-    } catch (error) {
-      status.textContent = `Ошибка: ${error.message}`;
-    } finally {
-      button.disabled = false;
     }
   });
 

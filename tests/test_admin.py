@@ -5,6 +5,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
+from src.common.camera_registry import camera_registry_path, load_registry
 from src.common.database import EvaluationRun, Event, create_session_factory
 from src.common.settings import Settings
 from src.recorder.status import write_recorder_status
@@ -71,14 +72,10 @@ def test_capture_and_label_known_cat(runtime_path: Path, monkeypatch) -> None:
     assert 'localStorage.setItem(cameraRotationKey, JSON.stringify(cameraRotations))' in page.text
     assert 'const cameraRotationKey = "catdoor-camera-rotations-v2"' in page.text
     assert "Автоматический сбор событий" in page.text
-    assert "Настройки детекции" in page.text
-    assert 'id="detection-face-confirmation-frames"' in page.text
-    assert 'id="detection-side-confirmation-frames"' in page.text
-    assert page.text.count('class="setting-help"') == 16
-    assert 'aria-label="Подсказка: рабочий confidence"' in page.text
-    assert "На запуск события не влияет." in page.text
-    assert "Окно не должно быть меньше числа подтверждений." in page.text
-    assert 'class="setting-help" tabindex="0" role="note"' in page.text
+    # Настройки детекции переехали на вкладку камер: там же список камер и их
+    # роли, поэтому редактировать их в двух местах больше не нужно.
+    assert 'id="detection-face-confirmation-frames"' not in page.text
+    assert '<a href="/cameras">вкладке «Камеры»</a>' in page.text
     assert '<video preload="metadata"' in page.text
     assert "<video controls" not in page.text
     assert 'class="video-controls"' in page.text
@@ -583,9 +580,10 @@ def test_detection_settings_can_be_updated(runtime_path: Path, monkeypatch) -> N
     assert response.status_code == 200
     assert response.json() == payload
     assert client.get("/api/detection/settings").json() == payload
-    page = client.get("/")
+    page = client.get("/cameras")
     assert 'id="detection-face-sample-fps"' in page.text
     assert 'id="detection-face-roi-enabled"' in page.text
+    assert 'value="8.0"' in page.text
 
 
 def test_detection_settings_reject_invalid_window(runtime_path: Path, monkeypatch) -> None:
@@ -825,7 +823,9 @@ def test_stream_falls_back_to_the_camera_when_the_recorder_is_idle(
         assert response.status_code == 200
         assert b"camera" in _collect_first_frame(response)
 
-    assert used["rtsp_url"] == "rtsp://user:password@camera.local/media/video1"
+    # Порт проставлен явно: инвентарь хранит адрес разобранным и собирает его
+    # обратно, а камера на нестандартном порту иначе потеряла бы его.
+    assert used["rtsp_url"] == "rtsp://user:password@camera.local:554/media/video1"
     # The role keeps its own orientation flag, which defaults to a rotated camera.
     assert used["rotate_180"] is True
 
@@ -851,17 +851,24 @@ def test_stream_prefers_annotated_frames_while_the_recorder_publishes(
         assert b"annotated" in _collect_first_frame(response)
 
 
-def test_cameras_page_lists_every_configured_camera(
+def test_cameras_page_lists_every_camera_including_the_ones_without_an_address(
     runtime_path: Path,
     monkeypatch,
 ) -> None:
-    client = make_client(runtime_path, monkeypatch, side=True)
+    """Камера без адреса — то, что администратору и нужно увидеть.
+
+    Пропадание такой камеры из списка было прежним поведением и означало, что
+    после перестановки её негде настроить.
+    """
+    client = make_client(runtime_path, monkeypatch, side=False)
 
     page = client.get("/cameras")
 
     assert page.status_code == 200
     assert "/stream/face.mjpeg" in page.text
-    assert "/stream/side.mjpeg" in page.text
+    assert 'data-camera-id="side"' in page.text
+    assert "Адрес не задан" in page.text
+    assert 'id="detection-side-sample-fps"' in page.text
 
 
 def test_unknown_camera_is_not_confused_with_an_unconfigured_one(
@@ -873,3 +880,138 @@ def test_unknown_camera_is_not_confused_with_an_unconfigured_one(
 
     assert client.get("/stream/nothing-like-this.mjpeg").status_code == 404
     assert client.get("/stream/side.mjpeg").status_code == 503
+    # Выключенная камера тоже не отдаёт поток: recorder её не берёт, и живое
+    # изображение обещало бы запись, которой не будет.
+    client.put("/api/cameras/face", json={"enabled": False})
+    assert client.get("/stream/face.mjpeg").status_code == 503
+
+
+def test_camera_list_never_returns_the_password(runtime_path: Path, monkeypatch) -> None:
+    client = make_client(runtime_path, monkeypatch, side=True)
+
+    cameras = client.get("/api/cameras").json()["cameras"]
+
+    assert [camera["id"] for camera in cameras] == ["face", "side"]
+    assert all("password" not in camera for camera in cameras)
+    assert cameras[0]["has_password"] is True
+    assert cameras[0]["username"] == "user"
+    # На странице есть поле «Пароль», но не сам пароль: его значение не
+    # выходит за пределы data/runtime/cameras.json.
+    assert "user:password@" not in client.get("/cameras").text
+
+
+def test_editing_a_camera_keeps_the_stored_password(runtime_path: Path, monkeypatch) -> None:
+    """Пустое поле пароля означает «оставить прежний».
+
+    Форма не может показать сохранённый пароль, поэтому иначе правка соседнего
+    поля стирала бы доступ к камере.
+    """
+    client = make_client(runtime_path, monkeypatch)
+
+    response = client.put(
+        "/api/cameras/face",
+        json={"host": "192.168.1.120", "port": 554, "stream_path": "/one", "username": "user"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["has_password"] is True
+    registry = load_registry(camera_registry_path(runtime_path))
+    assert registry.get("face").password == "password"
+    assert registry.get("face").host == "192.168.1.120"
+
+
+def test_a_camera_survives_getting_a_new_address(runtime_path: Path, monkeypatch) -> None:
+    """Горячая замена: адрес меняется, камера и её роль остаются на месте."""
+    client = make_client(runtime_path, monkeypatch)
+
+    client.put(
+        "/api/cameras/face",
+        json={"rtsp_url": "rtsp://admin:new-secret@192.168.1.131:554/Streaming/Channels/101"},
+    )
+
+    camera = load_registry(camera_registry_path(runtime_path)).by_role("face")
+    assert camera.host == "192.168.1.131"
+    assert camera.password == "new-secret"
+    assert camera.username == "admin"
+    assert client.get("/stream/face.mjpeg").status_code != 404
+
+
+def test_roles_can_be_swapped_without_touching_addresses(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    client = make_client(runtime_path, monkeypatch, side=True)
+    before = load_registry(camera_registry_path(runtime_path))
+
+    response = client.post("/api/cameras/swap-roles")
+
+    assert response.status_code == 200
+    after = load_registry(camera_registry_path(runtime_path))
+    assert after.by_role("face").id == "side"
+    assert after.by_role("side").id == "face"
+    assert after.get("face").host == before.get("face").host
+    assert after.get("side").host == before.get("side").host
+
+
+def test_assigning_a_taken_role_frees_the_other_camera(runtime_path: Path, monkeypatch) -> None:
+    client = make_client(runtime_path, monkeypatch, side=True)
+
+    response = client.put("/api/cameras/side", json={"host": "10.0.0.9", "role": "face"})
+
+    assert response.status_code == 200
+    registry = load_registry(camera_registry_path(runtime_path))
+    assert registry.by_role("face").id == "side"
+    assert registry.get("face").role is None
+
+
+def test_camera_can_be_added_and_deleted(runtime_path: Path, monkeypatch) -> None:
+    client = make_client(runtime_path, monkeypatch)
+
+    created = client.post(
+        "/api/cameras",
+        json={
+            "title": "HiWatch у столба",
+            "rtsp_url": "rtsp://admin:secret@10.0.0.15:554/Streaming/Channels/101",
+        },
+    )
+
+    assert created.status_code == 201
+    # Кириллица из названия в идентификатор не переносится, поэтому вторая
+    # такая камера получает следующий свободный номер, а не отказ.
+    assert created.json()["id"] == "hiwatch"
+    assert created.json()["has_password"] is True
+    second = client.post("/api/cameras", json={"title": "HiWatch у водостока"})
+    assert second.json()["id"] == "hiwatch-2"
+    assert client.post("/api/cameras", json={"id": "hiwatch"}).status_code == 409
+    assert client.delete("/api/cameras/hiwatch").status_code == 204
+    assert client.delete("/api/cameras/hiwatch").status_code == 404
+
+
+def test_invalid_camera_fields_do_not_echo_the_password(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    client = make_client(runtime_path, monkeypatch)
+
+    response = client.put(
+        "/api/cameras/face",
+        json={"host": "10.0.0.5", "mac": "не-mac", "password": "top-secret"},
+    )
+
+    assert response.status_code == 422
+    assert "MAC-адрес" in response.json()["detail"]
+    assert "top-secret" not in response.text
+
+
+def test_stream_probe_reports_the_reason(runtime_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "src.web.app.probe_stream",
+        lambda ffmpeg_path, url, **options: "401 Unauthorized",
+    )
+    client = make_client(runtime_path, monkeypatch)
+
+    response = client.post("/api/cameras/face/test")
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": False, "reason": "401 Unauthorized"}
+    assert client.post("/api/cameras/side/test").status_code == 422
