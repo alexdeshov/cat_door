@@ -108,11 +108,17 @@ def _dnsmasq_directives() -> dict[str, list[str]]:
 
 
 def test_dhcp_serves_only_the_camera_interface() -> None:
-    """Bound to eno1 alone: the home LAN already has a DHCP server on it."""
+    """Bound to eno1 alone: the home LAN already has a DHCP server on it.
+
+    Именно `bind-dynamic`, а не `bind-interfaces`: второй требует, чтобы
+    интерфейс существовал в момент старта, и узел не поднимался после
+    перезагрузки — dnsmasq стартует раньше, чем netplan настраивает eno1.
+    """
     directives = _dnsmasq_directives()
 
     assert directives["interface"] == ["eno1"]
-    assert "bind-interfaces" in directives
+    assert "bind-dynamic" in directives
+    assert "bind-interfaces" not in directives
 
 
 def test_dhcp_does_not_answer_dns() -> None:
