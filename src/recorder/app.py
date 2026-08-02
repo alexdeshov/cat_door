@@ -24,6 +24,7 @@ from src.common.camera_registry import (
     load_registry,
     save_registry,
 )
+from src.common.capture_mode import CaptureMode, capture_mode_path, load_capture_mode
 from src.common.database import create_session_factory
 from src.common.detection_config import (
     CameraDetectionConfig,
@@ -464,12 +465,25 @@ def stream_targets_from_registry(registry: CameraRegistry) -> dict[str, StreamTa
     return targets
 
 
-def publish_heartbeat(settings: Settings, notifier: Notifier | None = None) -> None:
+def current_capture_mode(settings: Settings) -> CaptureMode:
+    """Режим с диска, а при его отсутствии — заданный окружением."""
+    return load_capture_mode(
+        capture_mode_path(settings.data_dir),
+        CaptureMode.from_settings(settings),
+    )
+
+
+def publish_heartbeat(
+    settings: Settings,
+    notifier: Notifier | None = None,
+    mode: CaptureMode | None = None,
+) -> None:
     build_automatic_config(settings)
     # Инвентарь заводится и здесь: recorder может подняться раньше веб-службы,
     # и тогда файл камер должен появиться с его стороны.
     registry = ensure_registry(camera_registry_path(settings.data_dir), settings)
-    if not settings.automatic_capture_enabled:
+    mode = mode or current_capture_mode(settings)
+    if not mode.enabled:
         state = "disabled"
         message = "Автоматический сбор выключен"
     else:
@@ -481,8 +495,8 @@ def publish_heartbeat(settings: Settings, notifier: Notifier | None = None) -> N
         process="CatDoorRecorder",
         state=state,
         message=message,
-        automatic_capture_enabled=settings.automatic_capture_enabled,
-        dry_run=settings.automatic_capture_dry_run,
+        automatic_capture_enabled=mode.enabled,
+        dry_run=mode.dry_run,
         detector_connected=False,
         cameras=_camera_status(stream_targets_from_registry(registry)),
         **_detector_device_status(settings),
@@ -574,6 +588,9 @@ def monitor_automatic(
     notifier: Notifier | None = None,
 ) -> None:
     config_path = detection_config_path(settings.data_dir)
+    mode_path = capture_mode_path(settings.data_dir)
+    runtime_mode = current_capture_mode(settings)
+    stopped_by_operator = False
     registry_path = camera_registry_path(settings.data_dir)
     registry = ensure_registry(registry_path, settings)
     runtime_config = load_detection_config(config_path, DetectionConfig.from_settings(settings))
@@ -670,7 +687,7 @@ def monitor_automatic(
             role: getattr(runtime_config, role).sample_fps
             for role in ("face", "side")
         },
-        recording=not settings.automatic_capture_dry_run,
+        recording=runtime_mode.record_events,
         cameras={
             role: target.camera_id if target.rtsp_url else None
             for role, target in stream_targets.items()
@@ -744,6 +761,15 @@ def monitor_automatic(
                         for role in ("face", "side")
                     }
                     journal.write("config_updated", **runtime_config.model_dump())
+                updated_mode = load_capture_mode(mode_path, runtime_mode)
+                if updated_mode != runtime_mode:
+                    runtime_mode = updated_mode
+                    journal.write("capture_mode_changed", state=runtime_mode.state)
+                if not runtime_mode.enabled:
+                    # Выключено из админки. Выходим здесь, а не по исключению:
+                    # внешний цикл увидит тот же файл и перейдёт на heartbeat.
+                    stopped_by_operator = True
+                    return
                 updated_registry = load_registry(registry_path)
                 if updated_registry is not None and updated_registry != registry:
                     registry = updated_registry
@@ -929,7 +955,7 @@ def monitor_automatic(
                     confidence_side=active_confidences["side"],
                     predictions=online_predictions,
                 )
-                if not settings.automatic_capture_dry_run:
+                if runtime_mode.record_events:
                     journal.write(
                         "event_publish_scheduled",
                         started_at=request.started_at,
@@ -958,12 +984,12 @@ def monitor_automatic(
                 process="CatDoorRecorder",
                 state=update.state.value,
                 message=(
-                    "Dry-run: локальный детектор анализирует камеры"
-                    if settings.automatic_capture_dry_run
+                    "Наблюдение: детектор анализирует камеры, записи нет"
+                    if runtime_mode.dry_run
                     else "Автоматический сбор и запись событий включены"
                 ),
                 automatic_capture_enabled=True,
-                dry_run=settings.automatic_capture_dry_run,
+                dry_run=runtime_mode.dry_run,
                 detector_connected=True,
                 frames_processed=frames_processed,
                 confidences=confidences,
@@ -986,10 +1012,14 @@ def monitor_automatic(
             settings,
             notifier,
             process="CatDoorRecorder",
-            state="probe_completed",
-            message="Dry-run проверка завершена",
-            automatic_capture_enabled=True,
-            dry_run=True,
+            state="disabled" if stopped_by_operator else "probe_completed",
+            message=(
+                "Автоматический сбор выключен"
+                if stopped_by_operator
+                else "Проверка детектора завершена"
+            ),
+            automatic_capture_enabled=not stopped_by_operator,
+            dry_run=runtime_mode.dry_run,
             detector_connected=True,
             frames_processed=frames_processed,
             confidences=confidences,
@@ -1051,10 +1081,11 @@ def run(*, once: bool = False, probe_seconds: float | None = None) -> None:
     consecutive_failures = 0
     while True:
         try:
-            if settings.automatic_capture_enabled:
+            mode = current_capture_mode(settings)
+            if mode.enabled:
                 monitor_automatic(settings, None, notifier)
             else:
-                publish_heartbeat(settings, notifier)
+                publish_heartbeat(settings, notifier, mode)
             consecutive_failures = 0
         except Exception as exc:  # noqa: BLE001 - recorder must survive component failures
             consecutive_failures += 1
@@ -1069,8 +1100,8 @@ def run(*, once: bool = False, probe_seconds: float | None = None) -> None:
                     error_type=error_type,
                     retry_count=consecutive_failures,
                     retry_in_seconds=RECORDER_RETRY_SECONDS,
-                    automatic_capture_enabled=settings.automatic_capture_enabled,
-                    dry_run=settings.automatic_capture_dry_run,
+                    automatic_capture_enabled=mode.enabled,
+                    dry_run=mode.dry_run,
                     detector_connected=False,
                     **_detector_device_status(settings),
                 )
