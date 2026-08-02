@@ -219,3 +219,54 @@ def test_only_the_named_cameras_are_considered() -> None:
 
     assert addresses_from_leases(registry, devices, []) == {}
     assert addresses_from_leases(registry, devices, ["ursa"]) == {}
+
+
+def test_one_camera_on_two_addresses_becomes_one_row() -> None:
+    """После заводского сброса камера видна и по аренде, и по заводскому адресу.
+
+    Двумя строками она предлагала бы завести одну железку дважды.
+    """
+    merged = merge_devices(
+        [DiscoveredDevice(host="192.168.1.106", mac="9c:14:63:41:de:15", sources=("dhcp",))],
+        [DiscoveredDevice(host="192.168.1.108", mac="9c:14:63:41:de:15", sources=("arp", "scan"))],
+    )
+
+    assert len(merged) == 1
+    # Остаётся адрес, на котором открыт RTSP, а не тот, что однажды выдал DHCP.
+    assert merged[0].host == "192.168.1.108"
+    assert merged[0].other_hosts == ("192.168.1.106",)
+    assert set(merged[0].sources) == {"dhcp", "arp", "scan"}
+
+
+def test_the_liveliest_source_decides_which_address_survives() -> None:
+    order = [
+        DiscoveredDevice(host="192.168.1.10", mac="aa:bb:cc:dd:ee:ff", sources=("dhcp",)),
+        DiscoveredDevice(host="192.168.1.11", mac="aa:bb:cc:dd:ee:ff", sources=("arp",)),
+        DiscoveredDevice(host="192.168.1.12", mac="aa:bb:cc:dd:ee:ff", sources=("onvif",)),
+    ]
+
+    merged = merge_devices(order)
+
+    assert merged[0].host == "192.168.1.12"
+    assert sorted(merged[0].other_hosts) == ["192.168.1.10", "192.168.1.11"]
+
+
+def test_devices_without_a_mac_keep_their_own_rows() -> None:
+    """Без MAC совпадение недоказуемо: два адреса могут быть двумя железками."""
+    merged = merge_devices(
+        [DiscoveredDevice(host="192.168.1.20", sources=("scan",))],
+        [DiscoveredDevice(host="192.168.1.21", sources=("scan",))],
+    )
+
+    assert [device.host for device in merged] == ["192.168.1.20", "192.168.1.21"]
+
+
+def test_the_same_address_from_several_sources_is_still_one_row() -> None:
+    merged = merge_devices(
+        [DiscoveredDevice(host="192.168.1.30", mac="aa:bb:cc:dd:ee:ff", sources=("dhcp",))],
+        [DiscoveredDevice(host="192.168.1.30", name="HiWatch", sources=("onvif",))],
+    )
+
+    assert len(merged) == 1
+    assert merged[0].name == "HiWatch"
+    assert merged[0].other_hosts == ()

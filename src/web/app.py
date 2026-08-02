@@ -629,6 +629,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "mac": device.mac,
                 "name": device.name,
                 "sources": list(device.sources),
+                "other_hosts": list(device.other_hosts),
                 "matched_camera_id": camera.id if camera is not None else None,
                 "matched_camera_title": camera.display_title if camera is not None else None,
                 "moved": camera is not None and camera.host != device.host,
