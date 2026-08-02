@@ -69,11 +69,11 @@ def test_starting_calls_systemctl_directly(monkeypatch) -> None:
     """
     calls = _fake_run(
         monkeypatch,
-        {("systemctl", "start", "frigate.service"): (0, "")},
+        {("systemctl", "start", "--no-block", "frigate.service"): (0, "")},
     )
 
     assert set_gate_running("frigate.service", True) is None
-    assert calls == [["systemctl", "start", "frigate.service"]]
+    assert calls == [["systemctl", "start", "--no-block", "frigate.service"]]
 
 
 def test_refused_sudo_is_reported_not_swallowed(monkeypatch) -> None:
@@ -83,3 +83,27 @@ def test_refused_sudo_is_reported_not_swallowed(monkeypatch) -> None:
 
     assert reason is not None
     assert "systemctl stop" in reason
+
+
+def test_activating_is_reported_as_starting_not_stopped(monkeypatch) -> None:
+    """Первый запуск тянет образ минуты; «остановлена» в это время — ложь.
+
+    Она же и вредна: примиритель пытался бы запустить ещё раз, а владелец —
+    щёлкать переключателем.
+    """
+    _fake_run(monkeypatch, {("systemctl", "is-active", "frigate.service"): (3, "activating")})
+
+    status = gate_status("frigate.service")
+
+    assert status.state == "starting"
+    assert status.running is True
+
+
+def test_start_does_not_block_on_container_readiness(monkeypatch) -> None:
+    calls = _fake_run(
+        monkeypatch,
+        {("systemctl", "start", "--no-block", "frigate.service"): (0, "")},
+    )
+
+    assert set_gate_running("frigate.service", True) is None
+    assert calls == [["systemctl", "start", "--no-block", "frigate.service"]]

@@ -270,3 +270,19 @@ def test_the_same_address_from_several_sources_is_still_one_row() -> None:
     assert len(merged) == 1
     assert merged[0].name == "HiWatch"
     assert merged[0].other_hosts == ()
+
+
+def test_expired_leases_are_filtered_when_now_is_given(runtime_path: Path) -> None:
+    """Для автопочинки лежалая аренда — не подсказка, а способ навредить."""
+    path = runtime_path / "dnsmasq.leases"
+    path.write_text(
+        "1000000000 44:47:cc:11:22:33 192.168.1.137 OLD *\n"
+        "9999999999 aa:bb:cc:dd:ee:ff 192.168.1.140 FRESH *\n",
+        encoding="utf-8",
+    )
+
+    unfiltered = read_dhcp_leases(path)
+    filtered = read_dhcp_leases(path, now=2_000_000_000)
+
+    assert [device.host for device in unfiltered] == ["192.168.1.137", "192.168.1.140"]
+    assert [device.host for device in filtered] == ["192.168.1.140"]

@@ -57,12 +57,17 @@ fi
 chown "root:$SERVICE_USER" "$CONFIG_FILE"
 chmod 640 "$CONFIG_FILE"
 
-for unit in catdoor-recorder.service catdoor-web.service; do
+# Примиритель контура калитки ставится вместе с остальными: раньше он жил
+# отдельной ручной установкой, и обновления его юнитов молча не доезжали.
+for unit in catdoor-recorder.service catdoor-web.service \
+        catdoor-gate-sync.service catdoor-gate-sync.path catdoor-gate-sync.timer; do
     install -m 644 "$REPO_DIR/install/$unit" "$UNIT_DIR/$unit"
 done
 
 systemctl daemon-reload
 systemctl enable catdoor-recorder.service catdoor-web.service >/dev/null
+systemctl enable catdoor-gate-sync.service catdoor-gate-sync.path \
+    catdoor-gate-sync.timer >/dev/null
 
 cat <<'NEXT'
 

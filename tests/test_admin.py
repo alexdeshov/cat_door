@@ -847,7 +847,7 @@ def test_stream_prefers_annotated_frames_while_the_recorder_publishes(
     def fake_camera_stream(ffmpeg_path: str, rtsp_url: str, fps: int, **options):
         raise AssertionError("the camera must not be opened twice")
 
-    def fake_published_stream(path: Path, fps: int):
+    def fake_published_stream(path: Path, fps: int, idle_timeout_seconds: float = 20.0):
         yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\nannotated\r\n"
 
     monkeypatch.setattr("src.web.app.mjpeg_stream", fake_camera_stream)
@@ -1335,3 +1335,23 @@ def test_an_undeployed_circuit_is_reported_as_such(runtime_path: Path, monkeypat
     response = client.put("/api/circuits", json={"active": "cats"})
 
     assert response.json()["gate_deployed"] is False
+
+
+def test_manual_capture_is_refused_when_the_disk_is_nearly_full(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    """Новая запись на почти полном диске добила бы и отчётность о ней."""
+    from collections import namedtuple
+
+    usage = namedtuple("usage", "total used free")
+    monkeypatch.setattr(
+        "src.web.app.shutil.disk_usage",
+        lambda path: usage(total=100 * 1024**3, used=99 * 1024**3, free=1 * 1024**3),
+    )
+    client = make_client(runtime_path, monkeypatch)
+
+    response = client.post("/api/events", json={"duration_seconds": 5})
+
+    assert response.status_code == 507
+    assert "Освободите место" in response.json()["detail"]

@@ -4,6 +4,7 @@ import subprocess
 import time
 from pathlib import Path
 
+from src.common.durable_write import publish_file_durably
 from src.recorder.ffmpeg import RecorderError
 
 
@@ -84,10 +85,12 @@ def concatenate_segments(
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
+        # Недописанный .part.mp4 раньше жил до следующего старта recorder.
+        temporary.unlink(missing_ok=True)
         raise RecorderError("ring_concat_failed") from exc
     finally:
         concat_file.unlink(missing_ok=True)
     if result.returncode != 0 or not temporary.is_file() or temporary.stat().st_size == 0:
         temporary.unlink(missing_ok=True)
         raise RecorderError("ring_concat_failed")
-    temporary.replace(destination)
+    publish_file_durably(temporary, destination)

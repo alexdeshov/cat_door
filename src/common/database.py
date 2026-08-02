@@ -117,12 +117,27 @@ def apply_migrations(database_path: Path) -> None:
         for migration in sorted(migrations_dir.glob("*.sql")):
             if migration.stem in applied:
                 continue
-            connection.executescript(migration.read_text(encoding="utf-8"))
+            try:
+                connection.executescript(migration.read_text(encoding="utf-8"))
+            except sqlite3.OperationalError as exc:
+                # `executescript` коммитит и работает вне транзакции, поэтому
+                # потеря питания между скриптом и записью версии оставляет
+                # миграцию применённой, но не отмеченной. При следующем старте
+                # повтор упирается в «duplicate column» — и раньше это клало
+                # обе службы в вечный рестарт до ручной правки базы. Такой
+                # повтор — свидетельство уже сделанной работы, а не ошибка.
+                if not _already_applied(exc):
+                    raise
             connection.execute(
                 "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
                 (migration.stem, datetime.now(UTC).isoformat()),
             )
         connection.commit()
+
+
+def _already_applied(exc: sqlite3.OperationalError) -> bool:
+    message = str(exc).lower()
+    return "duplicate column" in message or "already exists" in message
 
 
 def _configure_sqlite_connection(connection: Any, _: Any = None) -> None:

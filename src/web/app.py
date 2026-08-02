@@ -757,7 +757,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # simply has none and is streamed directly.
         path = preview_path(settings.data_dir, camera.role or camera.id)
         frames = (
-            local_mjpeg_stream(path, settings.preview_fps)
+            local_mjpeg_stream(
+                path,
+                settings.preview_fps,
+                idle_timeout_seconds=settings.preview_idle_timeout_seconds,
+            )
             if preview_is_fresh(path)
             else mjpeg_stream(
                 settings.ffmpeg_path,
@@ -868,6 +872,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         side_url = _role_stream_url(registry, "side")
         if not face_url:
             raise HTTPException(503, "Камера face не настроена")
+        try:
+            free_gb = shutil.disk_usage(settings.data_dir).free / 1024**3
+        except OSError as exc:
+            raise HTTPException(507, "Не удалось проверить место на диске") from exc
+        if free_gb < settings.disk_min_free_gb:
+            raise HTTPException(
+                507,
+                f"Осталось {free_gb:.1f} ГБ — меньше порога "
+                f"{settings.disk_min_free_gb:g} ГБ. Освободите место: новая "
+                "запись добила бы диск, после чего замолчала бы и отчётность.",
+            )
         event = Event(duration_seconds=payload.duration_seconds)
         session.add(event)
         session.commit()
@@ -1242,6 +1257,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         request: Request,
         session: Annotated[Session, Depends(get_session)],
     ) -> HTMLResponse:
+        # Прогон, убитый отключением питания, иначе висел бы «выполняется»
+        # до следующей попытки запустить новую оценку.
+        _expire_stale_evaluations(session, settings.data_dir)
         runs = session.scalars(
             select(EvaluationRun).order_by(EvaluationRun.created_at.desc())
         ).all()

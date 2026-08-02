@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import queue
+import shutil
 import sqlite3
 import subprocess
 import threading
 import time
 from collections import deque
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -53,8 +55,10 @@ from src.recorder.detection_journal import DetectionJournal
 from src.recorder.events import (
     AutomaticEventPrediction,
     AutomaticEventRequest,
+    expire_stale_recordings,
     persist_automatic_event,
 )
+from src.recorder.ffmpeg import probe_stream
 from src.recorder.frames import rgb_frame_stream
 from src.recorder.preview import annotate_detections, preview_path, publish_preview
 from src.recorder.status import write_recorder_status
@@ -91,20 +95,36 @@ class StreamTarget:
 class StreamState:
     """Признаки жизни потока роли и способ его разбудить.
 
-    Чтение кадра блокирующее: камера, исчезнувшая без закрытия TCP-сессии,
-    оставляет поток роли в `read` навсегда. Главный цикл при этом продолжает
-    работать и исправно кормит watchdog, поэтому systemd такой отказ не увидит
-    — заметить и прервать его может только тот, кто помнит время последнего
-    кадра и держит сам процесс ffmpeg.
+    Два разных вопроса намеренно разведены по разным отметкам времени.
+
+    «Голодает ли роль» отсчитывается от последнего кадра и НЕ сбрасывается
+    переподключениями: у ffmpeg есть собственный пятисекундный RTSP-таймаут,
+    поэтому мёртвая камера даёт не зависший процесс, а быстрый цикл
+    подключение-отказ. Если мерить молчание от начала каждой попытки, оно
+    никогда не накопится — и поиск камеры в арендах не запустится никогда.
+    Ровно эта ошибка здесь и была.
+
+    «Пора ли убивать процесс» отсчитывается от запуска конкретного процесса:
+    свежесозданное подключение резать нельзя, а зависшее чтение — можно только
+    убийством, потому что оно блокирующее.
     """
 
-    started_at: float = 0.0
+    target_key: tuple[str, bool] | None = None
+    target_since: float = 0.0
     last_frame_at: float = 0.0
+    process_started_at: float = 0.0
     process: subprocess.Popen[bytes] | None = None
+    # Счёт убийств без единого кадра между ними: каждое удваивает выдержку
+    # перед следующим. Камера, отдающая кадр раз в сорок секунд, иначе жила
+    # бы в вечном цикле kill-reconnect с нулём полезных кадров.
+    kills_without_frames: int = 0
 
-    def silent_for(self, now: float) -> float:
-        reference = max(self.started_at, self.last_frame_at)
+    def starving_for(self, now: float) -> float:
+        reference = max(self.target_since, self.last_frame_at)
         return 0.0 if reference <= 0 else now - reference
+
+    def kill_patience(self, stall_seconds: float) -> float:
+        return stall_seconds * (2 ** min(self.kills_without_frames, 5))
 
 
 def restart_stalled_streams(
@@ -115,47 +135,60 @@ def restart_stalled_streams(
     config_lock: threading.Lock,
     stall_seconds: float,
     now: float,
-) -> list[str]:
-    """Прервать потоки, из которых давно не приходило кадров. Вернуть их роли.
+) -> tuple[list[str], list[str]]:
+    """Вернуть (голодающие роли, убитые процессы).
 
-    Процесс именно убивается, а не завершается вежливо: он застрял в системном
-    вызове, и смысл сигнала в том, чтобы чтение в воркере вернуло конец файла и
-    цикл переподключения пошёл заново. Отметки времени сдвигаются здесь же,
-    иначе роль убивали бы на каждой итерации, пока новый поток поднимается.
+    Голодание — повод искать камеру в арендах и показывать беду в статусе; оно
+    держится, пока не придёт настоящий кадр. Убийство — крайняя мера для
+    процесса, который живёт дольше выдержки и не отдал ни кадра: чтение из него
+    блокирующее, и разбудить его иначе нельзя.
     """
-    stalled: list[str] = []
+    starving: list[str] = []
+    killed: list[str] = []
     with config_lock:
         for role, state in stream_states.items():
             if not stream_targets[role].rtsp_url:
                 continue
-            if state.silent_for(now) < stall_seconds:
+            if state.starving_for(now) < stall_seconds:
                 continue
-            stalled.append(role)
-            state.started_at = now
-            state.last_frame_at = now
-            if state.process is not None:
-                with suppress(OSError):
-                    state.process.kill()
-                state.process = None
-    for role in stalled:
+            starving.append(role)
+            if state.process is None:
+                continue
+            lived = now - max(state.process_started_at, state.last_frame_at)
+            if lived < state.kill_patience(stall_seconds):
+                continue
+            with suppress(OSError):
+                state.process.kill()
+            state.process = None
+            state.process_started_at = now
+            state.kills_without_frames += 1
+            killed.append(role)
+    for role in killed:
         _clear_queue(frame_queues[role])
         reload_events[role].set()
-    return stalled
+    return starving, killed
 
 
 def recover_stalled_addresses(
-    registry: CameraRegistry,
+    settings: Settings,
     registry_path: Path,
-    leases_path: Path,
     stream_targets: dict[str, StreamTarget],
     roles: Sequence[str],
-) -> tuple[CameraRegistry, dict[str, str]]:
-    """Подставить молчащим камерам адрес, под которым их видит DHCP.
+    probe: Callable[[str], str | None] | None = None,
+) -> tuple[CameraRegistry | None, dict[str, str]]:
+    """Подставить голодающим камерам адрес, под которым их видит DHCP.
 
-    Единственный случай, когда система правит инвентарь сама. Основание для
-    этого сильное: MAC совпал, значит это та же камера, а старый адрес молчит
-    уже дольше допустимого. Ждать здесь решения владельца означало бы, что
-    ночной перебой питания стоит записей до утра.
+    Единственное место, где система правит инвентарь сама, поэтому три
+    предохранителя, каждый — из реального способа навредить:
+
+    - реестр читается с диска прямо перед правкой, а не берётся из памяти
+      recorder: иначе затирались бы правки, сделанные админом, пока recorder
+      был занят событием;
+    - истёкшие аренды отбрасываются: лежалая запись со старым адресом иначе
+      перезаписала бы рабочий статический адрес мёртвым;
+    - кандидат проверяется пробным кадром до записи: адрес, на котором никто
+      не отвечает нашим паролем, не применяется, а попытка повторится, когда
+      камера действительно поднимется.
     """
     camera_ids = [
         stream_targets[role].camera_id
@@ -163,28 +196,50 @@ def recover_stalled_addresses(
         if stream_targets[role].camera_id is not None
     ]
     if not camera_ids:
-        return registry, {}
+        return None, {}
+    registry = load_registry(registry_path)
+    if registry is None:
+        return None, {}
     updates = addresses_from_leases(
         registry,
-        read_dhcp_leases(leases_path),
+        read_dhcp_leases(settings.camera_dhcp_leases_path, now=time.time()),
         [camera_id for camera_id in camera_ids if camera_id is not None],
     )
     if not updates:
-        return registry, {}
+        return None, {}
+    check = probe or (
+        lambda url: probe_stream(settings.ffmpeg_path, url, timeout_seconds=6.0)
+    )
     updated = registry
+    applied: dict[str, str] = {}
     for camera_id, host in updates.items():
         camera = updated.get(camera_id)
         if camera is None:
             continue
-        updated = updated.with_camera(camera.model_copy(update={"host": host}))
+        taken = next(
+            (other for other in updated.cameras if other.id != camera_id and other.host == host),
+            None,
+        )
+        if taken is not None:
+            # Адрес уже принадлежит другой камере инвентаря: применив его, роль
+            # молча писала бы чужой ракурс. Лучше остаться без кадров, чем с
+            # неверными.
+            continue
+        candidate = camera.model_copy(update={"host": host})
+        if check(candidate.rtsp_url()) is not None:
+            continue
+        updated = updated.with_camera(candidate)
+        applied[camera_id] = host
+    if not applied:
+        return None, {}
     try:
         save_registry(registry_path, updated)
     except OSError:
         # Записать не удалось — инвентарь на диске остаётся прежним, и попытка
-        # повторится на следующем застое. Отдавать наружу изменение, которого
+        # повторится на следующей проверке. Отдавать наружу изменение, которого
         # нет в файле, нельзя: админка показала бы несуществующий адрес.
-        return registry, {}
-    return updated, updates
+        return None, {}
+    return updated, applied
 
 
 @contextmanager
@@ -244,6 +299,24 @@ def publish_status(
 
 def build_automatic_config(settings: Settings) -> AutomaticEventConfig:
     return DetectionConfig.from_settings(settings).event_config()
+
+
+def _disk_status(settings: Settings) -> dict[str, object]:
+    """Свободное место тома данных — в каждый публикуемый статус.
+
+    Диск был единственным ресурсом узла без всякой видимости: он заполнялся
+    месяцами, а владелец узнавал об этом, когда переставала писаться даже
+    отчётность.
+    """
+    try:
+        usage = shutil.disk_usage(settings.data_dir)
+    except OSError:
+        return {"disk_free_gb": None, "disk_low": True}
+    free_gb = usage.free / 1024**3
+    return {
+        "disk_free_gb": round(free_gb, 1),
+        "disk_low": free_gb < settings.disk_min_free_gb,
+    }
 
 
 def _camera_status(stream_targets: dict[str, StreamTarget]) -> dict[str, object]:
@@ -510,6 +583,7 @@ def publish_heartbeat(
         dry_run=mode.dry_run,
         detector_connected=False,
         cameras=_camera_status(stream_targets_from_registry(registry)),
+        **_disk_status(settings),
         **_detector_device_status(settings),
     )
 
@@ -534,24 +608,27 @@ def _frame_worker(
     def remember_process(process: subprocess.Popen[bytes]) -> None:
         with config_lock:
             state.process = process
+            state.process_started_at = time.monotonic()
 
     while not stop.is_set():
         with config_lock:
             camera_config = camera_configs[role]
             target = stream_targets[role]
             state.process = None
-            # Отсчёт молчания начинается с попытки подключиться, а не с первого
-            # кадра: камера, которая приняла соединение и не отдала ни одного
-            # кадра, — такой же застой, как и оборвавшаяся посреди потока.
-            state.started_at = time.monotonic()
-            state.last_frame_at = 0.0
+            # Отметка кадров сбрасывается ТОЛЬКО при смене цели. Голодание роли
+            # обязано накапливаться сквозь переподключения: мёртвая камера даёт
+            # быстрый цикл подключение-отказ, а не одно долгое молчание.
+            key = (target.rtsp_url, target.rotate_180)
+            if state.target_key != key:
+                state.target_key = key
+                state.target_since = time.monotonic()
+                state.last_frame_at = 0.0
+                state.kills_without_frames = 0
             reload_stream.clear()
         if not target.rtsp_url:
             # Роль без камеры — это ожидание назначения, а не конец работы.
             # Раньше воркер здесь завершался, и камера, подключённая позже,
             # начинала отдавать кадры только после перезапуска службы.
-            with config_lock:
-                state.started_at = 0.0
             stop.wait(CAMERA_WAIT_SECONDS)
             continue
         try:
@@ -572,6 +649,7 @@ def _frame_worker(
                     break
                 with config_lock:
                     state.last_frame_at = time.monotonic()
+                    state.kills_without_frames = 0
                 item = (
                     role,
                     prepare_detector_frame(
@@ -589,6 +667,15 @@ def _frame_worker(
                 _put_latest(output, item)
         except OSError:
             pass
+        except Exception:
+            # Раньше здесь ловился только OSError, и любое другое исключение
+            # убивало поток. Главный цикл при этом продолжал публиковать статус
+            # и кормить watchdog: захват мёртв, а служба выглядит здоровой, и
+            # перезапустить её некому. Воркер обязан быть бессмертным.
+            logging.getLogger("catdoor.recorder").exception(
+                "Сбой потока кадров роли %s, переподключение", role
+            )
+            stop.wait(RECORDER_RETRY_SECONDS)
         if not reload_stream.is_set():
             stop.wait(1)
 
@@ -599,7 +686,6 @@ def monitor_automatic(
     notifier: Notifier | None = None,
 ) -> None:
     config_path = detection_config_path(settings.data_dir)
-    mode_path = capture_mode_path(settings.data_dir)
     runtime_mode = current_capture_mode(settings)
     stopped_by_operator = False
     registry_path = camera_registry_path(settings.data_dir)
@@ -705,15 +791,17 @@ def monitor_automatic(
         },
     )
     last_config_check_at = 0.0
+    last_mode_check_at = 0.0
     last_lease_check_at = 0.0
+    starving_before: set[str] = set()
     next_camera = "face"
     try:
         while duration_seconds is None or time.monotonic() - started_at < duration_seconds:
             now = time.monotonic()
-            # Проверка застоя идёт вне зависимости от состояния автомата:
+            # Проверка голодания идёт вне зависимости от состояния автомата:
             # камера, замолчавшая посреди прохода, — это как раз тот момент,
             # когда ждать возврата в ожидание бессмысленно.
-            stalled = restart_stalled_streams(
+            starving, killed = restart_stalled_streams(
                 stream_states,
                 stream_targets,
                 frame_queues,
@@ -722,35 +810,62 @@ def monitor_automatic(
                 settings.camera_stall_seconds,
                 now,
             )
-            if stalled:
+            # Журналируются переходы, а не каждое совпадение: голодание длится
+            # часами, и построчная запись раз в цикл вымыла бы из журнала всю
+            # полезную историю задолго до конца ночи.
+            starving_now = set(starving)
+            if killed:
                 journal.write(
                     "stream_stalled",
-                    roles=stalled,
-                    silent_seconds=round(settings.camera_stall_seconds, 1),
-                    cameras={
-                        role: stream_targets[role].camera_id for role in stalled
-                    },
+                    roles=sorted(killed),
+                    cameras={role: stream_targets[role].camera_id for role in killed},
                 )
-                if now - last_lease_check_at >= LEASE_CHECK_SECONDS:
-                    last_lease_check_at = now
-                    registry, moved = recover_stalled_addresses(
-                        registry,
-                        registry_path,
-                        settings.camera_dhcp_leases_path,
-                        stream_targets,
-                        stalled,
-                    )
-                    if moved:
-                        # Новый адрес подставляется сразу, а не ждёт обычной
-                        # сверки инвентаря: та сравнивает файл с уже обновлённой
-                        # копией в памяти и разницы не увидит.
-                        recovered_targets = stream_targets_from_registry(registry)
-                        with config_lock:
-                            for role in stalled:
-                                stream_targets[role] = recovered_targets[role]
-                        # Адреса в журнал не пишутся: достаточно того, какая
-                        # камера переехала. Точное значение видно в админке.
-                        journal.write("camera_address_recovered", cameras=sorted(moved))
+            for role in sorted(starving_now - starving_before):
+                journal.write(
+                    "stream_starving",
+                    camera=role,
+                    camera_id=stream_targets[role].camera_id,
+                    silent_seconds=round(settings.camera_stall_seconds, 1),
+                )
+            for role in sorted(starving_before - starving_now):
+                journal.write("stream_recovered", camera=role)
+            starving_before = starving_now
+            if starving and now - last_lease_check_at >= LEASE_CHECK_SECONDS:
+                last_lease_check_at = now
+                recovered_registry, moved = recover_stalled_addresses(
+                    settings,
+                    registry_path,
+                    stream_targets,
+                    starving,
+                )
+                if recovered_registry is not None and moved:
+                    # Реестр читался с диска внутри recover — берём его же,
+                    # чтобы память не разошлась с файлом, и сразу подставляем
+                    # цели голодающим ролям.
+                    registry = recovered_registry
+                    recovered_targets = stream_targets_from_registry(registry)
+                    with config_lock:
+                        for role in starving:
+                            stream_targets[role] = recovered_targets[role]
+                    # Адреса в журнал не пишутся: достаточно того, какая
+                    # камера переехала. Точное значение видно в админке.
+                    journal.write("camera_address_recovered", cameras=sorted(moved))
+            # Режим сбора и разрешение узла проверяются в ЛЮБОМ состоянии
+            # автомата. Прежде проверка была зарезана ожиданием, и выключение —
+            # хоть тумблером сбора, хоть переключателем контуров — не
+            # действовало, пока детектор видел кота или ложное срабатывание на
+            # статичный предмет, то есть неопределённо долго.
+            if now - last_mode_check_at >= 1:
+                last_mode_check_at = now
+                updated_mode = current_capture_mode(settings)
+                if updated_mode != runtime_mode:
+                    runtime_mode = updated_mode
+                    journal.write("capture_mode_changed", state=runtime_mode.state)
+                if not runtime_mode.enabled:
+                    # Выключено из админки. Выходим здесь, а не по исключению:
+                    # внешний цикл увидит тот же файл и перейдёт на heartbeat.
+                    stopped_by_operator = True
+                    return
             if now - last_config_check_at >= 1 and machine.state.value == "idle":
                 updated_config = load_detection_config(config_path, runtime_config)
                 if updated_config != runtime_config:
@@ -772,15 +887,6 @@ def monitor_automatic(
                         for role in ("face", "side")
                     }
                     journal.write("config_updated", **runtime_config.model_dump())
-                updated_mode = load_capture_mode(mode_path, runtime_mode)
-                if updated_mode != runtime_mode:
-                    runtime_mode = updated_mode
-                    journal.write("capture_mode_changed", state=runtime_mode.state)
-                if not runtime_mode.enabled:
-                    # Выключено из админки. Выходим здесь, а не по исключению:
-                    # внешний цикл увидит тот же файл и перейдёт на heartbeat.
-                    stopped_by_operator = True
-                    return
                 updated_registry = load_registry(registry_path)
                 if updated_registry is not None and updated_registry != registry:
                     registry = updated_registry
@@ -843,7 +949,8 @@ def monitor_automatic(
                     frames_processed=frames_processed,
                     confidences=confidences,
                     cameras=_camera_status(stream_targets),
-                    **_detector_device_status(settings, detector),
+            **_disk_status(settings),
+            **_detector_device_status(settings, detector),
                 )
                 continue
             inference_started_at = time.monotonic()
@@ -966,7 +1073,17 @@ def monitor_automatic(
                     confidence_side=active_confidences["side"],
                     predictions=online_predictions,
                 )
-                if runtime_mode.record_events:
+                low_disk = bool(_disk_status(settings)["disk_low"])
+                if runtime_mode.record_events and low_disk:
+                    # Записать нечем: ниже порога каждая новая запись приближает
+                    # момент, когда замолчит и сама отчётность. Отказ явный и
+                    # журналируемый, а не тихое исчезновение проходов.
+                    journal.write(
+                        "event_skipped_low_disk",
+                        started_at=request.started_at,
+                        ended_at=request.ended_at,
+                    )
+                if runtime_mode.record_events and not low_disk:
                     journal.write(
                         "event_publish_scheduled",
                         started_at=request.started_at,
@@ -1008,7 +1125,8 @@ def monitor_automatic(
                 last_action=last_action,
                 initiating_camera=update.initiating_camera,
                 cameras=_camera_status(stream_targets),
-                **_detector_device_status(settings, detector),
+            **_disk_status(settings),
+            **_detector_device_status(settings, detector),
             )
             last_status_at = now
     except (OSError, RuntimeError, ValueError, SQLAlchemyError) as exc:
@@ -1037,6 +1155,7 @@ def monitor_automatic(
             identity=identity_predictions,
             last_action=last_action,
             cameras=_camera_status(stream_targets),
+            **_disk_status(settings),
             **_detector_device_status(settings, detector),
         )
         journal.write(
@@ -1076,8 +1195,19 @@ def run(*, once: bool = False, probe_seconds: float | None = None) -> None:
     validate_runtime_paths(settings)
     # Единственный момент, когда точно известно, что прерванная запись уже не
     # продолжится: процесс только что стартовал. Пропажа питания не исполняет
-    # ни одного блока `finally`, поэтому её следы убираются здесь.
+    # ни одного блока `finally`, поэтому её следы убираются здесь — и файлы,
+    # и строки базы, застрявшие в статусе «идёт запись».
     sweep_incomplete_files(settings.data_dir)
+    try:
+        expired = expire_stale_recordings(settings.resolved_database_path)
+        if expired:
+            logging.getLogger("catdoor.recorder").warning(
+                "Помечено прерванными записей: %d", expired
+            )
+    except (sqlite3.Error, SQLAlchemyError):
+        # Недоступная база не должна мешать старту: её отказ проявится и будет
+        # обработан в рабочем цикле, где для этого есть ретраи и статус.
+        pass
     notifier = Notifier.from_environment()
     if probe_seconds is not None:
         settings.automatic_capture_enabled = True
@@ -1114,7 +1244,8 @@ def run(*, once: bool = False, probe_seconds: float | None = None) -> None:
                     automatic_capture_enabled=mode.enabled,
                     dry_run=mode.dry_run,
                     detector_connected=False,
-                    **_detector_device_status(settings),
+        **_disk_status(settings),
+        **_detector_device_status(settings),
                 )
             except Exception:  # noqa: BLE001,S110 - status failure must not stop recorder
                 pass

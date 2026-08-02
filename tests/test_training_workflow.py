@@ -230,3 +230,34 @@ def test_build_dataset_reports_and_excludes_frames_without_cat_box(
     assert report["detector_crops"]["excluded_no_confident_box"] == 1
     assert report["ready_for_production"] is False
     assert not list((destination / "images").rglob("*.jpg"))
+
+
+def test_only_the_last_three_exports_are_kept(runtime_path, monkeypatch) -> None:
+    """Каждый экспорт — гигабайты видео; раньше они копились вечно."""
+    from training import workflow
+
+    exports = runtime_path / "exports"
+    exports.mkdir(parents=True)
+    for index in range(5):
+        (exports / f"macbook-2025010{index}-000000-aaaa.zip").write_bytes(b"x")
+
+    monkeypatch.setattr(workflow, "build_dataset", lambda *args, **kwargs: None)
+    def fake_archive(base, fmt, root):
+        archive = Path(str(base) + ".zip")
+        archive.write_bytes(b"x")
+        return str(archive)
+
+    monkeypatch.setattr(workflow.shutil, "make_archive", fake_archive)
+    monkeypatch.setattr(workflow.shutil, "rmtree", lambda path: None)
+
+    workflow.create_macbook_export(
+        runtime_path / "db.sqlite3", runtime_path, "ffmpeg",
+        runtime_path / "model.onnx", "CPU", None,
+    )
+
+    remaining = sorted(p.name for p in exports.glob("macbook-*.zip"))
+    assert len(remaining) == 3
+    # Остаются самые свежие: два последних старых плюс только что созданный.
+    assert remaining[0] == "macbook-20250103-000000-aaaa.zip"
+    assert remaining[1] == "macbook-20250104-000000-aaaa.zip"
+    assert remaining[2].startswith("macbook-2026")

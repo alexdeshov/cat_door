@@ -302,6 +302,12 @@ def create_macbook_export(
     )
     archive = Path(shutil.make_archive(str(exports_root / name), "zip", work_dir))
     shutil.rmtree(work_dir)
+    # Каждый экспорт — гигабайты размеченных видео, и раньше они копились
+    # вечно: ни предела, ни индикации. Архив нужен один раз — донести датасет
+    # до MacBook; пара предыдущих остаётся на случай «скачал и потерял».
+    stale = sorted(exports_root.glob("macbook-*.zip"))[:-3]
+    for old_archive in stale:
+        old_archive.unlink(missing_ok=True)
     return archive
 
 

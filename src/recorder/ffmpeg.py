@@ -7,6 +7,8 @@ from collections.abc import Iterator
 from contextlib import suppress
 from pathlib import Path
 
+from src.common.durable_write import publish_file_durably
+
 logger = logging.getLogger("catdoor.ffmpeg")
 
 # FFmpeg quotes the whole input URL back in its diagnostics, and the RTSP URL
@@ -93,7 +95,7 @@ def record_clip(
         reason = mask_credentials((result.stderr or "").strip())
         logger.error("Запись RTSP не удалась: %s", reason or "ffmpeg ничего не сообщил")
         raise RecorderError("rtsp_recording_failed")
-    temporary.replace(destination)
+    publish_file_durably(temporary, destination)
 
 
 def probe_stream(
@@ -156,6 +158,13 @@ def _terminate_when_idle(
             continue
         with suppress(OSError):
             process.terminate()
+        # ffmpeg, застрявший в сетевом вводе-выводе, SIGTERM не разбудит —
+        # тогда чтение так и осталось бы заблокированным навсегда.
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            with suppress(OSError):
+                process.kill()
         return
 
 
