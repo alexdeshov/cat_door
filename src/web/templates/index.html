@@ -70,7 +70,7 @@
     <div class="camera-pair">
       <div class="viewport-frame">
         {% if face_configured %}
-          <img id="primary-camera-stream" class="viewport"
+          <img id="primary-camera-stream" class="viewport" data-live-stream
             src="/stream/face.mjpeg?v={{ stream_version }}" alt="Живое изображение основной камеры">
         {% else %}
           <div class="viewport viewport-empty">Основной камере не назначен адрес</div>
@@ -84,7 +84,7 @@
       </div>
       <div class="viewport-frame">
         {% if side_configured %}
-          <img id="secondary-camera-stream" class="viewport"
+          <img id="secondary-camera-stream" class="viewport" data-live-stream
             src="/stream/side.mjpeg?v={{ stream_version }}" alt="Живое изображение дополнительной камеры">
         {% else %}
           <div class="viewport viewport-empty">Дополнительной камере не назначен адрес</div>

@@ -71,6 +71,40 @@
       // Не сохранилось — переключение всё равно действует до перезагрузки.
     }
   });
+
+  // Живое превью — один длинный HTTP-ответ. Сервер держит его через пропажу
+  // камеры сам, но когда ответ всё-таки кончается (перезапуск веб-службы,
+  // обрыв сети, исчерпанное ожидание мёртвой камеры), <img> навсегда остаётся
+  // с последним кадром и молча врёт, будто камера жива. О конце multipart-
+  // ответа браузер не сообщает никак, поэтому поток перезапрашивается по
+  // ошибке и при возвращении к вкладке — там, где человек всё равно смотрит.
+  const liveStreamAttempts = new WeakMap();
+
+  function reopenLiveStream(image) {
+    const attempt = (liveStreamAttempts.get(image)?.attempt || 0) + 1;
+    liveStreamAttempts.set(image, {attempt});
+    const source = new URL(image.getAttribute("src"), location.href);
+    source.searchParams.set("r", String(attempt));
+    image.src = source.pathname + source.search;
+  }
+
+  function liveStreams() {
+    return document.querySelectorAll("img[data-live-stream]");
+  }
+
+  liveStreams().forEach(image => {
+    image.addEventListener("error", () => {
+      // Растущая пауза: камера без адреса отвечает отказом сразу, и без неё
+      // страница молотила бы запросами всё время, что её не настроили.
+      const state = liveStreamAttempts.get(image) || {attempt: 0};
+      setTimeout(() => reopenLiveStream(image), Math.min(3000 * (state.attempt + 1), 30000));
+    });
+    image.addEventListener("load", () => liveStreamAttempts.delete(image));
+  });
+
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") liveStreams().forEach(reopenLiveStream);
+  });
 </script>
 {% block scripts %}{% endblock %}
 </body>

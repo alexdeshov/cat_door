@@ -3,7 +3,7 @@ import json
 import shutil
 import subprocess
 import sys
-from collections.abc import AsyncIterator, Generator
+from collections.abc import AsyncIterator, Generator, Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
@@ -86,6 +86,7 @@ from src.common.settings import ConfigurationError, Settings, validate_runtime_p
 from src.recorder.ffmpeg import RecorderError, mjpeg_stream, probe_stream, record_clip
 from src.recorder.preview import local_mjpeg_stream, preview_is_fresh, preview_path
 from src.recorder.status import read_recorder_status
+from src.web.live_stream import resilient_mjpeg_stream
 from training.workflow import create_macbook_export, write_status
 
 LABELS = {"pending", "known_cat", "foreign_cat", "not_visible", "multiple_cats"}
@@ -746,33 +747,42 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         camera = registry.resolve(view)
         if camera is None:
             raise HTTPException(404, "Неизвестная камера")
-        rtsp_url = camera.rtsp_url() if camera.enabled else ""
-        if not rtsp_url:
+        if not camera.enabled or not camera.rtsp_url():
             raise HTTPException(503, "Камера не настроена")
-        # Frames annotated by the detector are strictly more useful, so they win
-        # whenever the recorder is publishing them. Falling back to the camera
-        # keeps the picture available for aiming and placement, which is needed
-        # long before a detector model exists on the machine.
-        # The recorder publishes previews per role, so a camera without a role
-        # simply has none and is streamed directly.
-        path = preview_path(settings.data_dir, camera.role or camera.id)
-        frames = (
-            local_mjpeg_stream(
-                path,
-                settings.preview_fps,
-                idle_timeout_seconds=settings.preview_idle_timeout_seconds,
-            )
-            if preview_is_fresh(path)
-            else mjpeg_stream(
+
+        def open_source() -> Iterator[bytes] | None:
+            # Камера перечитывается на каждую попытку: за время обрыва она могла
+            # вернуться по другому адресу, и попытка второй раз открыть прежний
+            # означала бы, что картинка не оживёт уже никогда.
+            camera = current_registry().resolve(view)
+            if camera is None or not camera.enabled or not camera.rtsp_url():
+                return None
+            # Frames annotated by the detector are strictly more useful, so they
+            # win whenever the recorder is publishing them. Falling back to the
+            # camera keeps the picture available for aiming and placement, which
+            # is needed long before a detector model exists on the machine.
+            # The recorder publishes previews per role, so a camera without a
+            # role simply has none and is streamed directly.
+            path = preview_path(settings.data_dir, camera.role or camera.id)
+            if preview_is_fresh(path):
+                return local_mjpeg_stream(
+                    path,
+                    settings.preview_fps,
+                    idle_timeout_seconds=settings.preview_idle_timeout_seconds,
+                )
+            return mjpeg_stream(
                 settings.ffmpeg_path,
-                rtsp_url,
+                camera.rtsp_url(),
                 settings.preview_fps,
                 rotate_180=camera.rotate_180,
                 idle_timeout_seconds=settings.preview_idle_timeout_seconds,
             )
-        )
+
         return StreamingResponse(
-            frames,
+            resilient_mjpeg_stream(
+                open_source,
+                silence_limit_seconds=settings.preview_silence_limit_seconds,
+            ),
             media_type="multipart/x-mixed-replace; boundary=frame",
             headers={
                 "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
