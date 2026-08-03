@@ -45,7 +45,8 @@ placeholders: он лежит в репозитории. Впишите свои
 | `/var/lib/catdoor/models/` | модель детектора и её manifest |
 | `/var/lib/catdoor/runtime/cameras.json` | инвентарь камер, **содержит пароли** |
 | `/var/lib/catdoor/runtime/capture-mode.json` | положение переключателя сбора |
-| `/var/lib/catdoor/runtime/detection.jsonl` | журнал детекции |
+| `/var/lib/catdoor/runtime/detection.jsonl` | журнал происшествий: обрывы, переезды камер, проходы |
+| `/var/lib/catdoor/runtime/observations.jsonl` | покадровые наблюдения детектора, живут часы |
 | `/etc/dnsmasq.d/` | настройка DHCP для камер |
 
 Каталог `/var/lib/catdoor` принадлежит служебному пользователю `catdoor`,
@@ -183,13 +184,22 @@ sudo tail -20 /var/lib/catdoor/runtime/detection.jsonl
 sudo cat /var/lib/catdoor/runtime/recorder-status.json
 ```
 
-В журнале детекции стоит знать три события:
+Журналов два, и путать их не стоит. В `detection.jsonl` попадают редкие
+события — их стоит знать пять:
 
 | Событие | Что означает |
 | --- | --- |
+| `stream_starving` | камера молчит дольше `CATDOOR_CAMERA_STALL_SECONDS` |
 | `stream_stalled` | камера замолчала, поток перезапущен |
+| `stream_recovered` | кадры пошли снова |
 | `camera_address_recovered` | камера найдена по MAC на новом адресе, адрес подставлен |
 | `event_published` | проход сохранён в базу |
+
+В `observations.jsonl` — по строке на каждый разобранный кадр: уверенность,
+порог, состояние автомата. По ним считается статистика на странице метрик, и
+живут они часы, а не дни: при 10 кадрах в секунду файл ротируется примерно раз
+в полчаса. Раньше обе породы событий лежали вместе, и покадровые вытесняли
+происшествия быстрее, чем до них доходили руки.
 
 ---
 

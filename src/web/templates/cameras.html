@@ -114,7 +114,7 @@
         {% if camera.configured and camera.enabled %}
           <img class="viewport" data-live-stream
             alt="Живое изображение камеры {{ camera.display_title }}"
-            src="/stream/{{ camera.id }}.mjpeg?v={{ stream_version }}">
+            src="/stream/camera/{{ camera.id }}.mjpeg?v={{ stream_version }}">
         {% else %}
           <div class="viewport viewport-empty">
             {{ "Адрес не задан" if not camera.configured else "Камера выключена" }}

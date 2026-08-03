@@ -3,7 +3,7 @@ import json
 import shutil
 import subprocess
 import sys
-from collections.abc import AsyncIterator, Generator, Iterator
+from collections.abc import AsyncIterator, Callable, Generator, Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
@@ -83,6 +83,7 @@ from src.common.online_metrics import build_online_metrics
 from src.common.process import spawn_detached
 from src.common.sd_notify import Notifier
 from src.common.settings import ConfigurationError, Settings, validate_runtime_paths
+from src.recorder.detection_journal import frame_journal_path
 from src.recorder.ffmpeg import RecorderError, mjpeg_stream, probe_stream, record_clip
 from src.recorder.preview import local_mjpeg_stream, preview_is_fresh, preview_path
 from src.recorder.status import read_recorder_status
@@ -741,10 +742,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         reason = probe_stream(settings.ffmpeg_path, url)
         return {"ok": reason is None, "reason": reason}
 
-    @app.get("/stream/{view}.mjpeg")
-    def stream(view: str) -> StreamingResponse:
-        registry = current_registry()
-        camera = registry.resolve(view)
+    def camera_stream(find: Callable[[CameraRegistry], CameraRecord | None]) -> StreamingResponse:
+        camera = find(current_registry())
         if camera is None:
             raise HTTPException(404, "Неизвестная камера")
         if not camera.enabled or not camera.rtsp_url():
@@ -754,7 +753,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # Камера перечитывается на каждую попытку: за время обрыва она могла
             # вернуться по другому адресу, и попытка второй раз открыть прежний
             # означала бы, что картинка не оживёт уже никогда.
-            camera = current_registry().resolve(view)
+            camera = find(current_registry())
             if camera is None or not camera.enabled or not camera.rtsp_url():
                 return None
             # Frames annotated by the detector are strictly more useful, so they
@@ -791,6 +790,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "X-Accel-Buffering": "no",
             },
         )
+
+    @app.get("/stream/camera/{camera_id}.mjpeg")
+    def camera_id_stream(camera_id: str) -> StreamingResponse:
+        """Поток строго по идентификатору камеры.
+
+        Страница камер показывает железки, а не роли, и обращаться к ним через
+        `resolve` она не может: тот сначала ищет по роли, а идентификатор камеры
+        вполне может совпасть с именем роли. Стоило переставить роли местами —
+        и карточка камеры с id `face` показывала ту, что сейчас на роли `face`,
+        то есть обе карточки сходились на одной камере.
+        """
+        return camera_stream(lambda registry: registry.get(camera_id))
+
+    @app.get("/stream/{view}.mjpeg")
+    def stream(view: str) -> StreamingResponse:
+        # Здесь роль имеет приоритет намеренно: страница проходов показывает
+        # «камеру идентификации», кто бы ею сейчас ни был.
+        return camera_stream(lambda registry: registry.resolve(view))
 
     @app.get("/api/recorder/status")
     def recorder_status() -> dict[str, object]:
@@ -1278,8 +1295,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             name="metrics.html",
             context={
                 "online": build_online_metrics(session),
+                # Статистика считается по покадровым наблюдениям, а они с
+                # недавних пор живут отдельным файлом.
                 "detection": read_detection_stats(
-                    settings.data_dir / "runtime" / "detection.jsonl"
+                    frame_journal_path(settings.data_dir / "runtime" / "detection.jsonl")
                 ),
                 "runs": runs,
                 "detector_ready": settings.detector_model_path.is_file(),

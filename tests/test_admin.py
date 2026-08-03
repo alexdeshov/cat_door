@@ -947,7 +947,7 @@ def test_cameras_page_lists_every_camera_including_the_ones_without_an_address(
     page = client.get("/cameras")
 
     assert page.status_code == 200
-    assert "/stream/face.mjpeg" in page.text
+    assert "/stream/camera/face.mjpeg" in page.text
     assert 'data-camera-id="side"' in page.text
     assert "Адрес не задан" in page.text
     assert 'id="detection-side-sample-fps"' in page.text
@@ -1036,6 +1036,42 @@ def test_roles_can_be_swapped_without_touching_addresses(
     assert after.by_role("side").id == "face"
     assert after.get("face").host == before.get("face").host
     assert after.get("side").host == before.get("side").host
+
+
+def test_swapped_roles_do_not_merge_two_cameras_into_one_picture(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    """Карточка камеры показывает железку, а не роль.
+
+    Идентификатор камеры вполне может совпасть с именем роли, а `resolve`
+    сначала ищет по роли. После перестановки ролей обе карточки страницы камер
+    сходились на одной камере: `/stream/face.mjpeg` отдавал ту, что сейчас на
+    роли `face`, а не ту, у которой такой идентификатор.
+    """
+    addresses: list[str] = []
+
+    def fake_camera_stream(ffmpeg_path: str, rtsp_url: str, fps: int, **options):
+        addresses.append(rtsp_url)
+        return iter(())
+
+    client = make_client(runtime_path, monkeypatch, side=True)
+    monkeypatch.setattr("src.web.app.mjpeg_stream", fake_camera_stream)
+    client.post("/api/cameras/swap-roles")
+
+    page = client.get("/cameras")
+    opened: dict[str, set[str]] = {}
+    for camera_id in ("face", "side"):
+        addresses.clear()
+        with client.stream("GET", f"/stream/camera/{camera_id}.mjpeg") as response:
+            assert response.status_code == 200
+        opened[camera_id] = set(addresses)
+
+    assert "/stream/camera/face.mjpeg" in page.text
+    # Роль `face` теперь у камеры с идентификатором `side`, и именно поэтому
+    # проверка адресов: перепутанные карточки иначе выглядели бы исправными.
+    assert opened["face"] and all("@camera.local:" in address for address in opened["face"])
+    assert opened["side"] and all("@side-camera.local:" in address for address in opened["side"])
 
 
 def test_assigning_a_taken_role_frees_the_other_camera(runtime_path: Path, monkeypatch) -> None:
