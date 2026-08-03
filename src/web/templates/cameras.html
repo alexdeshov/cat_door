@@ -112,7 +112,8 @@
     <article class="pass" data-camera-id="{{ camera.id }}">
       <div class="pass-media">
         {% if camera.configured and camera.enabled %}
-          <img class="viewport" alt="Живое изображение камеры {{ camera.display_title }}"
+          <img class="viewport" data-live-stream
+            alt="Живое изображение камеры {{ camera.display_title }}"
             src="/stream/{{ camera.id }}.mjpeg?v={{ stream_version }}">
         {% else %}
           <div class="viewport viewport-empty">

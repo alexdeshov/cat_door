@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from src.common.camera_discovery import DiscoveredDevice
-from src.common.camera_registry import camera_registry_path, load_registry
+from src.common.camera_registry import camera_registry_path, load_registry, save_registry
 from src.common.capture_mode import CaptureMode, capture_mode_path, load_capture_mode
 from src.common.circuits import circuits_path, load_circuits
 from src.common.database import EvaluationRun, Event, create_session_factory
@@ -26,7 +26,28 @@ def make_client(runtime_path: Path, monkeypatch, *, side: bool = False) -> TestC
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(b"synthetic-video")
 
+    opened = {"count": 0}
+
+    def fake_camera_stream(ffmpeg_path: str, rtsp_url: str, fps: int, **options):
+        # Кадр отдаётся только первой попытке: ответ живого превью не кончается
+        # сам, пока камера отвечает, а TestClient не умеет обрывать бесконечный
+        # ответ — суита ждала бы его вечно. Дальше поток замолкает и
+        # закрывается по пределу тишины.
+        opened["count"] += 1
+        if opened["count"] == 1:
+            yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\ncamera\r\n"
+
     monkeypatch.setattr("src.web.app.record_clip", fake_record)
+    # Живое превью больше не заканчивается вместе с камерой, поэтому суита не
+    # должна ни поднимать настоящий ffmpeg (он ушёл бы к несуществующему
+    # `camera.local` на все свои таймауты), ни спать по-настоящему в ожидании
+    # её возвращения.
+    monkeypatch.setattr("src.web.app.mjpeg_stream", fake_camera_stream)
+    clock = {"now": 0.0}
+    monkeypatch.setattr("src.web.live_stream._now", lambda: clock["now"])
+    monkeypatch.setattr("src.web.live_stream._wait", lambda seconds: clock.update(
+        now=clock["now"] + seconds,
+    ))
     settings = Settings(
         camera_face_rtsp="rtsp://user:password@camera.local/media/video1",
         camera_side_rtsp=(
@@ -34,6 +55,7 @@ def make_client(runtime_path: Path, monkeypatch, *, side: bool = False) -> TestC
         ),
         data_dir=runtime_path,
         database_path=runtime_path / "test.sqlite3",
+        preview_silence_limit_seconds=10.0,
     )
     return TestClient(create_app(settings))
 
@@ -71,6 +93,11 @@ def test_capture_and_label_known_cat(runtime_path: Path, monkeypatch) -> None:
     assert page.text.count('class="rotate-camera"') == 1
     assert 'if (camera.getAttribute("src") !== source)' in page.text
     assert "function streamUrl(role)" in page.text
+    # Ответ живого превью всё-таки может кончиться — на перезапуске службы или
+    # исчерпанном ожидании камеры. Замерший `<img>` об этом молчит, поэтому
+    # страница переспрашивает поток сама.
+    assert page.text.count("data-live-stream") == 2
+    assert "img[data-live-stream]" in page.text
     assert "/stream/face.mjpeg?v=" in page.text
     assert 'cameraRotations[role] = (cameraRotations[role] + 90) % 360' in page.text
     assert 'localStorage.setItem(cameraRotationKey, JSON.stringify(cameraRotations))' in page.text
@@ -822,10 +849,14 @@ def test_stream_falls_back_to_the_camera_when_the_recorder_is_idle(
         used["ffmpeg_path"] = ffmpeg_path
         used["rtsp_url"] = rtsp_url
         used["rotate_180"] = options.get("rotate_180")
-        yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\ncamera\r\n"
+        if "opened" not in used:
+            used["opened"] = True
+            yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\ncamera\r\n"
 
-    monkeypatch.setattr("src.web.app.mjpeg_stream", fake_camera_stream)
+    # Подмена после клиента: make_client ставит свою заглушку камеры, и патч,
+    # наложенный раньше, она бы перекрыла.
     client = make_client(runtime_path, monkeypatch)
+    monkeypatch.setattr("src.web.app.mjpeg_stream", fake_camera_stream)
 
     with client.stream("GET", "/stream/face.mjpeg") as response:
         assert response.status_code == 200
@@ -847,16 +878,59 @@ def test_stream_prefers_annotated_frames_while_the_recorder_publishes(
     def fake_camera_stream(ffmpeg_path: str, rtsp_url: str, fps: int, **options):
         raise AssertionError("the camera must not be opened twice")
 
-    def fake_published_stream(path: Path, fps: int, idle_timeout_seconds: float = 20.0):
-        yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\nannotated\r\n"
+    published = {"count": 0}
 
+    def fake_published_stream(path: Path, fps: int, idle_timeout_seconds: float = 20.0):
+        published["count"] += 1
+        if published["count"] == 1:
+            yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\nannotated\r\n"
+
+    client = make_client(runtime_path, monkeypatch)
     monkeypatch.setattr("src.web.app.mjpeg_stream", fake_camera_stream)
     monkeypatch.setattr("src.web.app.local_mjpeg_stream", fake_published_stream)
     monkeypatch.setattr("src.web.app.preview_is_fresh", lambda path: True)
-    client = make_client(runtime_path, monkeypatch)
 
     with client.stream("GET", "/stream/face.mjpeg") as response:
         assert b"annotated" in _collect_first_frame(response)
+
+
+def test_stream_reopens_the_camera_at_the_address_it_came_back_on(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    """Обрыв питания и возвращение по новому адресу — один и тот же случай.
+
+    Камера, поднявшаяся с другим адресом от DHCP, до этого была потеряна для
+    открытой вкладки навсегда: адрес выбирался один раз в начале ответа.
+    """
+    addresses: list[str] = []
+    registry_file = camera_registry_path(runtime_path)
+
+    def move_the_camera() -> None:
+        registry = load_registry(registry_file)
+        moved = registry.get("face").model_copy(update={"host": "10.0.0.77"})
+        save_registry(registry_file, registry.with_camera(moved))
+
+    def fake_camera_stream(ffmpeg_path: str, rtsp_url: str, fps: int, **options):
+        addresses.append(rtsp_url)
+        # Кадр отдают только две попытки: до переезда камеры и после него.
+        # Дальше поток молчит и закрывается по пределу тишины — иначе ответ,
+        # который по замыслу не кончается, некому было бы оборвать.
+        if len(addresses) == 1:
+            yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\ncamera\r\n"
+            # Камера вернулась с другим адресом от DHCP, пока вкладка открыта.
+            move_the_camera()
+        elif len(addresses) == 2:
+            yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\ncamera\r\n"
+
+    client = make_client(runtime_path, monkeypatch)
+    monkeypatch.setattr("src.web.app.mjpeg_stream", fake_camera_stream)
+
+    with client.stream("GET", "/stream/face.mjpeg") as response:
+        assert response.status_code == 200
+
+    assert "camera.local" in addresses[0]
+    assert "10.0.0.77" in addresses[1]
 
 
 def test_cameras_page_lists_every_camera_including_the_ones_without_an_address(
@@ -941,7 +1015,10 @@ def test_a_camera_survives_getting_a_new_address(runtime_path: Path, monkeypatch
     assert camera.host == "192.168.1.131"
     assert camera.password == "new-secret"
     assert camera.username == "admin"
-    assert client.get("/stream/face.mjpeg").status_code != 404
+    # Поток теперь переживает пропажу камеры и не кончается сам, поэтому его
+    # читают потоком: обычный GET ждал бы возвращения камеры целиком.
+    with client.stream("GET", "/stream/face.mjpeg") as response:
+        assert response.status_code != 404
 
 
 def test_roles_can_be_swapped_without_touching_addresses(
