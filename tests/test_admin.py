@@ -608,6 +608,7 @@ def test_detection_settings_can_be_updated(runtime_path: Path, monkeypatch) -> N
         "absence_seconds": 2.5,
         "tail_seconds": 8.0,
         "cooldown_seconds": 4.0,
+        "max_event_seconds": 45.0,
     }
 
     response = client.put("/api/detection/settings", json=payload)
@@ -619,6 +620,7 @@ def test_detection_settings_can_be_updated(runtime_path: Path, monkeypatch) -> N
     assert 'id="detection-face-sample-fps"' in page.text
     assert 'id="detection-face-roi-enabled"' in page.text
     assert 'value="8.0"' in page.text
+    assert 'id="detection-max-event-seconds"' in page.text
 
 
 def test_detection_settings_reject_invalid_window(runtime_path: Path, monkeypatch) -> None:

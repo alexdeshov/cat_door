@@ -122,6 +122,10 @@ class Settings(BaseSettings):
     detection_absence_seconds: float = Field(default=3.0, gt=0.0, le=60.0)
     detection_tail_seconds: float = Field(default=10.0, ge=0.0, le=60.0)
     detection_cooldown_seconds: float = Field(default=5.0, ge=0.0, le=300.0)
+    # Потолок длительности одного события. Кот, заснувший у дверцы, детектору
+    # виден так же уверенно, как идущий, и без потолка одна детекция писала бы
+    # диск досуха. Ноль — без лимита.
+    detection_max_event_seconds: float = Field(default=60.0, ge=0.0, le=600.0)
     detection_log_max_bytes: int = Field(default=10_000_000, ge=100_000, le=100_000_000)
     detection_log_backup_count: int = Field(default=5, ge=1, le=20)
     local_training_epochs: int = Field(default=2, ge=1, le=100)

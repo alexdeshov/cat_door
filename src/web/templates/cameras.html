@@ -397,6 +397,13 @@
         <input id="detection-cooldown-seconds" type="number" min="0" max="300" step="0.1"
           value="{{ detection_config.cooldown_seconds }}">
       </label>
+      <label>
+        <span class="label-with-hint">Максимум события, сек.
+          {{ hint("максимум события", "Потолок длительности одной записи. Кот, заснувший у дверцы, детектору виден так же уверенно, как идущий, и без потолка одна детекция записала бы диск досуха. По достижении событие закрывается принудительно; если кот всё ещё там, после паузы начнётся новое. Ноль — без лимита.") }}
+        </span>
+        <input id="detection-max-event-seconds" type="number" min="0" max="600" step="1"
+          value="{{ detection_config.max_event_seconds }}">
+      </label>
     </div>
     <p class="muted" style="font-size: 13px">
       Recorder применяет настройки на ходу, когда автомат событий находится
@@ -639,7 +646,8 @@
       candidate_timeout_seconds: number("#detection-candidate-timeout"),
       absence_seconds: number("#detection-absence-seconds"),
       tail_seconds: number("#detection-tail-seconds"),
-      cooldown_seconds: number("#detection-cooldown-seconds")
+      cooldown_seconds: number("#detection-cooldown-seconds"),
+      max_event_seconds: number("#detection-max-event-seconds")
     };
     for (const role of roles) payload[role] = cameraSettings(role);
     withButton(event.currentTarget, status, async () => {

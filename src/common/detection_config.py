@@ -47,6 +47,9 @@ class DetectionConfig(BaseModel):
     absence_seconds: float = Field(gt=0.0, le=60.0)
     tail_seconds: float = Field(ge=0.0, le=60.0)
     cooldown_seconds: float = Field(ge=0.0, le=300.0)
+    # Потолок длительности события: заснувший у дверцы кот иначе записал бы диск
+    # досуха. Ноль — без лимита.
+    max_event_seconds: float = Field(default=60.0, ge=0.0, le=600.0)
 
     @classmethod
     def from_settings(cls, settings: Settings) -> DetectionConfig:
@@ -70,6 +73,7 @@ class DetectionConfig(BaseModel):
             absence_seconds=settings.detection_absence_seconds,
             tail_seconds=settings.detection_tail_seconds,
             cooldown_seconds=settings.detection_cooldown_seconds,
+            max_event_seconds=settings.detection_max_event_seconds,
         )
 
     def event_config(self) -> AutomaticEventConfig:
@@ -81,6 +85,7 @@ class DetectionConfig(BaseModel):
             absence_seconds=self.absence_seconds,
             tail_seconds=self.tail_seconds,
             cooldown_seconds=self.cooldown_seconds,
+            max_event_seconds=self.max_event_seconds,
         )
 
 
