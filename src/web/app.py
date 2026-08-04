@@ -744,11 +744,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             if camera.circuit == circuit
                         ],
                     }
-                    for circuit, title in (
-                        ("cats", CIRCUIT_TITLES["cats"]),
-                        ("gate", CIRCUIT_TITLES["gate"]),
-                        (None, "Без контура"),
-                    )
+                    # Группы выводятся из списка контуров, а не перечисляются
+                    # руками. Перечисленные руками, они однажды разошлись с
+                    # ним: контур регистратора появился, а его группа — нет, и
+                    # камеры этого контура пропали со страницы совсем. Камера
+                    # при этом жила в инвентаре и попадала в конфигурацию
+                    # Frigate — то есть работала, но поправить или удалить её
+                    # было негде.
+                    for circuit, title in (*CIRCUIT_TITLES.items(), (None, "Без контура"))
                 ],
                 "detection_config": current_detection_config(),
                 "recorder_status": read_recorder_status(

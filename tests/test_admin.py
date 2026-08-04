@@ -8,7 +8,7 @@ from sqlalchemy import select
 from src.common.camera_discovery import DiscoveredDevice
 from src.common.camera_registry import camera_registry_path, load_registry, save_registry
 from src.common.capture_mode import CaptureMode, capture_mode_path, load_capture_mode
-from src.common.circuits import circuits_path, load_circuits
+from src.common.circuits import CIRCUIT_TITLES, circuits_path, load_circuits
 from src.common.database import EvaluationRun, Event, create_session_factory
 from src.common.gate_service import GateStatus
 from src.common.settings import Settings
@@ -1768,3 +1768,46 @@ def test_the_cat_circuit_can_be_switched_back_on_from_its_own_page(
 
     assert back.json()["active"] == ["cats"]
     assert "Выключить контур" in client.get("/").text
+
+
+def test_the_cameras_page_shows_every_circuit(runtime_path: Path, monkeypatch) -> None:
+    """Камера невидимой быть не должна ни при каком контуре.
+
+    Группы страницы перечислялись руками и разошлись со списком контуров:
+    регистратор появился, а его группа — нет. Камера при этом жила в инвентаре
+    и попадала в конфигурацию Frigate, то есть работала, но поправить или
+    удалить её было негде.
+    """
+    client = make_client(runtime_path, monkeypatch)
+    client.post(
+        "/api/cameras",
+        json={"id": "yard", "host": "192.168.1.60", "circuit": "nvr", "title": "Двор"},
+    )
+
+    page = client.get("/cameras")
+
+    assert 'data-camera-id="yard"' in page.text
+    assert "Двор" in page.text
+    # Заголовок группы — тот же, что у контура в навигации.
+    assert page.text.count("Регистратор") >= 1
+
+
+def test_no_circuit_is_left_without_a_group(runtime_path: Path, monkeypatch) -> None:
+    """Список групп выводится из списка контуров, а не повторяет его руками.
+
+    Проверяются заголовки групп, а не любое вхождение названия: контуры
+    перечислены ещё и в выпадающем списке карточки, и поиск по тексту прошёл бы
+    даже при пропавшей группе.
+    """
+    client = make_client(runtime_path, monkeypatch)
+    for index, circuit in enumerate(CIRCUIT_TITLES):
+        client.post(
+            "/api/cameras",
+            json={"id": f"cam{index}", "host": f"192.168.1.{60 + index}", "circuit": circuit},
+        )
+    client.post("/api/cameras", json={"id": "loose", "host": "192.168.1.70"})
+
+    page = client.get("/cameras")
+
+    for title in (*CIRCUIT_TITLES.values(), "Без контура"):
+        assert f"<h2>{title}</h2>" in page.text, title
