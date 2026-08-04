@@ -23,22 +23,17 @@
     buttons.forEach(button => button.setAttribute("aria-pressed", String(matches(button))));
   }
 
-  const circuitChoices = [...document.querySelectorAll(".circuit-choice")];
-  circuitChoices.forEach(choice => {
-    choice.addEventListener("click", async () => {
-      const status = document.querySelector("#circuits-status");
-      // Тумблер, а не выбор одного из: калитка и регистратор — один Frigate,
-      // и включение одного не должно гасить другой.
-      const enabled = choice.getAttribute("aria-pressed") !== "true";
-      const result = await putCircuits({circuit: choice.dataset.circuit, enabled}, status);
-      if (!result) return;
-      press(circuitChoices, button => result[button.dataset.circuit] === true);
-      // Службу приводит к состоянию примиритель от root, а не эта страница:
-      // у веб-процесса нет привилегий. Секунда ожидания — чтобы перезагрузка
-      // показала уже применённое состояние, а не прежнее.
-      status.textContent = "применяется…";
-      setTimeout(() => location.reload(), 1200);
-    });
+  const circuitToggle = document.querySelector("#circuit-toggle");
+  circuitToggle?.addEventListener("click", async () => {
+    const status = document.querySelector("#circuits-status");
+    const enabled = circuitToggle.dataset.enabled !== "true";
+    const result = await putCircuits({circuit: circuitToggle.dataset.circuit, enabled}, status);
+    if (!result) return;
+    // Службу приводит к состоянию примиритель от root, а не эта страница: у
+    // веб-процесса нет привилегий. Секунда ожидания — чтобы перезагрузка
+    // показала уже применённое состояние, а не прежнее.
+    status.textContent = "применяется…";
+    setTimeout(() => location.reload(), 1200);
   });
 
   const exclusiveToggle = document.querySelector("#exclusive-toggle");

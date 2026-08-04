@@ -1342,11 +1342,17 @@ def test_switch_shows_the_current_mode(runtime_path: Path, monkeypatch) -> None:
 
     page = client.get("/")
 
-    assert 'class="capture-choice" data-state="observe"' in page.text
+    assert 'data-state="observe"' in page.text
     assert page.text.count('class="capture-choice"') == 3
     # Нажатое положение приходит с сервера, а не выставляется скриптом после
     # загрузки: иначе переключатель на секунду показывал бы чужое состояние.
     assert 'data-state="observe"\n        aria-pressed="true"' in page.text
+    # Режим сбора имеет смысл, только когда контур разрешён на уровне узла.
+    client.put("/api/circuits", json={"circuit": "gate", "enabled": True})
+    stopped = client.get("/")
+
+    assert stopped.text.count('class="capture-choice" disabled') == 3
+    assert "Контур дверцы выключен на уровне узла" in stopped.text
 
 
 def test_discovery_shows_one_row_for_a_camera_on_two_addresses(
@@ -1390,7 +1396,7 @@ def test_gate_tab_is_honest_about_not_being_deployed(runtime_path: Path, monkeyp
     # Не развёрнутый контур страница называет прямо, а не делает вид, что его
     # можно включить.
     assert "Служба Frigate на узле не установлена" in page.text
-    assert 'class="circuit-choice" data-circuit="gate"' in page.text
+    assert 'data-circuit="gate"' in page.text
     # Верхний уровень навигации — контуры, второй появляется только у котов.
     assert 'href="/gate"' in page.text
     assert 'class="subnav"' not in page.text
@@ -1727,4 +1733,38 @@ def test_switching_stays_out_of_the_navigation(runtime_path: Path, monkeypatch) 
 
     assert 'class="nav-circuit" href="/"' in page.text
     # Переключатель живёт на страницах контуров, а не в шапке.
-    assert "circuit-choice" not in page.text
+    assert 'id="circuit-toggle"' not in page.text
+
+
+def test_each_circuit_page_switches_only_itself(runtime_path: Path, monkeypatch) -> None:
+    """Страница калитки отвечает за калитку.
+
+    Прежде на каждой из них стоял один и тот же набор из трёх кнопок: он
+    повторял в трёх местах то, что и так видно в шапке.
+    """
+    client = make_client(runtime_path, monkeypatch)
+
+    for path, circuit in (("/", "cats"), ("/gate", "gate"), ("/nvr", "nvr")):
+        page = client.get(path)
+        assert page.text.count('id="circuit-toggle"') == 1, path
+        assert f'data-circuit="{circuit}"' in page.text, path
+        # Соседних контуров на странице нет — у каждого своя.
+        others = {"cats", "gate", "nvr"} - {circuit}
+        for other in others:
+            assert f'data-circuit="{other}"' not in page.text, (path, other)
+
+
+def test_the_cat_circuit_can_be_switched_back_on_from_its_own_page(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    """Иначе отданный калитке узел было бы нечем вернуть котам."""
+    client = make_client(runtime_path, monkeypatch)
+    client.put("/api/circuits", json={"circuit": "gate", "enabled": True})
+
+    assert "Включить контур" in client.get("/").text
+
+    back = client.put("/api/circuits", json={"circuit": "cats", "enabled": True})
+
+    assert back.json()["active"] == ["cats"]
+    assert "Выключить контур" in client.get("/").text
