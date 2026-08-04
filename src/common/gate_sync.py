@@ -15,7 +15,12 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import time
 from pathlib import Path
+
+# Сколько ждать, прежде чем судить, поднялся ли контейнер: Frigate валидирует
+# конфигурацию уже после старта процесса и на негодной падает через пару секунд.
+CONTAINER_SETTLE_SECONDS = 6.0
 
 from src.common.camera_registry import camera_registry_path, load_registry
 from src.common.circuits import circuits_path, load_circuits
@@ -101,12 +106,7 @@ def reconcile(settings: Settings) -> str:
             # Камеру перевели в другой контур или поправили её адрес. Без
             # перезапуска Frigate продолжал бы снимать по старому списку, и
             # перемещение камеры в админке ничего бы не значило.
-            failure = set_gate_running(unit, False)
-            if failure is None:
-                failure = set_gate_running(unit, True)
-            if failure is not None:
-                return f"{unit}: конфигурация обновлена, перезапуск не удался — {failure}"
-            return f"{unit}: конфигурация камер изменилась, служба перезапущена"
+            return _restart(settings, "конфигурация камер изменилась")
         # Юнит «работает» — но это oneshot с RemainAfterExit: контейнер под ним
         # мог умереть, и для systemd это невидимо. Админка показывала бы
         # «Калитка работает» при мёртвом Frigate неделями. Единственный, кто
@@ -114,18 +114,52 @@ def reconcile(settings: Settings) -> str:
         # по таймеру регулярно.
         alive = _container_running(settings.gate_container_name)
         if alive is False:
-            failure = set_gate_running(unit, False)
-            if failure is not None:
-                return f"{unit}: контейнер мёртв, остановить не удалось — {failure}"
-            failure = set_gate_running(unit, True)
-            if failure is not None:
-                return f"{unit}: контейнер мёртв, перезапустить не удалось — {failure}"
-            return f"{unit}: контейнер был мёртв, служба перезапущена"
+            return _restart(settings, "контейнер был мёртв")
         return f"{unit}: уже работает"
+    if not wanted:
+        failure = set_gate_running(unit, False)
+        if failure is not None:
+            return f"{unit}: не удалось остановить — {failure}"
+        return f"{unit}: остановлена"
     failure = set_gate_running(unit, wanted)
     if failure is not None:
-        return f"{unit}: не удалось привести к состоянию — {failure}"
-    return f"{unit}: {'запущена' if wanted else 'остановлена'}"
+        return f"{unit}: не удалось запустить — {failure}"
+    return f"{unit}: запущена{_container_warning(settings)}"
+
+
+def _restart(settings: Settings, reason: str) -> str:
+    """Перезапустить службу и доложить, поднялся ли контейнер на самом деле."""
+    unit = settings.gate_service_unit
+    failure = set_gate_running(unit, False)
+    if failure is None:
+        failure = set_gate_running(unit, True)
+    if failure is not None:
+        return f"{unit}: {reason}, перезапуск не удался — {failure}"
+    return f"{unit}: {reason}, служба перезапущена{_container_warning(settings)}"
+
+
+def _container_warning(settings: Settings) -> str:
+    """Хвост к сообщению, если контейнер под живым юнитом так и не поднялся.
+
+    `systemctl start` возвращает успех, как только `docker compose up -d` создал
+    контейнер, но Frigate проверяет конфигурацию уже внутри и на негодной
+    падает через несколько секунд. Юнит при этом остаётся `active`, и без этой
+    проверки примиритель докладывал бы «запущена» о мёртвом контейнере — ровно
+    то враньё, от которого сама сверка контейнера и заведена. Пауза даёт
+    контейнеру пережить или не пережить валидацию, прежде чем судить.
+    """
+    _settle()
+    if _container_running(settings.gate_container_name) is False:
+        return (
+            f" — но контейнер не поднялся, смотрите journalctl -u {settings.gate_service_unit}"
+            f" и docker logs {settings.gate_container_name}"
+        )
+    return ""
+
+
+def _settle() -> None:
+    """Пауза, чтобы контейнер успел упасть на валидации, если конфиг негоден."""
+    time.sleep(CONTAINER_SETTLE_SECONDS)
 
 
 def main() -> None:

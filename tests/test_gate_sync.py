@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from src.common.camera_registry import (
     CameraRecord,
     CameraRegistry,
@@ -10,6 +12,12 @@ from src.common.circuits import NodeCircuits, circuits_path, save_circuits
 from src.common.gate_service import GateStatus
 from src.common.gate_sync import reconcile
 from src.common.settings import Settings
+
+
+@pytest.fixture(autouse=True)
+def _no_settle(monkeypatch):
+    """Пауза на осадку контейнера не должна тормозить тесты по-настоящему."""
+    monkeypatch.setattr("src.common.gate_sync._settle", lambda: None)
 
 
 def test_stopped_service_is_started_when_the_node_is_given_to_the_gate(
@@ -292,3 +300,56 @@ def test_the_generated_config_goes_where_frigate_reads_it(runtime_path: Path) ->
     только пароли и служебная копия примирителя.
     """
     assert Settings().gate_config_path == Path("/var/lib/frigate/config/config.yml")
+
+
+def test_a_start_that_leaves_no_container_is_reported_honestly(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    """Примиритель не должен докладывать «запущена» о мёртвом контейнере.
+
+    systemctl возвращает успех, как только docker создал контейнер, но Frigate
+    валидирует конфигурацию уже внутри и на негодной падает через пару секунд.
+    Юнит остаётся active — без проверки контейнера примиритель врал бы.
+    """
+    monkeypatch.setattr("src.common.gate_sync.gate_status", lambda unit: GateStatus("stopped"))
+    monkeypatch.setattr("src.common.gate_sync.set_gate_running", lambda unit, running: None)
+    monkeypatch.setattr("src.common.gate_sync._container_running", lambda name: False)
+    save_circuits(circuits_path(runtime_path), NodeCircuits().with_only("gate"))
+
+    message = reconcile(Settings(data_dir=runtime_path))
+
+    assert "контейнер не поднялся" in message
+    assert "docker logs" in message
+
+
+def test_a_start_with_a_live_container_is_not_second_guessed(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr("src.common.gate_sync.gate_status", lambda unit: GateStatus("stopped"))
+    monkeypatch.setattr("src.common.gate_sync.set_gate_running", lambda unit, running: None)
+    monkeypatch.setattr("src.common.gate_sync._container_running", lambda name: True)
+    save_circuits(circuits_path(runtime_path), NodeCircuits().with_only("gate"))
+
+    message = reconcile(Settings(data_dir=runtime_path))
+
+    assert message.endswith("запущена")
+
+
+def test_a_restart_confirms_the_container_too(runtime_path: Path, monkeypatch) -> None:
+    """Перезапуск после смены конфигурации — тот же случай, что и запуск."""
+    monkeypatch.setattr("src.common.gate_sync.gate_status", lambda unit: GateStatus("running"))
+    monkeypatch.setattr("src.common.gate_sync._container_running", lambda name: True)
+    monkeypatch.setattr("src.common.gate_sync.set_gate_running", lambda unit, running: None)
+    settings = _frigate_settings(runtime_path)
+    save_circuits(circuits_path(runtime_path), NodeCircuits(cats=False, gate=True))
+    _inventory(runtime_path, "gate")
+
+    # Первый прогон пишет конфиг и перезапускает; сделаем контейнер мёртвым,
+    # чтобы увидеть предупреждение в сообщении о перезапуске.
+    monkeypatch.setattr("src.common.gate_sync._container_running", lambda name: False)
+    message = reconcile(settings)
+
+    assert "перезапущена" in message
+    assert "контейнер не поднялся" in message
