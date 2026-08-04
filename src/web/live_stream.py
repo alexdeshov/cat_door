@@ -112,6 +112,7 @@ def resilient_mjpeg_stream(
     reconnect_delay_seconds: float = 2.0,
     silence_limit_seconds: float = 300.0,
     frame: Callable[[float], bytes] = no_signal_jpeg,
+    stopping: Callable[[], bool] = lambda: False,
 ) -> Iterator[bytes]:
     """Кадры из источника, переоткрывая его, пока зритель не ушёл.
 
@@ -127,9 +128,14 @@ def resilient_mjpeg_stream(
 
     Ожидание не бесконечно: забытая вкладка перед мёртвой камерой иначе
     поднимала бы ffmpeg заново до перезапуска веб-службы.
+
+    `stopping` — остановка службы. Ответ, который по замыслу не кончается,
+    держал бы её до принудительного убийства по таймауту: uvicorn при остановке
+    ждёт завершения запросов, и одной открытой вкладки хватало, чтобы каждый
+    перезапуск занимал полторы минуты.
     """
     silent_since: float | None = None
-    while True:
+    while not stopping():
         opened_at = _now()
         source = open_source()
         delivered = False
@@ -138,6 +144,8 @@ def resilient_mjpeg_stream(
                 silent_since = None
                 delivered = True
                 yield chunk
+                if stopping():
+                    return
         if delivered:
             # Источник отдавал кадры и закончился сам — это смена источника, а
             # не пропажа камеры: превью протухло и уступило место камере, либо
