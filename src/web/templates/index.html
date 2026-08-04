@@ -118,7 +118,13 @@
 <section class="panel">
   <div class="panel-head">
     <h2>Проходы</h2>
-    <span class="muted">Последние {{ events | length }}</span>
+    <span class="muted">
+      {%- if event_summary.total -%}
+        {{ events_shown_from }}–{{ events_shown_to }} из {{ event_summary.total }}
+      {%- else -%}
+        пока пусто
+      {%- endif -%}
+    </span>
     <div class="controls" style="margin-left: auto">
       <input id="bulk-cat-name" placeholder="Имя кота" style="width: 11em">
       <button id="bulk-label" type="button">Присвоить имя выбранным</button>
@@ -232,12 +238,31 @@
   {% else %}
     <div class="panel-body">
       <p class="muted">
-        Проходов пока нет. Они появятся сами, когда детектор увидит кота, либо
-        по кнопке «Записать проход сейчас».
+        {% if event_summary.total %}
+          На этой странице пусто — проходы могли удалить, пока она была открыта.
+        {% else %}
+          Проходов пока нет. Они появятся сами, когда детектор увидит кота, либо
+          по кнопке «Записать проход сейчас».
+        {% endif %}
       </p>
     </div>
   {% endfor %}
   </div>
+  {% if events_pages > 1 %}
+    <nav class="pager" aria-label="Страницы проходов">
+      {% if events_page > 1 %}
+        <a class="button" href="/?page={{ events_page - 1 }}">← Назад</a>
+      {% else %}
+        <span class="button disabled" aria-disabled="true">← Назад</span>
+      {% endif %}
+      <span class="muted data">{{ events_page }} из {{ events_pages }}</span>
+      {% if events_page < events_pages %}
+        <a class="button" href="/?page={{ events_page + 1 }}">Вперёд →</a>
+      {% else %}
+        <span class="button disabled" aria-disabled="true">Вперёд →</span>
+      {% endif %}
+    </nav>
+  {% endif %}
 </section>
 
 <datalist id="known-cat-names">
@@ -310,7 +335,15 @@
   });
 
   const cameraLayoutKey = "catdoor-camera-layout";
-  const cameraRotationKey = "catdoor-camera-rotations-v2";
+  // Ключ поднят до v3: пока записи разворачивались жёстко зашитой константой,
+  // их могли «исправить» ручным поворотом, и теперь такая правка удвоила бы
+  // поворот.
+  const cameraRotationKey = "catdoor-camera-rotations-v3";
+  // Записи событий пишутся как есть с камеры, поэтому перевёрнутую камеру
+  // отыгрывает показ. Раньше здесь стояла жёсткая константа 180 — она осталась
+  // с тех пор, когда обе камеры по умолчанию висели вверх ногами, и на
+  // нормально висящей камере переворачивала записи с ног на голову.
+  const recordingRotations = {{ recording_rotations | tojson }};
   const streamVersion = "{{ stream_version }}";
   const primaryCamera = document.querySelector("#primary-camera-stream");
   const secondaryCamera = document.querySelector("#secondary-camera-stream");
@@ -349,7 +382,8 @@
     document.querySelectorAll(".event-recording").forEach(recording => {
       const role = recording.dataset.cameraRole;
       const video = recording.querySelector("video");
-      video.style.transform = `rotate(${(180 + cameraRotations[role]) % 360}deg)`;
+      const base = recordingRotations[role] || 0;
+      video.style.transform = `rotate(${(base + cameraRotations[role]) % 360}deg)`;
     });
   }
 
@@ -436,7 +470,9 @@
       const result = await response.json();
       if (!response.ok || result.status !== "ready") throw new Error(result.detail || result.status);
       status.textContent = "Записано";
-      location.reload();
+      // Не reload: свежий проход всегда на первой странице, и оставаться на
+      // третьей — значит не увидеть то, что только что записали.
+      location.assign("/");
     } catch (error) {
       status.textContent = `Не записалось: ${error.message}`;
     } finally {

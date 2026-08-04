@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 
-from src.web.live_stream import no_signal_jpeg, resilient_mjpeg_stream
+from src.web.live_stream import no_signal_jpeg, resilient_mjpeg_stream, until
 
 
 class Clock:
@@ -42,13 +42,13 @@ def test_stream_outlives_a_camera_that_lost_power(monkeypatch) -> None:
         return sources.pop(0) if sources else None
 
     stream = resilient_mjpeg_stream(open_source, silence_limit_seconds=60.0)
-    chunks = [next(stream) for _ in range(5)]
+    chunks = [next(stream) for _ in range(4)]
 
     assert b"live" in chunks[0]
-    # Обрыв и каждая неудачная попытка отдают заглушку: пока она обновляется,
-    # видно, что поток ждёт камеру, а не замер.
-    assert all(b"\xff\xd8" in chunk for chunk in chunks[1:4])
-    assert b"back" in chunks[4]
+    # Каждая неудачная попытка отдаёт заглушку: пока она обновляется, видно,
+    # что поток ждёт камеру, а не замер.
+    assert all(b"\xff\xd8" in chunk for chunk in chunks[1:3])
+    assert b"back" in chunks[3]
 
 
 def test_stream_gives_up_on_a_camera_that_never_returns(monkeypatch) -> None:
@@ -77,7 +77,8 @@ def test_returning_frames_reset_the_countdown(monkeypatch) -> None:
     # Без сброса отсчёта поток кончился бы на седьмом куске, и `next` упал бы.
     chunks = [next(stream) for _ in range(30)]
 
-    assert sum(b"live" in chunk for chunk in chunks) == 10
+    # Кадр и заглушка чередуются: продуктивный источник заглушку не вызывает.
+    assert sum(b"live" in chunk for chunk in chunks) == 15
 
 
 def test_no_signal_frame_shows_that_it_is_still_counting() -> None:
@@ -87,3 +88,62 @@ def test_no_signal_frame_shows_that_it_is_still_counting() -> None:
 
     assert fresh.startswith(b"\xff\xd8") and fresh.endswith(b"\xff\xd9")
     assert fresh != later
+
+
+def test_switching_sources_does_not_flash_no_signal(monkeypatch) -> None:
+    """Смена источника — не пропажа камеры.
+
+    Превью и камера сменяют друг друга при живой картинке: recorder то
+    публикует кадры, то перестаёт. Заглушка между ними означала бы «нет
+    сигнала» посреди исправного изображения.
+    """
+    use_clock(monkeypatch)
+    sources = [one_frame(b"annotated"), one_frame(b"raw"), one_frame(b"annotated")]
+
+    stream = resilient_mjpeg_stream(
+        lambda: sources.pop(0) if sources else None,
+        silence_limit_seconds=60.0,
+    )
+    chunks = [next(stream) for _ in range(3)]
+
+    assert [b"annotated", b"raw", b"annotated"] == [
+        b"annotated" if b"annotated" in chunk else b"raw" for chunk in chunks
+    ]
+
+
+def test_a_source_that_dies_instantly_does_not_spin(monkeypatch) -> None:
+    """Камера, отдающая кадр и обрывающаяся, не должна крутить запуск ffmpeg."""
+    clock = use_clock(monkeypatch)
+
+    stream = resilient_mjpeg_stream(
+        lambda: one_frame(b"flap"),
+        silence_limit_seconds=60.0,
+    )
+    for _ in range(10):
+        next(stream)
+
+    assert clock.now >= 4.5
+
+
+def test_until_stops_the_endless_source_when_a_better_one_appears(monkeypatch) -> None:
+    """Рамки детекции пропадали именно здесь.
+
+    Поток с живой камеры не кончается сам, поэтому выбор, сделанный при
+    протухшем превью, оставался навсегда: картинка живая, рамок нет.
+    """
+    clock = use_clock(monkeypatch)
+    preview_ready = {"value": False}
+
+    def endless() -> Iterator[bytes]:
+        while True:
+            clock.sleep(0.5)
+            yield b"raw"
+
+    bounded = until(endless(), lambda: preview_ready["value"])
+    assert [next(bounded) for _ in range(4)] == [b"raw"] * 4
+
+    preview_ready["value"] = True
+
+    # Проверка идёт не чаще раза в секунду, поэтому счёт идёт на кадры, а не на
+    # мгновенность: важно, что поток кончается сам и рамки возвращаются.
+    assert len(list(bounded)) <= 2
