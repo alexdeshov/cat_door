@@ -218,3 +218,64 @@ def test_seeded_roles_belong_to_the_cat_circuit() -> None:
     registry = registry_from_settings(settings)
 
     assert {camera.circuit for camera in registry.cameras} == {"cats"}
+
+
+def test_an_unknown_circuit_does_not_destroy_the_inventory(runtime_path) -> None:
+    """Так был потерян весь инвентарь 4 августа.
+
+    Инвентарь переживает версии кода: файл, записанный новой версией, читает и
+    старая — например, служба, которую забыли перезапустить при обновлении.
+    Строгая проверка объявляла такой файл испорченным, а `ensure_registry`
+    подменял его умолчаниями из `.env` — вместе с адресами и паролями.
+    """
+    path = camera_registry_path(runtime_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "cameras": [
+                    {
+                        "id": "yard",
+                        "host": "192.168.1.60",
+                        "username": "admin",
+                        "password": "secret",
+                        "circuit": "контур-из-будущего",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    registry = load_registry(path)
+
+    assert registry is not None
+    camera = registry.get("yard")
+    assert camera is not None
+    # Камера цела вместе с паролем, потерян только незнакомый контур.
+    assert camera.host == "192.168.1.60"
+    assert camera.password == "secret"
+    assert camera.circuit is None
+
+
+def test_an_unknown_role_is_forgotten_not_fatal(runtime_path) -> None:
+    registry = CameraRegistry.model_validate(
+        {"cameras": [{"id": "yard", "host": "192.168.1.60", "role": "роль-из-будущего"}]}
+    )
+
+    assert registry.get("yard").role is None
+
+
+def test_a_readable_inventory_is_never_replaced_by_defaults(runtime_path) -> None:
+    """Подмена умолчаниями стирает настройку узла вместе с паролями."""
+    path = camera_registry_path(runtime_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"cameras": [{"id": "yard", "host": "10.0.0.5", "circuit": "nvr"}]}),
+        encoding="utf-8",
+    )
+
+    registry = ensure_registry(path, Settings(data_dir=runtime_path))
+
+    assert [camera.id for camera in registry.cameras] == ["yard"]
+    assert not list(path.parent.glob("cameras.json.invalid-*"))
