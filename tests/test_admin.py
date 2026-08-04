@@ -1687,3 +1687,44 @@ def test_the_node_limit_is_lifted_by_one_switch(runtime_path: Path, monkeypatch)
 
     assert together.json()["active"] == ["cats", "gate"]
     assert together.json()["exclusive"] is False
+
+
+def test_every_page_shows_which_circuit_is_running(runtime_path: Path, monkeypatch) -> None:
+    """Вопрос «что сейчас работает» возникает раньше выбора страницы.
+
+    Узел отдан одному движку, и увидеть это нужно, не уходя со своей вкладки.
+    """
+    client = make_client(runtime_path, monkeypatch)
+    client.put("/api/capture-mode", json={"state": "record"})
+
+    for path in ("/", "/cameras", "/metrics", "/gate", "/nvr"):
+        page = client.get(path)
+        assert page.status_code == 200, path
+        assert 'class="nav-circuit"' in page.text, path
+        assert "запись" in page.text, path
+
+    # Состояние следует переключателю сбора, а не только тому, разрешён ли
+    # контур на уровне узла.
+    client.put("/api/capture-mode", json={"state": "observe"})
+
+    assert '<span class="nav-circuit-state">наблюдение</span>' in client.get("/cameras").text
+
+
+def test_a_circuit_given_away_reads_as_stopped(runtime_path: Path, monkeypatch) -> None:
+    client = make_client(runtime_path, monkeypatch)
+
+    client.put("/api/circuits", json={"circuit": "gate", "enabled": True})
+    page = client.get("/cameras")
+
+    assert '<span class="nav-circuit-state">остановлен</span>' in page.text
+
+
+def test_switching_stays_out_of_the_navigation(runtime_path: Path, monkeypatch) -> None:
+    """Ссылка остаётся ссылкой: клик по «Дверце» не должен рвать запись."""
+    client = make_client(runtime_path, monkeypatch)
+
+    page = client.get("/cameras")
+
+    assert 'class="nav-circuit" href="/"' in page.text
+    # Переключатель живёт на страницах контуров, а не в шапке.
+    assert "circuit-choice" not in page.text

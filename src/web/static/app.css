@@ -203,6 +203,32 @@ kbd {
 
 .nav a:hover { background: var(--surface-sunken); color: var(--text); }
 
+/* Контур в шапке — две строки: имя с огоньком и состояние под ним. Состояние
+   набрано мельче и тусклее: это справка, а не ещё одна ссылка. */
+.nav-circuit {
+  display: grid;
+  gap: 1px;
+  line-height: 1.25;
+  padding-top: 4px;
+  padding-bottom: 4px;
+}
+
+.nav-circuit-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.nav-circuit-state {
+  font-size: 11px;
+  color: var(--text-faint);
+  /* Отступ ровно под огонёк, чтобы состояние читалось как подпись к имени,
+     а не как отдельный столбец. */
+  padding-left: 15px;
+}
+
+.nav a[aria-current="page"] .nav-circuit-state { color: var(--text-muted); }
+
 .nav a[aria-current="page"] {
   background: var(--surface-sunken);
   color: var(--text);
