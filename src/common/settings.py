@@ -84,9 +84,17 @@ class Settings(BaseSettings):
     gate_container_name: str = "frigate"
     gate_ui_url: str = ""
     # Конфигурация Frigate собирается из инвентаря камер и пишется примирителем
-    # от root. Пароли камер уходят в env-файл, поэтому у него отдельный путь и
-    # отдельные права.
-    gate_config_path: Path = Path("/etc/frigate/config.yml")
+    # от root. Путь — тот каталог, который смонтирован в контейнер как
+    # `/config`: Frigate мигрирует конфигурацию между версиями сам и держит там
+    # же свою базу, поэтому монтируется каталог целиком, а не файл.
+    gate_config_path: Path = Path("/var/lib/frigate/config/config.yml")
+    # Копия того, что примиритель положил в конфигурацию в прошлый раз.
+    # Сравнивать нужно именно с ней, а не с рабочим файлом: Frigate переписывает
+    # его при миграции, и сравнение с живым файлом после первой же миграции
+    # расходилось бы навсегда — примиритель перезапускал бы контур по кругу.
+    gate_applied_config_path: Path = Path("/etc/frigate/catdoor-applied.yml")
+    # Пароли камер: отдельный файл с отдельными правами, его же читает Docker
+    # как env_file.
     gate_env_path: Path = Path("/etc/frigate/frigate.env")
     data_dir: Path = Path("data")
     database_path: Path | None = None
