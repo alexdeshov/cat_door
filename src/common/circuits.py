@@ -25,13 +25,21 @@ from pydantic import BaseModel
 
 from src.common.durable_write import write_text_durably
 
-CircuitName = Literal["cats", "gate"]
+CircuitName = Literal["cats", "gate", "nvr"]
 GateRecording = Literal["events", "continuous"]
 
 CIRCUIT_TITLES: dict[CircuitName, str] = {
     "cats": "Дверца",
     "gate": "Калитка 1",
+    "nvr": "Регистратор",
 }
+
+# Контуров три, а движка два. Калитка и регистратор — это один и тот же
+# Frigate с разными камерами в конфигурации, поэтому вместе они не стоят почти
+# ничего сверх одного из них. Ограничение узла — про движки, а не про контуры:
+# запрещать «калитку вместе с регистратором» значило бы запрещать процессу
+# работать вместе с самим собой.
+FRIGATE_CIRCUITS: tuple[CircuitName, ...] = ("gate", "nvr")
 
 
 class CircuitConflict(ValueError):
@@ -41,6 +49,7 @@ class CircuitConflict(ValueError):
 class NodeCircuits(BaseModel):
     cats: bool = True
     gate: bool = False
+    nvr: bool = False
     exclusive: bool = True
     # Круглосуточная запись заполняет диск предсказуемо и быстро, а для сбора
     # библиотеки лиц достаточно клипов вокруг событий. Значение попадает в
@@ -48,8 +57,13 @@ class NodeCircuits(BaseModel):
     gate_recording: GateRecording = "events"
 
     @property
+    def frigate_wanted(self) -> bool:
+        """Нужен ли Frigate вообще — хоть одному из своих контуров."""
+        return any(self.is_active(name) for name in FRIGATE_CIRCUITS)
+
+    @property
     def has_conflict(self) -> bool:
-        return self.exclusive and self.cats and self.gate
+        return self.exclusive and self.cats and self.frigate_wanted
 
     def resolved(self) -> NodeCircuits:
         """Обезвредить конфликт в правленом руками файле.
@@ -58,18 +72,34 @@ class NodeCircuits(BaseModel):
         проходов. Побеждает кошачий контур — он работал до появления второго и
         не требует внешней службы.
         """
-        return self.model_copy(update={"gate": False}) if self.has_conflict else self
+        if not self.has_conflict:
+            return self
+        return self.model_copy(update=dict.fromkeys(FRIGATE_CIRCUITS, False))
 
     def is_active(self, circuit: CircuitName) -> bool:
-        return self.cats if circuit == "cats" else self.gate
+        return bool(getattr(self, circuit))
 
     def with_only(self, circuit: CircuitName) -> NodeCircuits:
-        """Оставить работать один контур. Основное действие переключателя."""
-        return self.model_copy(update={"cats": circuit == "cats", "gate": circuit == "gate"})
+        """Отдать узел одному контуру, остановив остальные."""
+        return self.model_copy(update={name: name == circuit for name in CIRCUIT_TITLES})
+
+    def with_circuit(self, circuit: CircuitName, enabled: bool) -> NodeCircuits:
+        """Включить или выключить контур, посторонившись перед чужим движком.
+
+        Включение контура при действующем ограничении гасит контуры другого
+        движка, но не соседей по своему: регистратор рядом с калиткой — та же
+        самая работа Frigate, и выключать её незачем.
+        """
+        updated = self.model_copy(update={circuit: enabled})
+        if not enabled or not updated.has_conflict:
+            return updated
+        if circuit == "cats":
+            return updated.model_copy(update=dict.fromkeys(FRIGATE_CIRCUITS, False))
+        return updated.model_copy(update={"cats": False})
 
     @property
     def active_names(self) -> tuple[CircuitName, ...]:
-        return tuple(name for name in ("cats", "gate") if self.is_active(name))
+        return tuple(name for name in CIRCUIT_TITLES if self.is_active(name))
 
 
 def ensure_allowed(circuits: NodeCircuits) -> None:
@@ -81,8 +111,8 @@ def ensure_allowed(circuits: NodeCircuits) -> None:
     """
     if circuits.has_conflict:
         raise CircuitConflict(
-            "Узел не тянет оба контура сразу: включите один или снимите "
-            "ограничение после переезда на новое железо"
+            "Узел не тянет кошачий контур вместе с Frigate: включите что-то "
+            "одно или снимите ограничение на вкладке узла"
         )
 
 

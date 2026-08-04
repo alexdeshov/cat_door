@@ -218,6 +218,7 @@ class CameraPayload(BaseModel):
     host: str = ""
     port: int = Field(default=554, ge=1, le=65535)
     stream_path: str = ""
+    detect_stream_path: str = ""
     username: str = ""
     password: str | None = None
     mac: str = ""
@@ -236,13 +237,19 @@ class CaptureModePayload(BaseModel):
 class CircuitsPayload(BaseModel):
     """Что просит пульт узла.
 
-    `active` — контур, которому отдаётся узел; остальные останавливаются. Поле
-    отдельно от «включить/выключить», потому что до переезда работать может
-    только один, и запрос вида «включи калитку» без указания, что делать с
-    котами, не имеет однозначного смысла.
+    `active` — контур, которому отдаётся узел целиком; остальные
+    останавливаются. `circuit` вместе с `enabled` включает или выключает один
+    контур, посторонившись перед чужим движком: калитка и регистратор — это
+    один Frigate, и гасить один ради другого незачем.
+
+    `exclusive` снимает ограничение узла. Это единственное, что нужно поменять
+    после переезда на железо, которое тянет всё сразу.
     """
 
     active: CircuitName | None = None
+    circuit: CircuitName | None = None
+    enabled: bool | None = None
+    exclusive: bool | None = None
     gate_recording: GateRecording | None = None
 
 
@@ -300,6 +307,7 @@ def _camera_view(camera: CameraRecord) -> dict[str, object]:
         "host": camera.host,
         "port": camera.port,
         "stream_path": camera.stream_path,
+        "detect_stream_path": camera.detect_stream_path,
         "username": camera.username,
         "has_password": bool(camera.password),
         "mac": camera.mac,
@@ -457,6 +465,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "gate_ui_url": settings.gate_ui_url,
             "cats": circuits.cats,
             "gate": circuits.gate,
+            "nvr": circuits.nvr,
             "exclusive": circuits.exclusive,
             "gate_recording": circuits.gate_recording,
             "active": list(circuits.active_names),
@@ -883,8 +892,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.put("/api/circuits")
     def update_circuits(payload: CircuitsPayload) -> dict[str, object]:
         circuits = current_circuits()
+        if payload.exclusive is not None:
+            circuits = circuits.model_copy(update={"exclusive": payload.exclusive})
         if payload.active is not None:
             circuits = circuits.with_only(payload.active)
+        if payload.circuit is not None and payload.enabled is not None:
+            circuits = circuits.with_circuit(payload.circuit, payload.enabled)
         if payload.gate_recording is not None:
             circuits = circuits.model_copy(update={"gate_recording": payload.gate_recording})
         try:
@@ -910,6 +923,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             {
                 "circuits": circuits_view(circuits),
                 "circuit_titles": CIRCUIT_TITLES,
+            },
+        )
+
+    @app.get("/nvr", response_class=HTMLResponse)
+    def nvr_page(request: Request) -> HTMLResponse:
+        registry = current_registry()
+        return templates.TemplateResponse(
+            request,
+            "nvr.html",
+            {
+                "circuits": circuits_view(current_circuits()),
+                "circuit_titles": CIRCUIT_TITLES,
+                "nvr_cameras": [
+                    _camera_view(camera)
+                    for camera in registry.cameras
+                    if camera.circuit == "nvr"
+                ],
+                "stream_version": uuid4().hex,
             },
         )
 

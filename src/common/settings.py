@@ -83,6 +83,11 @@ class Settings(BaseSettings):
     gate_service_unit: str = "frigate.service"
     gate_container_name: str = "frigate"
     gate_ui_url: str = ""
+    # Конфигурация Frigate собирается из инвентаря камер и пишется примирителем
+    # от root. Пароли камер уходят в env-файл, поэтому у него отдельный путь и
+    # отдельные права.
+    gate_config_path: Path = Path("/etc/frigate/config.yml")
+    gate_env_path: Path = Path("/etc/frigate/frigate.env")
     data_dir: Path = Path("data")
     database_path: Path | None = None
     ffmpeg_path: str = "ffmpeg"

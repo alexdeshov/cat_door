@@ -67,3 +67,60 @@ def test_broken_file_leaves_the_cat_circuit_running(runtime_path: Path) -> None:
     path.write_text("{ это не json", encoding="utf-8")
 
     assert load_circuits(path).is_active("cats") is True
+
+
+def test_the_recorder_shares_frigate_with_the_gate() -> None:
+    """Калитка и регистратор — один и тот же процесс, а не два конкурента.
+
+    Ограничение узла про движки: запрещать их друг другу значило бы запрещать
+    Frigate работать вместе с самим собой.
+    """
+    both = NodeCircuits(cats=False, gate=True, nvr=True)
+
+    ensure_allowed(both)
+    assert both.active_names == ("gate", "nvr")
+    assert both.frigate_wanted is True
+
+
+def test_enabling_the_recorder_stops_the_cats_but_not_the_gate() -> None:
+    """Посторониться нужно перед чужим движком, а не перед соседом по своему."""
+    switched = NodeCircuits(cats=False, gate=True).with_circuit("nvr", True)
+
+    assert switched.gate is True
+    assert switched.nvr is True
+
+    from_cats = NodeCircuits(cats=True).with_circuit("nvr", True)
+
+    assert from_cats.cats is False
+    assert from_cats.nvr is True
+
+
+def test_lifting_the_limit_lets_every_circuit_run() -> None:
+    """Кнопка на вкладке узла — единственное, что меняется после переезда."""
+    free = NodeCircuits(cats=True, exclusive=False).with_circuit("nvr", True)
+
+    assert free.cats is True
+    assert free.nvr is True
+    ensure_allowed(free)
+
+
+def test_enabling_the_cats_stops_every_frigate_circuit() -> None:
+    running = NodeCircuits(cats=False, gate=True, nvr=True)
+
+    switched = running.with_circuit("cats", True)
+
+    assert switched.active_names == ("cats",)
+
+
+def test_turning_a_circuit_off_never_conflicts() -> None:
+    """Выключение — всегда разрешённое действие, что бы ни стояло рядом."""
+    running = NodeCircuits(cats=False, gate=True, nvr=True)
+
+    assert running.with_circuit("nvr", False).active_names == ("gate",)
+
+
+def test_a_hand_edited_conflict_stops_frigate_not_the_cats() -> None:
+    resolved = NodeCircuits(cats=True, gate=True, nvr=True).resolved()
+
+    assert resolved.active_names == ("cats",)
+    assert resolved.frigate_wanted is False

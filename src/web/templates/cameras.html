@@ -1,5 +1,5 @@
 {% extends "_base.html" %}
-{% set page = "cameras" %}
+{% set circuit = "cameras" %}
 {% block title %}CatDoor — камеры{% endblock %}
 
 {% macro hint(label, text) -%}
@@ -146,6 +146,13 @@
             <input data-field="stream_path" type="text" value="{{ camera.stream_path }}"
               placeholder="/Streaming/Channels/101">
           </label>
+          <label>
+            <span class="label-with-hint">Субпоток для детекции
+              {{ hint("субпоток", "Путь уменьшенной копии потока — для камер Frigate. Декодирование основного потока дороже самого распознавания, поэтому детекция смотрит субпоток, а в архив пишется основной без перекодирования. Пусто — всё идёт по основному потоку. У Hikvision субпоток обычно /Streaming/Channels/102.") }}
+            </span>
+            <input data-field="detect_stream_path" type="text"
+              value="{{ camera.detect_stream_path }}" placeholder="/Streaming/Channels/102">
+          </label>
           <label>Логин
             <input data-field="username" type="text" value="{{ camera.username }}" autocomplete="off">
           </label>
@@ -164,12 +171,13 @@
           </label>
           <label>
             <span class="label-with-hint">Контур
-              {{ hint("контур камеры", "Кому принадлежит камера: дверце или калитке. Роли face и side существуют только у дверцы — это понятия кошачьего контура, на них завязаны детектор, таблицы событий и модели по ракурсам.") }}
+              {{ hint("контур камеры", "Кому принадлежит камера: дверце, калитке или регистратору. Роли face и side существуют только у дверцы — это понятия кошачьего контура, на них завязаны детектор, таблицы событий и модели по ракурсам. Камеры калитки и регистратора обслуживает Frigate, и перевод между этими контурами переписывает его конфигурацию.") }}
             </span>
             <select data-field="circuit" class="camera-circuit">
               <option value="" {{ "selected" if not camera.circuit }}>без контура</option>
               <option value="cats" {{ "selected" if camera.circuit == "cats" }}>{{ circuit_titles["cats"] }}</option>
               <option value="gate" {{ "selected" if camera.circuit == "gate" }}>{{ circuit_titles["gate"] }}</option>
+              <option value="nvr" {{ "selected" if camera.circuit == "nvr" }}>{{ circuit_titles["nvr"] }}</option>
             </select>
           </label>
           <label class="role-field" {{ "hidden" if camera.circuit != "cats" }}>Роль
@@ -231,6 +239,7 @@
           <option value="" selected>без контура</option>
           <option value="cats">{{ circuit_titles["cats"] }}</option>
           <option value="gate">{{ circuit_titles["gate"] }}</option>
+          <option value="nvr">{{ circuit_titles["nvr"] }}</option>
         </select>
       </label>
       <label class="role-field" hidden>Роль
@@ -252,6 +261,9 @@
       </label>
       <label>Путь потока
         <input data-field="stream_path" type="text" placeholder="/Streaming/Channels/101">
+      </label>
+      <label>Субпоток для детекции
+        <input data-field="detect_stream_path" type="text" placeholder="/Streaming/Channels/102">
       </label>
       <label>Логин
         <input data-field="username" type="text" autocomplete="off">
