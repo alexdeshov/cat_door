@@ -33,7 +33,7 @@ CameraRole = Literal["face", "side"]
 # `src.common.circuits`, но живёт здесь отдельным типом: инвентарь не должен
 # зависеть от состояния узла, чтобы камеру можно было завести до того, как
 # её контур вообще развёрнут.
-CameraCircuit = Literal["cats", "gate"]
+CameraCircuit = Literal["cats", "gate", "nvr"]
 
 # Роли, на которых держатся детектор, таблицы событий и модели идентификации.
 ROLES: tuple[CameraRole, ...] = ("face", "side")
@@ -71,6 +71,12 @@ class CameraRecord(BaseModel):
     host: str = ""
     port: int = Field(default=554, ge=1, le=65535)
     stream_path: str = ""
+    # Субпоток для детекции. Декодирование основного потока — самая дорогая
+    # статья расхода Frigate, дороже самого распознавания, поэтому детекция
+    # смотрит уменьшенную копию, а в архив пишется основной поток без
+    # перекодирования. Пусто — детекция идёт по основному, что честно работает
+    # и заметно дороже.
+    detect_stream_path: str = ""
     username: str = ""
     password: str = ""
     mac: str = ""
@@ -105,7 +111,7 @@ class CameraRecord(BaseModel):
             raise ValueError(f"MAC-адрес должен иметь вид aa:bb:cc:dd:ee:ff, задано: {value!r}")
         return normalized
 
-    @field_validator("stream_path", mode="before")
+    @field_validator("stream_path", "detect_stream_path", mode="before")
     @classmethod
     def _normalize_path(cls, value: object) -> object:
         if not isinstance(value, str):

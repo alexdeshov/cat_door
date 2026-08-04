@@ -1,5 +1,11 @@
 from pathlib import Path
 
+from src.common.camera_registry import (
+    CameraRecord,
+    CameraRegistry,
+    camera_registry_path,
+    save_registry,
+)
 from src.common.circuits import NodeCircuits, circuits_path, save_circuits
 from src.common.gate_service import GateStatus
 from src.common.gate_sync import reconcile
@@ -146,3 +152,100 @@ def test_a_starting_service_is_given_time(runtime_path: Path, monkeypatch) -> No
     save_circuits(circuits_path(runtime_path), NodeCircuits().with_only("gate"))
 
     assert "запускается" in reconcile(Settings(data_dir=runtime_path))
+
+
+def _frigate_settings(runtime_path: Path) -> Settings:
+    """Настройки, пишущие конфигурацию Frigate в песочницу, а не в /etc."""
+    return Settings(
+        data_dir=runtime_path,
+        gate_config_path=runtime_path / "frigate" / "config.yml",
+        gate_env_path=runtime_path / "frigate" / "frigate.env",
+    )
+
+
+def _inventory(runtime_path: Path, circuit: str) -> None:
+    save_registry(
+        camera_registry_path(runtime_path),
+        CameraRegistry(
+            cameras=[
+                CameraRecord(
+                    id="yard",
+                    host="192.168.1.60",
+                    stream_path="/Streaming/Channels/101",
+                    username="admin",
+                    password="secret",
+                    circuit=circuit,
+                )
+            ]
+        ),
+    )
+
+
+def test_moving_a_camera_between_circuits_reaches_frigate(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    """Иначе перевод камеры в админке не значил бы ничего.
+
+    Конфигурацию Frigate раньше правили руками, и вкладка «Камеры» на неё не
+    влияла: инвентарь и запись жили каждый своей жизнью.
+    """
+    monkeypatch.setattr("src.common.gate_sync.gate_status", lambda unit: GateStatus("stopped"))
+    monkeypatch.setattr("src.common.gate_sync.set_gate_running", lambda unit, running: None)
+    settings = _frigate_settings(runtime_path)
+    save_circuits(circuits_path(runtime_path), NodeCircuits(cats=False, nvr=True))
+    _inventory(runtime_path, "nvr")
+
+    reconcile(settings)
+
+    assert "yard" in settings.gate_config_path.read_text(encoding="utf-8")
+
+    # Камеру вернули кошачьему контуру — Frigate больше не должен её снимать.
+    _inventory(runtime_path, "cats")
+    reconcile(settings)
+
+    assert "yard" not in settings.gate_config_path.read_text(encoding="utf-8")
+
+
+def test_changed_camera_config_restarts_frigate(runtime_path: Path, monkeypatch) -> None:
+    """Без перезапуска Frigate продолжал бы снимать по старому списку."""
+    actions: list[bool] = []
+    monkeypatch.setattr("src.common.gate_sync.gate_status", lambda unit: GateStatus("running"))
+    monkeypatch.setattr("src.common.gate_sync._container_running", lambda name: True)
+    monkeypatch.setattr(
+        "src.common.gate_sync.set_gate_running",
+        lambda unit, running: actions.append(running) or None,
+    )
+    settings = _frigate_settings(runtime_path)
+    save_circuits(circuits_path(runtime_path), NodeCircuits(cats=False, gate=True))
+    _inventory(runtime_path, "gate")
+
+    first = reconcile(settings)
+
+    assert actions == [False, True]
+    assert "перезапущена" in first
+
+    # Второй проход ничего не меняет: примиритель приходит по таймеру, и
+    # перезапуск на каждый его приход рвал бы запись без причины.
+    actions.clear()
+    second = reconcile(settings)
+
+    assert actions == []
+    assert "уже работает" in second
+
+
+def test_passwords_do_not_leak_into_the_readable_config(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr("src.common.gate_sync.gate_status", lambda unit: GateStatus("stopped"))
+    monkeypatch.setattr("src.common.gate_sync.set_gate_running", lambda unit, running: None)
+    settings = _frigate_settings(runtime_path)
+    save_circuits(circuits_path(runtime_path), NodeCircuits(cats=False, gate=True))
+    _inventory(runtime_path, "gate")
+
+    reconcile(settings)
+
+    assert "secret" not in settings.gate_config_path.read_text(encoding="utf-8")
+    assert "secret" in settings.gate_env_path.read_text(encoding="utf-8")
+    assert settings.gate_env_path.stat().st_mode & 0o777 == 0o600

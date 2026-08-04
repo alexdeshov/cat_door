@@ -1619,3 +1619,71 @@ def test_a_single_page_shows_no_pager(runtime_path: Path, monkeypatch) -> None:
 
     assert 'class="pager"' not in page.text
     assert "1–3 из 3" in page.text
+
+
+def test_cameras_live_above_the_circuits_not_inside_the_cats(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    """Камеры стали общими для контуров.
+
+    Раздел, спрятанный внутрь дверцы, врал бы про принадлежность: камеру
+    регистратора настраивают там же, где кошачью.
+    """
+    client = make_client(runtime_path, monkeypatch)
+
+    cameras = client.get("/cameras")
+    passes = client.get("/")
+
+    assert cameras.status_code == 200
+    assert '<a href="/cameras" aria-current="page">Камеры</a>' in cameras.text
+    # Внутри кошачьего контура остались только его страницы.
+    assert '<nav class="subnav">' in passes.text
+    assert 'href="/cameras"' not in passes.text.split('<nav class="subnav">')[1].split("</nav>")[0]
+
+
+def test_recorder_page_lists_its_cameras_and_switches_the_circuit(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    client = make_client(runtime_path, monkeypatch)
+    client.put(
+        "/api/cameras/face",
+        json={"circuit": "nvr", "role": None, "title": "Двор"},
+    )
+
+    page = client.get("/nvr")
+
+    assert page.status_code == 200
+    assert "Двор" in page.text
+    assert '/stream/camera/face.mjpeg' in page.text
+    assert 'data-circuit="nvr"' in page.text
+
+
+def test_recorder_and_gate_run_together_but_not_with_the_cats(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    """Калитка и регистратор — один Frigate, а спор за процессор идёт с котами."""
+    client = make_client(runtime_path, monkeypatch)
+
+    client.put("/api/circuits", json={"circuit": "gate", "enabled": True})
+    both = client.put("/api/circuits", json={"circuit": "nvr", "enabled": True})
+
+    assert both.status_code == 200
+    assert both.json()["active"] == ["gate", "nvr"]
+
+    back = client.put("/api/circuits", json={"circuit": "cats", "enabled": True})
+
+    assert back.json()["active"] == ["cats"]
+
+
+def test_the_node_limit_is_lifted_by_one_switch(runtime_path: Path, monkeypatch) -> None:
+    """После переезда на новое железо это единственное, что нужно поменять."""
+    client = make_client(runtime_path, monkeypatch)
+
+    client.put("/api/circuits", json={"exclusive": False})
+    together = client.put("/api/circuits", json={"circuit": "gate", "enabled": True})
+
+    assert together.json()["active"] == ["cats", "gate"]
+    assert together.json()["exclusive"] is False

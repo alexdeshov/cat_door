@@ -1,0 +1,16 @@
+{# Переключатель контуров узла. Общий для страниц калитки и регистратора: они
+   переключают одно и то же состояние, и две расходящиеся копии рано или поздно
+   показывали бы разное.
+
+   Кнопки не радио, а тумблеры: контуров три, а движка два, и калитка с
+   регистратором работают вместе — это один и тот же Frigate с разными камерами
+   в конфигурации. #}
+<div class="statusbar-switch">
+  <div class="segmented" role="group" aria-label="Контуры узла">
+    {% for name, title in circuit_titles.items() %}
+      <button type="button" class="circuit-choice" data-circuit="{{ name }}"
+        aria-pressed="{{ 'true' if circuits[name] else 'false' }}">{{ title }}</button>
+    {% endfor %}
+  </div>
+  <span id="circuits-status" class="muted data" style="font-size: 12px"></span>
+</div>

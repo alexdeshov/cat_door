@@ -1,0 +1,58 @@
+{# Поведение переключателя контуров. Общее для калитки и регистратора. #}
+<script>
+  async function putCircuits(body, status) {
+    status.textContent = "…";
+    status.classList.remove("bad");
+    try {
+      const response = await fetch("/api/circuits", {
+        method: "PUT",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(body)
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.detail || "не сохранилось");
+      return result;
+    } catch (error) {
+      status.textContent = error.message;
+      status.classList.add("bad");
+      return null;
+    }
+  }
+
+  function press(buttons, matches) {
+    buttons.forEach(button => button.setAttribute("aria-pressed", String(matches(button))));
+  }
+
+  const circuitChoices = [...document.querySelectorAll(".circuit-choice")];
+  circuitChoices.forEach(choice => {
+    choice.addEventListener("click", async () => {
+      const status = document.querySelector("#circuits-status");
+      // Тумблер, а не выбор одного из: калитка и регистратор — один Frigate,
+      // и включение одного не должно гасить другой.
+      const enabled = choice.getAttribute("aria-pressed") !== "true";
+      const result = await putCircuits({circuit: choice.dataset.circuit, enabled}, status);
+      if (!result) return;
+      press(circuitChoices, button => result[button.dataset.circuit] === true);
+      // Службу приводит к состоянию примиритель от root, а не эта страница:
+      // у веб-процесса нет привилегий. Секунда ожидания — чтобы перезагрузка
+      // показала уже применённое состояние, а не прежнее.
+      status.textContent = "применяется…";
+      setTimeout(() => location.reload(), 1200);
+    });
+  });
+
+  const exclusiveToggle = document.querySelector("#exclusive-toggle");
+  exclusiveToggle?.addEventListener("click", async () => {
+    const status = document.querySelector("#exclusive-status");
+    const result = await putCircuits(
+      {exclusive: exclusiveToggle.dataset.exclusive === "true" ? false : true},
+      status,
+    );
+    if (!result) return;
+    status.textContent = result.exclusive
+      ? "ограничение вернулось"
+      : "ограничение снято — контуры могут работать вместе";
+    exclusiveToggle.dataset.exclusive = String(result.exclusive);
+    setTimeout(() => location.reload(), 1200);
+  });
+</script>

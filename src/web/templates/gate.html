@@ -30,15 +30,7 @@
       <span class="readout-value">не управляется</span>
     </div>
   </div>
-  <div class="statusbar-switch">
-    <div class="segmented" role="group" aria-label="Активный контур узла">
-      <button type="button" class="circuit-choice" data-circuit="cats"
-        aria-pressed="{{ 'true' if circuits.cats else 'false' }}">{{ circuit_titles["cats"] }}</button>
-      <button type="button" class="circuit-choice" data-circuit="gate"
-        aria-pressed="{{ 'true' if circuits.gate else 'false' }}">{{ circuit_titles["gate"] }}</button>
-    </div>
-    <span id="circuits-status" class="muted data" style="font-size: 12px"></span>
-  </div>
+  {% include "_circuit_switch.html" %}
 </section>
 
 <section class="panel">
@@ -81,11 +73,26 @@
   </div>
   <div class="panel-body">
     <p class="muted">
-      До переезда на новое железо работает только один контур. Встроенная
-      графика этого узла сломана драйвером, поэтому детекцию и декодирование
-      считает процессор, и одновременная работа деградировала бы оба контура
-      незаметно: кадры начали бы стареть, а проходы пропускаться.
+      Контуров три, а движка два: калитка и регистратор — это один и тот же
+      Frigate с разными камерами, поэтому вместе они работают свободно.
+      Кошачий контур считает сам, и вот он с Frigate за процессор и спорит.
     </p>
+    <p class="muted">
+      Встроенная графика этого узла не отдана под вычисления, поэтому детекцию
+      и декодирование считает процессор, и одновременная работа обоих движков
+      деградирует их незаметно: кадры стареют, а проходы пропускаются. Отсюда
+      ограничение — и кнопка, которая его снимает, когда железо позволит.
+    </p>
+    <div class="controls">
+      <button id="exclusive-toggle" type="button"
+        data-exclusive="{{ 'true' if circuits.exclusive else 'false' }}">
+        {{ "Разрешить одновременную работу" if circuits.exclusive
+           else "Вернуть ограничение узла" }}
+      </button>
+      <span id="exclusive-status" class="muted data" style="font-size: 12px">
+        {{ "" if circuits.exclusive else "ограничение снято" }}
+      </span>
+    </div>
     <p class="muted">
       Переключение обратимо и ничего не стирает: кошачий контур помнит свой
       режим наблюдения или записи и поднимется в нём же.
@@ -120,45 +127,8 @@
 {% endblock %}
 
 {% block scripts %}
+{% include "_circuit_scripts.html" %}
 <script>
-  async function putCircuits(body, status) {
-    status.textContent = "…";
-    status.classList.remove("bad");
-    try {
-      const response = await fetch("/api/circuits", {
-        method: "PUT",
-        headers: {"Content-Type": "application/json"},
-        body: JSON.stringify(body)
-      });
-      const result = await response.json();
-      if (!response.ok) throw new Error(result.detail || "не сохранилось");
-      return result;
-    } catch (error) {
-      status.textContent = error.message;
-      status.classList.add("bad");
-      return null;
-    }
-  }
-
-  function press(buttons, matches) {
-    buttons.forEach(button => button.setAttribute("aria-pressed", String(matches(button))));
-  }
-
-  const circuitChoices = [...document.querySelectorAll(".circuit-choice")];
-  circuitChoices.forEach(choice => {
-    choice.addEventListener("click", async () => {
-      const status = document.querySelector("#circuits-status");
-      const result = await putCircuits({active: choice.dataset.circuit}, status);
-      if (!result) return;
-      press(circuitChoices, button => result[button.dataset.circuit] === true);
-      // Службу приводит к состоянию примиритель от root, а не эта страница:
-      // у веб-процесса нет привилегий. Секунда ожидания — чтобы перезагрузка
-      // показала уже применённое состояние, а не прежнее.
-      status.textContent = "применяется…";
-      setTimeout(() => location.reload(), 1200);
-    });
-  });
-
   const recordingChoices = [...document.querySelectorAll(".recording-choice")];
   recordingChoices.forEach(choice => {
     choice.addEventListener("click", async () => {
