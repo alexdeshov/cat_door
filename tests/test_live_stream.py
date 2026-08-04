@@ -147,3 +147,42 @@ def test_until_stops_the_endless_source_when_a_better_one_appears(monkeypatch) -
     # Проверка идёт не чаще раза в секунду, поэтому счёт идёт на кадры, а не на
     # мгновенность: важно, что поток кончается сам и рамки возвращаются.
     assert len(list(bounded)) <= 2
+
+
+def test_a_stopping_service_is_not_held_by_the_stream(monkeypatch) -> None:
+    """Ответ, который по замыслу не кончается, держал бы остановку службы.
+
+    uvicorn при остановке ждёт завершения запросов, и одной открытой вкладки
+    админки хватало, чтобы перезапуск занимал полторы минуты и заканчивался
+    убийством по таймауту.
+    """
+    use_clock(monkeypatch)
+    stopping = {"value": False}
+
+    def endless() -> Iterator[bytes]:
+        while True:
+            yield b"frame"
+
+    stream = resilient_mjpeg_stream(
+        endless,
+        silence_limit_seconds=600.0,
+        stopping=lambda: stopping["value"],
+    )
+    assert [next(stream) for _ in range(3)] == [b"frame"] * 3
+
+    stopping["value"] = True
+
+    assert list(stream) == []
+
+
+def test_a_stopping_service_does_not_even_open_a_source(monkeypatch) -> None:
+    use_clock(monkeypatch)
+
+    opened = []
+
+    def open_source() -> Iterator[bytes] | None:
+        opened.append(1)
+        return one_frame(b"live")
+
+    assert list(resilient_mjpeg_stream(open_source, stopping=lambda: True)) == []
+    assert opened == []

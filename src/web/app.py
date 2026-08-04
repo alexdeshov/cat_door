@@ -10,6 +10,10 @@ from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from math import ceil
 from pathlib import Path
+
+# Под именем `Event` в этом модуле уже живёт строка события базы, а событие
+# потока рядом с ней читалось бы как та же сущность.
+from threading import Event as ThreadEvent
 from time import monotonic
 from typing import Annotated, Literal
 from uuid import uuid4
@@ -433,6 +437,12 @@ async def _notify_systemd(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        # Живое превью — длинный ответ, который по замыслу не заканчивается,
+        # пока камера жива. При остановке службы uvicorn ждёт завершения
+        # запросов, поэтому одна открытая вкладка админки держала бы её до
+        # принудительного убийства по таймауту: полторы минуты на каждый
+        # перезапуск, и не там, где ждёшь.
+        app.state.shutting_down.set()
         if task is not None:
             task.cancel()
             with suppress(asyncio.CancelledError):
@@ -458,6 +468,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.mount("/static", StaticFiles(directory=static_dir), name="static")
     app.state.settings = settings
     app.state.session_factory = factory
+    # Признак остановки службы. Событие, а не флаг: живое превью крутится в
+    # потоке пула, и ему нужно узнать об остановке, не опрашивая ничего.
+    app.state.shutting_down = ThreadEvent()
     templates.env.globals["asset_version"] = asset_version
     templates.env.globals["circuit_titles"] = CIRCUIT_TITLES
 
@@ -911,6 +924,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             resilient_mjpeg_stream(
                 open_source,
                 silence_limit_seconds=settings.preview_silence_limit_seconds,
+                stopping=app.state.shutting_down.is_set,
             ),
             media_type="multipart/x-mixed-replace; boundary=frame",
             headers={
