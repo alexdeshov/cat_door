@@ -1,4 +1,7 @@
 {% extends "_base.html" %}
+{# Контур задаётся явно, а не умолчанием базового шаблона: значение нужно и
+   внутри блока содержимого, куда `set` из родителя не доходит. #}
+{% set circuit = "cats" %}
 {% set page = "passes" %}
 {% block title %}CatDoor — проходы{% endblock %}
 
@@ -15,17 +18,30 @@
     </div>
   </div>
   <div class="statusbar-switch">
+    {# Два разных вопроса рядом: разрешён ли контур на уровне узла и что он
+       делает, когда разрешён. Режим сбора живёт отдельно именно поэтому —
+       чтобы выключение контура не стирало выбор между наблюдением и записью. #}
     <div class="segmented" role="group" aria-label="Автоматический сбор">
-      <button type="button" class="capture-choice" data-state="off"
+      <button type="button" class="capture-choice" {{ "disabled" if not circuits.cats }}
+        data-state="off"
         aria-pressed="{{ 'true' if capture_state == 'off' else 'false' }}">выключен</button>
-      <button type="button" class="capture-choice" data-state="observe"
+      <button type="button" class="capture-choice" {{ "disabled" if not circuits.cats }}
+        data-state="observe"
         aria-pressed="{{ 'true' if capture_state == 'observe' else 'false' }}">наблюдение</button>
-      <button type="button" class="capture-choice" data-state="record"
+      <button type="button" class="capture-choice" {{ "disabled" if not circuits.cats }}
+        data-state="record"
         aria-pressed="{{ 'true' if capture_state == 'record' else 'false' }}">запись</button>
     </div>
     <span id="capture-mode-status" class="muted data" style="font-size: 12px"></span>
+    {% include "_circuit_switch.html" %}
   </div>
 </section>
+{% if not circuits.cats %}
+  <p class="notice notice-signal">
+    Контур дверцы выключен на уровне узла: recorder не запущен, проходы не
+    записываются. Режим сбора запомнен и вернётся вместе с контуром.
+  </p>
+{% endif %}
 
 <div class="tallies">
   <div class="tally">
@@ -300,6 +316,7 @@
 {% endblock %}
 
 {% block scripts %}
+{% include "_circuit_scripts.html" %}
 <script>
   function formatVideoTime(seconds) {
     if (!Number.isFinite(seconds)) return "0:00";
