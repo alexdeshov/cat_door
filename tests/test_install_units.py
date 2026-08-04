@@ -137,9 +137,15 @@ def test_cameras_are_given_no_way_out() -> None:
     assert _dnsmasq_directives()["dhcp-option"] == ["3", "6"]
 
 
-def test_dhcp_pool_avoids_the_reserved_addresses() -> None:
-    """.10 belongs to the server in netplan, .64 is the Hikvision default."""
+def test_dhcp_pool_avoids_the_factory_addresses() -> None:
+    """Пул не должен накрывать адреса, на которые камеры встают после сброса.
+
+    `.10` — узел в netplan, `.64` — заводской у Hikvision и HiWatch, `.108` — у
+    Dahua, а на этой платформе сделаны и Nobelic, и часть камер Ivideon. Камера
+    с заводской статикой внутри пула перехватывает адрес соседки молча: RTSP
+    отвечает 401, и со стороны узла это неотличимо от неверного пароля.
+    """
     start, end, _lease = _dnsmasq_directives()["dhcp-range"][0].split(",")
 
-    assert int(start.rsplit(".", 1)[1]) > 64
+    assert int(start.rsplit(".", 1)[1]) > 108
     assert int(end.rsplit(".", 1)[1]) < 255
