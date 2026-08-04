@@ -27,16 +27,21 @@
 <header class="masthead">
   <div class="masthead-inner">
     <a class="brand" href="/"><span class="brand-mark" aria-hidden="true"></span>CatDoor</a>
+    {# У каждого контура в шапке видно, работает ли он и в каком состоянии:
+       вопрос «что сейчас работает» возникает раньше выбора страницы, потому
+       что узел отдан одному движку. Ссылки остаются ссылками — включает и
+       выключает контур отдельная кнопка на его странице, иначе случайный клик
+       по «Дверце» останавливал бы запись проходов. #}
     <nav class="nav">
-      <a href="/" {% if circuit == "cats" %}aria-current="page"{% endif %}>
-        {{ circuit_titles["cats"] }}
-      </a>
-      <a href="/gate" {% if circuit == "gate" %}aria-current="page"{% endif %}>
-        {{ circuit_titles["gate"] }}
-      </a>
-      <a href="/nvr" {% if circuit == "nvr" %}aria-current="page"{% endif %}>
-        {{ circuit_titles["nvr"] }}
-      </a>
+      {% for item in circuit_nav() %}
+        <a class="nav-circuit" href="{{ item.href }}"
+          {% if circuit == item.name %}aria-current="page"{% endif %}>
+          <span class="nav-circuit-title">
+            <span class="beacon {{ item.tone }}" aria-hidden="true"></span>{{ item.title }}
+          </span>
+          <span class="nav-circuit-state">{{ item.state }}</span>
+        </a>
+      {% endfor %}
       <a href="/cameras" {% if circuit == "cameras" %}aria-current="page"{% endif %}>Камеры</a>
     </nav>
     <div class="masthead-tools">

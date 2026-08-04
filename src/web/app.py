@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from math import ceil
 from pathlib import Path
+from time import monotonic
 from typing import Annotated, Literal
 from uuid import uuid4
 
@@ -78,7 +79,7 @@ from src.common.detection_config import (
     save_detection_config,
 )
 from src.common.detection_stats import read_detection_stats
-from src.common.gate_service import gate_status
+from src.common.gate_service import GateStatus, gate_status
 from src.common.model_registry import register_model_version
 from src.common.online_metrics import build_online_metrics
 from src.common.process import spawn_detached
@@ -97,6 +98,19 @@ TRAINING_TARGETS = {"excluded", "macbook", "local"}
 # экран и её приходилось долго листать. Десяток — та порция, после которой ещё
 # видно счётчики и камеры без прокрутки обратно наверх.
 EVENTS_PER_PAGE = 10
+# Состояние службы Frigate показывается в шапке каждой страницы, а узнаётся
+# запуском systemctl. Короткая память избавляет от процесса на отрисовку, не
+# успевая соврать заметно.
+GATE_STATUS_CACHE_SECONDS = 2.0
+CAPTURE_STATE_TITLES = {"off": "выключен", "observe": "наблюдение", "record": "запись"}
+GATE_STATE_TITLES = {
+    "running": "работает",
+    "starting": "запускается",
+    "stopped": "остановлен",
+    "failed": "отказ",
+    "absent": "не развёрнут",
+    "unknown": "состояние неизвестно",
+}
 ACTIVE_EVALUATION_STATES = {"starting", "running"}
 ACTIVE_TRAINING_STATES = {"starting", "preparing", "training"}
 HEARTBEAT_STALE_AFTER = timedelta(minutes=10)
@@ -476,6 +490,63 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             capture_mode_path(settings.data_dir),
             CaptureMode.from_settings(settings),
         )
+
+    def cached_gate_status() -> GateStatus:
+        """Состояние службы Frigate с короткой памятью.
+
+        Шапка показывает его на каждой странице, а узнаётся оно запуском
+        `systemctl` — процессом на каждую отрисовку. Пары секунд достаточно,
+        чтобы человек не заметил задержки, и хватает, чтобы страница с
+        картинками не плодила по вызову на каждый свой запрос.
+        """
+        now = monotonic()
+        cached = getattr(app.state, "gate_status_cache", None)
+        if cached is not None and now - cached[0] < GATE_STATUS_CACHE_SECONDS:
+            return cached[1]
+        status = gate_status(settings.gate_service_unit)
+        app.state.gate_status_cache = (now, status)
+        return status
+
+    def circuit_nav() -> list[dict[str, object]]:
+        """Контуры для шапки: где мы, что работает и в каком состоянии.
+
+        Живёт в шапке, а не на страницах контуров, потому что вопрос «что
+        сейчас работает» возникает раньше выбора страницы: узел отдан одному
+        движку, и увидеть это нужно, не уходя со своей вкладки.
+        """
+        circuits = current_circuits()
+        # Служба спрашивается только когда есть кому работать: при выключенных
+        # контурах Frigate ответ и так известен, а процесс стоил бы столько же.
+        status = cached_gate_status() if circuits.frigate_wanted else None
+        items: list[dict[str, object]] = []
+        for name, title in CIRCUIT_TITLES.items():
+            if name == "cats":
+                mode = current_capture_mode()
+                state = CAPTURE_STATE_TITLES[mode.state] if circuits.cats else "остановлен"
+                tone = ("beacon-live" if mode.state == "record" else "beacon-ok") if (
+                    circuits.cats
+                ) else ""
+            elif not circuits.is_active(name):
+                state, tone = "выключен", ""
+            else:
+                state = GATE_STATE_TITLES.get(status.state if status else "unknown", "")
+                tone = {
+                    "running": "beacon-ok",
+                    "failed": "beacon-bad",
+                    "unknown": "beacon-bad",
+                }.get(status.state if status else "unknown", "")
+            items.append(
+                {
+                    "name": name,
+                    "title": title,
+                    "href": "/" if name == "cats" else f"/{name}",
+                    "state": state,
+                    "tone": tone,
+                }
+            )
+        return items
+
+    templates.env.globals["circuit_nav"] = circuit_nav
 
     def current_registry() -> CameraRegistry:
         """Инвентарь читается на каждый запрос.
