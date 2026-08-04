@@ -44,45 +44,41 @@ def _container_running(name: str) -> bool | None:
     return result.stdout.strip() == "true"
 
 
-def _write_if_changed(path: Path, text: str, *, mode: int) -> bool:
-    """Записать файл, если он отличается. Вернуть, была ли запись.
-
-    Сравнение обязательно: перезапись одинакового содержимого сама по себе
-    безвредна, но примиритель приходит по таймеру, и «файл изменился» —
-    единственный признак, по которому он решает перезапустить Frigate. Без
-    сравнения контур калитки перезапускался бы каждые несколько минут.
-    """
+def _unchanged(path: Path, text: str) -> bool:
     try:
-        if path.read_text(encoding="utf-8") == text:
-            return False
+        return path.read_text(encoding="utf-8") == text
     except OSError:
-        pass
-    write_text_durably(path, text, mode=mode)
-    return True
+        return False
 
 
 def apply_frigate_config(settings: Settings) -> bool:
     """Собрать конфигурацию Frigate из инвентаря. Вернуть, изменилась ли она.
 
-    Пишет примиритель, а не веб-служба: у той нет привилегий на `/etc/frigate`,
-    и давать их нельзя — у админки нет аутентификации.
+    Пишет примиритель, а не веб-служба: у той нет привилегий на каталоги
+    Frigate, и давать их нельзя — у админки нет аутентификации.
+
+    Сравнение идёт с копией прошлой сборки, а не с рабочим файлом. Frigate
+    переписывает свою конфигурацию сам — мигрирует между версиями и хранит
+    рядом `backup_config.yaml`, — и комментарии при этом не переживают
+    round-trip. Сравнение с живым файлом после первой же миграции расходилось бы
+    навсегда, и примиритель перезапускал бы контур каждые несколько минут.
+    Пока инвентарь не менялся, миграция Frigate остаётся нетронутой.
     """
     registry = load_registry(camera_registry_path(settings.data_dir))
     if registry is None:
         return False
     circuits = load_circuits(circuits_path(settings.data_dir))
-    config_changed = _write_if_changed(
-        settings.gate_config_path,
-        build_config(registry, circuits),
-        mode=0o644,
-    )
-    # Пароли камер: файл читает только root и сам контейнер.
-    env_changed = _write_if_changed(
-        settings.gate_env_path,
-        build_env(frigate_cameras(registry, circuits)),
-        mode=0o600,
-    )
-    return config_changed or env_changed
+    config = build_config(registry, circuits)
+    env = build_env(frigate_cameras(registry, circuits))
+    if _unchanged(settings.gate_applied_config_path, config) and _unchanged(
+        settings.gate_env_path, env
+    ):
+        return False
+    write_text_durably(settings.gate_config_path, config, mode=0o644)
+    write_text_durably(settings.gate_applied_config_path, config, mode=0o600)
+    # Пароли камер: файл читает только root и Docker как env_file.
+    write_text_durably(settings.gate_env_path, env, mode=0o600)
+    return True
 
 
 def reconcile(settings: Settings) -> str:

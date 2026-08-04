@@ -159,6 +159,7 @@ def _frigate_settings(runtime_path: Path) -> Settings:
     return Settings(
         data_dir=runtime_path,
         gate_config_path=runtime_path / "frigate" / "config.yml",
+        gate_applied_config_path=runtime_path / "frigate" / "catdoor-applied.yml",
         gate_env_path=runtime_path / "frigate" / "frigate.env",
     )
 
@@ -249,3 +250,45 @@ def test_passwords_do_not_leak_into_the_readable_config(
     assert "secret" not in settings.gate_config_path.read_text(encoding="utf-8")
     assert "secret" in settings.gate_env_path.read_text(encoding="utf-8")
     assert settings.gate_env_path.stat().st_mode & 0o777 == 0o600
+
+
+def test_frigate_rewriting_its_own_config_does_not_cause_restart_loop(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    """Frigate мигрирует конфигурацию между версиями и переписывает файл сам.
+
+    Комментарии round-trip не переживают, поэтому сравнение с живым файлом
+    после первой же миграции расходилось бы навсегда — и примиритель
+    перезапускал бы контур каждые несколько минут, рвя запись.
+    """
+    actions: list[bool] = []
+    monkeypatch.setattr("src.common.gate_sync.gate_status", lambda unit: GateStatus("running"))
+    monkeypatch.setattr("src.common.gate_sync._container_running", lambda name: True)
+    monkeypatch.setattr(
+        "src.common.gate_sync.set_gate_running",
+        lambda unit, running: actions.append(running) or None,
+    )
+    settings = _frigate_settings(runtime_path)
+    save_circuits(circuits_path(runtime_path), NodeCircuits(cats=False, gate=True))
+    _inventory(runtime_path, "gate")
+    reconcile(settings)
+    actions.clear()
+
+    # Frigate переписал конфигурацию: комментарии исчезли, ключи переставлены.
+    settings.gate_config_path.write_text("cameras:\n  yard: {}\n", encoding="utf-8")
+    message = reconcile(settings)
+
+    assert actions == []
+    assert "уже работает" in message
+    # И миграция Frigate осталась нетронутой: инвентарь не менялся.
+    assert settings.gate_config_path.read_text(encoding="utf-8") == "cameras:\n  yard: {}\n"
+
+
+def test_the_generated_config_goes_where_frigate_reads_it(runtime_path: Path) -> None:
+    """Каталог `/var/lib/frigate/config` смонтирован в контейнер как `/config`.
+
+    Конфигурация, положенная в `/etc/frigate`, не читается никем: там живут
+    только пароли и служебная копия примирителя.
+    """
+    assert Settings().gate_config_path == Path("/var/lib/frigate/config/config.yml")
