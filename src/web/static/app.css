@@ -621,6 +621,24 @@ td.number { font-family: var(--font-data); font-variant-numeric: tabular-nums; }
 }
 
 .pass:first-child { border-top: 0; }
+
+/* Навигация по страницам проходов. Крайние состояния остаются на месте
+   кнопками, а не исчезают: пропадающий элемент сдвигал бы соседние под
+   курсором ровно в момент, когда по ним листают. */
+.pager {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding: 14px 18px;
+  border-top: 1px solid var(--line);
+}
+
+.pager .disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
 /* Колонка не тянется по высоте соседней и не даёт треку разъехаться шире
    себя. Иначе заглушка «адрес не задан» растягивалась до высоты формы
    настроек, а `aspect-ratio` вычислял из этой высоты ширину — и блок вылезал

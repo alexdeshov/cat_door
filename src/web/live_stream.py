@@ -18,6 +18,9 @@ from io import BytesIO
 from PIL import Image, ImageDraw, ImageFont
 
 NO_SIGNAL_SIZE = (960, 540)
+# Пол между двумя открытиями источника, отдавшего хоть кадр. Смена источника
+# должна быть незаметной, а не выдержанной, поэтому шаг маленький.
+MIN_REOPEN_INTERVAL_SECONDS = 0.5
 # Шрифты с кириллицей на Ubuntu и на macOS. Встроенный шрифт Pillow знает
 # только латиницу, поэтому без системного текст пришлось бы рисовать по-русски
 # прямоугольниками — лучше честная латиница, чем нечитаемая заглушка.
@@ -79,6 +82,30 @@ def no_signal_jpeg(silent_seconds: float) -> bytes:
     return buffer.getvalue()
 
 
+def until(
+    source: Iterator[bytes],
+    should_stop: Callable[[], bool],
+    *,
+    check_interval_seconds: float = 1.0,
+) -> Iterator[bytes]:
+    """Кадры источника, пока не появился источник получше.
+
+    Два источника превью несимметричны, и на этом однажды сломались рамки
+    детекции: аннотированные кадры кончаются сами, когда recorder перестаёт их
+    публиковать, а поток с живой камеры не кончается никогда. Без этой обёртки
+    выбор, сделанный в момент, когда превью протухло, оставался бы навсегда —
+    картинка живая, рамок нет, и помогает только перезагрузка страницы.
+    """
+    checked_at = _now()
+    for chunk in source:
+        now = _now()
+        if now - checked_at >= check_interval_seconds:
+            checked_at = now
+            if should_stop():
+                return
+        yield chunk
+
+
 def resilient_mjpeg_stream(
     open_source: Callable[[], Iterator[bytes] | None],
     *,
@@ -103,11 +130,25 @@ def resilient_mjpeg_stream(
     """
     silent_since: float | None = None
     while True:
+        opened_at = _now()
         source = open_source()
+        delivered = False
         if source is not None:
             for chunk in source:
                 silent_since = None
+                delivered = True
                 yield chunk
+        if delivered:
+            # Источник отдавал кадры и закончился сам — это смена источника, а
+            # не пропажа камеры: превью протухло и уступило место камере, либо
+            # наоборот recorder снова начал публиковать кадры. Заглушка и пауза
+            # здесь означали бы «нет сигнала» посреди исправной картинки.
+            # Минимальный шаг всё же нужен: камера, отдающая кадр и сразу
+            # обрывающаяся, иначе крутила бы запуск ffmpeg без передышки.
+            streamed = _now() - opened_at
+            if streamed < MIN_REOPEN_INTERVAL_SECONDS:
+                _wait(MIN_REOPEN_INTERVAL_SECONDS - streamed)
+            continue
         now = _now()
         if silent_since is None:
             silent_since = now

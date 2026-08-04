@@ -101,7 +101,7 @@ def test_capture_and_label_known_cat(runtime_path: Path, monkeypatch) -> None:
     assert "/stream/face.mjpeg?v=" in page.text
     assert 'cameraRotations[role] = (cameraRotations[role] + 90) % 360' in page.text
     assert 'localStorage.setItem(cameraRotationKey, JSON.stringify(cameraRotations))' in page.text
-    assert 'const cameraRotationKey = "catdoor-camera-rotations-v2"' in page.text
+    assert 'const cameraRotationKey = "catdoor-camera-rotations-v3"' in page.text
     assert 'id="detector-status"' in page.text
     # Разметка сохраняется нажатием по переключателю, отдельной кнопки нет.
     assert 'class="label-choice" data-label="known_cat"' in page.text
@@ -119,7 +119,7 @@ def test_capture_and_label_known_cat(runtime_path: Path, monkeypatch) -> None:
     assert "function applyEventMediaLayout(swapped)" in page.text
     assert "applyEventMediaLayout(swapped);" in page.text
     assert "function applyEventVideoRotations()" in page.text
-    assert "(180 + cameraRotations[role]) % 360" in page.text
+    assert "(base + cameraRotations[role]) % 360" in page.text
 
 
 def test_summary_is_above_cameras_and_counts_all_events(
@@ -894,6 +894,62 @@ def test_stream_prefers_annotated_frames_while_the_recorder_publishes(
         assert b"annotated" in _collect_first_frame(response)
 
 
+def test_stream_returns_to_detector_boxes_without_a_page_reload(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    """Рамки детекции пропадали именно так.
+
+    Поток с живой камеры не кончается сам, поэтому выбор, сделанный в момент
+    протухшего превью (перезапуск recorder, загрузка моделей, обрыв питания),
+    оставался навсегда: картинка живая, а рамок нет до перезагрузки страницы.
+    """
+    published = {"fresh": False, "opened": 0}
+    clock = {"now": 0.0}
+
+    def tick(seconds: float = 0.5) -> None:
+        clock["now"] += seconds
+
+    def frame(payload: bytes) -> bytes:
+        return b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + payload + b"\r\n"
+
+    def fake_camera_stream(ffmpeg_path: str, rtsp_url: str, fps: int, **options):
+        # Живая камера кадры не прекращает — оборвать её может только `until`.
+        # На третьем кадре recorder оживает и снова публикует превью.
+        sent = 0
+        while True:
+            tick()
+            sent += 1
+            if sent == 3:
+                published["fresh"] = True
+            yield frame(b"raw")
+
+    def fake_published_stream(path: Path, fps: int, **options):
+        # Кадры отдаёт только первое открытие: ответ обязан закончиться сам,
+        # иначе его некому оборвать и тест повиснет на закрытии.
+        published["opened"] += 1
+        if published["opened"] > 1:
+            return
+        for _ in range(3):
+            tick()
+            yield frame(b"annotated")
+
+    client = make_client(runtime_path, monkeypatch)
+    monkeypatch.setattr("src.web.app.mjpeg_stream", fake_camera_stream)
+    monkeypatch.setattr("src.web.app.local_mjpeg_stream", fake_published_stream)
+    monkeypatch.setattr("src.web.app.preview_is_fresh", lambda path: published["fresh"])
+    monkeypatch.setattr("src.web.live_stream._now", lambda: clock["now"])
+    monkeypatch.setattr("src.web.live_stream._wait", tick)
+
+    with client.stream("GET", "/stream/face.mjpeg") as response:
+        seen = b"".join(response.iter_bytes())
+
+    assert b"raw" in seen
+    # Главное: рамки вернулись в тот же ответ, без перезагрузки страницы.
+    assert b"annotated" in seen
+    assert seen.index(b"raw") < seen.index(b"annotated")
+
+
 def test_stream_reopens_the_camera_at_the_address_it_came_back_on(
     runtime_path: Path,
     monkeypatch,
@@ -1468,3 +1524,98 @@ def test_manual_capture_is_refused_when_the_disk_is_nearly_full(
 
     assert response.status_code == 507
     assert "Освободите место" in response.json()["detail"]
+
+
+def test_recordings_follow_the_camera_orientation_setting(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    """Записи показывались перевёрнутыми на нормально висящей камере.
+
+    Клипы пишутся как есть с камеры, поэтому переворот отыгрывает показ. Но
+    константа 180 в разметке осталась с тех пор, когда обе камеры по умолчанию
+    висели вверх ногами, и настройку камеры не спрашивала.
+    """
+    client = make_client(runtime_path, monkeypatch)
+
+    rotated = client.get("/")
+    assert '"face": 180' in rotated.text
+
+    client.put("/api/cameras/face", json={"rotate_180": False})
+
+    upright = client.get("/")
+    assert '"face": 0' in upright.text
+    # Живое превью разворачивает сервер, поэтому второго поворота в CSS быть
+    # не должно — иначе картинка встала бы на голову.
+    assert "applyCameraRotation" in upright.text
+    assert "180 + cameraRotations" not in upright.text
+
+
+def _record_events(client: TestClient, count: int) -> None:
+    for _ in range(count):
+        client.post("/api/events", json={"duration_seconds": 5})
+
+
+def test_passes_are_paginated_by_ten(runtime_path: Path, monkeypatch) -> None:
+    """Страница проходов разрасталась до неприличной длины."""
+    client = make_client(runtime_path, monkeypatch)
+    _record_events(client, 11)
+
+    first = client.get("/")
+    second = client.get("/?page=2")
+
+    assert first.text.count('class="pass"') == 10
+    assert second.text.count('class="pass"') == 1
+    # Самые свежие проходы идут первыми, поэтому на второй странице — самый старый.
+    assert 'data-event="1"' in second.text
+    assert 'data-event="1"' not in first.text
+    assert 'href="/?page=2"' in first.text
+    assert 'href="/?page=1"' in second.text
+    assert "1 из 2" in first.text
+
+
+def test_page_number_is_clamped_instead_of_failing(runtime_path: Path, monkeypatch) -> None:
+    """Ссылка на страницу, которой больше нет, должна вести на ближайшую.
+
+    Иначе сохранённая ссылка ломается ровно тогда, когда с неё удалили
+    последний проход.
+    """
+    client = make_client(runtime_path, monkeypatch)
+    _record_events(client, 11)
+
+    assert client.get("/?page=99").status_code == 200
+    assert "2 из 2" in client.get("/?page=99").text
+    assert "1 из 2" in client.get("/?page=0").text
+    assert "1 из 2" in client.get("/?page=-5").text
+
+
+def test_counters_count_the_whole_base_not_the_page(runtime_path: Path, monkeypatch) -> None:
+    """Счётчики описывают всю историю, иначе они меняются от листания.
+
+    Набор для обучения считался питоном по показанному срезу и врал уже на
+    сотне проходов, а с пагинацией считал бы по десяти.
+    """
+    client = make_client(runtime_path, monkeypatch)
+    _record_events(client, 11)
+    for event_id in (1, 11):
+        client.post(
+            f"/api/events/{event_id}/label",
+            json={"label": "known_cat", "cat_name": "Барсик", "training_target": "macbook"},
+        )
+
+    page = client.get("/?page=2")
+
+    assert '<span class="tally-value">11</span>' in page.text
+    # Событие №1 лежит на второй странице, №11 — на первой; оба обязаны попасть
+    # в счётчик набора для MacBook.
+    assert "на MacBook: 2" in page.text
+
+
+def test_a_single_page_shows_no_pager(runtime_path: Path, monkeypatch) -> None:
+    client = make_client(runtime_path, monkeypatch)
+    _record_events(client, 3)
+
+    page = client.get("/")
+
+    assert 'class="pager"' not in page.text
+    assert "1–3 из 3" in page.text

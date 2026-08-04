@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
+from math import ceil
 from pathlib import Path
 from typing import Annotated, Literal
 from uuid import uuid4
@@ -87,11 +88,15 @@ from src.recorder.detection_journal import frame_journal_path
 from src.recorder.ffmpeg import RecorderError, mjpeg_stream, probe_stream, record_clip
 from src.recorder.preview import local_mjpeg_stream, preview_is_fresh, preview_path
 from src.recorder.status import read_recorder_status
-from src.web.live_stream import resilient_mjpeg_stream
+from src.web.live_stream import resilient_mjpeg_stream, until
 from training.workflow import create_macbook_export, write_status
 
 LABELS = {"pending", "known_cat", "foreign_cat", "not_visible", "multiple_cats"}
 TRAINING_TARGETS = {"excluded", "macbook", "local"}
+# Проходов за ночь набирается столько, что страница переставала помещаться в
+# экран и её приходилось долго листать. Десяток — та порция, после которой ещё
+# видно счётчики и камеры без прокрутки обратно наверх.
+EVENTS_PER_PAGE = 10
 ACTIVE_EVALUATION_STATES = {"starting", "running"}
 ACTIVE_TRAINING_STATES = {"starting", "preparing", "training"}
 HEARTBEAT_STALE_AFTER = timedelta(minutes=10)
@@ -272,6 +277,18 @@ def _role_stream_url(registry: CameraRegistry, role: str) -> str:
     """
     camera = registry.by_role(role)
     return camera.rtsp_url() if camera is not None and camera.enabled else ""
+
+
+def _role_base_rotation(registry: CameraRegistry, role: str) -> int:
+    """Поворот, которым показывают ЗАПИСИ этой роли.
+
+    Клипы пишутся как есть с камеры (`-c:v copy`, без ориентационных фильтров),
+    поэтому перевёрнутую камеру отыгрывает показ. Живое превью здесь ни при чём:
+    его разворачивает ffmpeg на сервере, и добавить поворот ещё и в CSS значило
+    бы развернуть картинку дважды.
+    """
+    camera = registry.by_role(role)
+    return 180 if camera is not None and camera.rotate_180 else 0
 
 
 def _camera_view(camera: CameraRecord) -> dict[str, object]:
@@ -494,8 +511,34 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def index(
         request: Request,
         session: Annotated[Session, Depends(get_session)],
+        page: int = 1,
     ) -> HTMLResponse:
-        events = session.scalars(select(Event).order_by(Event.created_at.desc()).limit(100)).all()
+        summary_row = session.execute(
+            select(
+                func.count(Event.id),
+                func.count(Event.id).filter(Event.trigger_source == "automatic"),
+                func.count(Event.id).filter(Event.label == "pending"),
+                func.count(Event.id).filter(Event.label == "known_cat"),
+                func.count(Event.id).filter(Event.label == "foreign_cat"),
+                func.count(Event.id).filter(Event.status == "failed"),
+                func.count(Event.id).filter(Event.training_target == "macbook"),
+                func.count(Event.id).filter(Event.training_target == "local"),
+            )
+        ).one()
+        pages = max(1, ceil(summary_row[0] / EVENTS_PER_PAGE))
+        # Номер страницы прижимается к диапазону, а не отвергается: после
+        # удаления последнего прохода на странице сохранённая ссылка иначе вела
+        # бы в пустоту.
+        page = min(max(page, 1), pages)
+        events = session.scalars(
+            select(Event)
+            # Тай-брейк по id обязателен: автоматические проходы пишутся пачками
+            # и могут делить время создания, а при неустойчивом порядке одна и
+            # та же запись прыгала бы между страницами.
+            .order_by(Event.created_at.desc(), Event.id.desc())
+            .limit(EVENTS_PER_PAGE)
+            .offset((page - 1) * EVENTS_PER_PAGE)
+        ).all()
         event_ids = [event.id for event in events]
         prediction_rows = (
             session.scalars(
@@ -513,16 +556,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         for prediction in prediction_rows:
             by_view = event_predictions.setdefault(prediction.event_id, {})
             by_view.setdefault(prediction.view, prediction)
-        summary_row = session.execute(
-            select(
-                func.count(Event.id),
-                func.count(Event.id).filter(Event.trigger_source == "automatic"),
-                func.count(Event.id).filter(Event.label == "pending"),
-                func.count(Event.id).filter(Event.label == "known_cat"),
-                func.count(Event.id).filter(Event.label == "foreign_cat"),
-                func.count(Event.id).filter(Event.status == "failed"),
-            )
-        ).one()
         event_summary = {
             "total": summary_row[0],
             "automatic": summary_row[1],
@@ -538,10 +571,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             .distinct()
             .order_by(Event.cat_name)
         ).all()
-        target_counts = {
-            target: sum(event.training_target == target for event in events)
-            for target in ("macbook", "local")
-        }
+        # Считается по всей базе, а не по показанной странице: это размер
+        # набора для обучения, и он не зависит от того, что сейчас на экране.
+        # Прежний подсчёт по срезу врал уже на сотне проходов.
+        target_counts = {"macbook": summary_row[6], "local": summary_row[7]}
         local_runs = sorted((settings.data_dir / "training" / "local").glob("*/status.json"))
         local_status = None
         if local_runs:
@@ -570,8 +603,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             context={
                 "events": events,
                 "event_predictions": event_predictions,
+                # Не `page`: так в шаблонах называется вкладка навигации,
+                # и страница проходов затёрла бы подсветку «Проходы».
+                "events_page": page,
+                "events_pages": pages,
+                "events_per_page": EVENTS_PER_PAGE,
+                "events_shown_from": (page - 1) * EVENTS_PER_PAGE + 1 if events else 0,
+                "events_shown_to": (page - 1) * EVENTS_PER_PAGE + len(events),
                 "face_configured": bool(_role_stream_url(registry, "face")),
                 "side_configured": bool(_role_stream_url(registry, "side")),
+                "recording_rotations": {
+                    role: _role_base_rotation(registry, role) for role in ("face", "side")
+                },
                 "default_duration": settings.capture_duration_seconds,
                 "target_counts": target_counts,
                 "event_summary": event_summary,
@@ -769,12 +812,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     settings.preview_fps,
                     idle_timeout_seconds=settings.preview_idle_timeout_seconds,
                 )
-            return mjpeg_stream(
-                settings.ffmpeg_path,
-                camera.rtsp_url(),
-                settings.preview_fps,
-                rotate_180=camera.rotate_180,
-                idle_timeout_seconds=settings.preview_idle_timeout_seconds,
+            # Поток с камеры не кончается сам, поэтому его обрывают снаружи,
+            # как только recorder снова публикует кадры: иначе выбор, сделанный
+            # в момент протухшего превью, остался бы навсегда — картинка живая,
+            # а рамок детекции больше нет до перезагрузки страницы.
+            return until(
+                mjpeg_stream(
+                    settings.ffmpeg_path,
+                    camera.rtsp_url(),
+                    settings.preview_fps,
+                    rotate_180=camera.rotate_180,
+                    idle_timeout_seconds=settings.preview_idle_timeout_seconds,
+                ),
+                lambda: preview_is_fresh(path),
             )
 
         return StreamingResponse(
