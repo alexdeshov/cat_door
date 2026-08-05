@@ -193,3 +193,29 @@ def test_rebuilt_config_keeps_foreign_sections_and_new_cameras() -> None:
     assert config.rstrip().endswith("enabled: true")
     # Раздел остаётся единственным: собранная часть его не дублирует.
     assert config.count("face_recognition:") == 1
+
+
+def test_detect_resolution_is_left_to_frigate() -> None:
+    """Разрешение детекции не навязывается: его задаёт сам поток.
+
+    Жёсткие 640×480 сплющивали субпоток 16:9 и, что важнее, уменьшали лицо до
+    размера, который детектор лиц уже не находит: 95×112 точек в записи
+    становились 32×50 в кадре детекции.
+    """
+    registry = CameraRegistry(
+        cameras=[
+            CameraRecord(
+                id="gate-1",
+                host="192.0.2.5",
+                stream_path="/media/video1",
+                detect_stream_path="/media/video2",
+                circuit="gate",
+            )
+        ]
+    )
+
+    config = build_config(registry, NodeCircuits(cats=False, gate=True))
+    parsed = yaml.safe_load(config)
+    detect = parsed["cameras"]["gate_1"]["detect"]
+
+    assert detect == {"enabled": True, "fps": 5}
