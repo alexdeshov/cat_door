@@ -13,6 +13,7 @@ import numpy as np
 from PIL import Image
 from sqlalchemy import select
 
+from src.common.camera_registry import CameraRegistry, camera_registry_path, load_registry
 from src.common.database import Event, create_session_factory
 from src.common.detection_config import (
     DetectionConfig,
@@ -32,6 +33,29 @@ from training.dataset import DatasetItem, assign_splits, validate_manifest, writ
 
 USABLE_LABELS = {"known_cat", "foreign_cat"}
 _STATUS_LOCK = threading.RLock()
+
+
+def view_rotation(registry: CameraRegistry | None, view: str) -> bool:
+    """Нужно ли разворачивать кадры этого ракурса перед детектором.
+
+    Клип пишется ровно так, как его отдала камера: `-c:v copy`, без единого
+    фильтра ориентации. Переворот живёт в карточке камеры и отыгрывается на
+    показе, поэтому здесь его приходится повторять — детектор не инвариантен к
+    повороту, и перевёрнутый кот для него не кот.
+
+    Проверено 5 августа на живых записях: те же восемь кадров дают уверенность
+    0.67–0.99, если ориентация верна, и не проходят порог камеры подхода вовсе,
+    если кадр развернуть. Прежде поворот стоял здесь константой `True` — набор
+    из 354 кадров дал 4 кропа, и обучать было не на чем.
+
+    Роль берётся из текущего инвентаря: какая камера снимала событие полгода
+    назад, знать неоткуда, а перестановка камер местами меняет роль, но не
+    ориентацию сцены.
+    """
+    if registry is None:
+        return False
+    camera = registry.by_role(view)
+    return bool(camera is not None and camera.rotate_180)
 
 
 class CatDetector(Protocol):
@@ -168,6 +192,7 @@ def build_dataset(
         detector_model_path,
         detector_device,
     )
+    registry = load_registry(camera_registry_path(data_dir))
     items: list[DatasetItem] = []
     crop_by_view: dict[str, dict[str, int]] = {
         "face": {"included": 0, "excluded_no_confident_box": 0},
@@ -194,7 +219,7 @@ def build_dataset(
                 ffmpeg_path,
                 source,
                 event_dir / "frame-%02d.jpg",
-                rotate_180=True,
+                rotate_180=view_rotation(registry, view),
             )
             camera_config = getattr(runtime_config, view)
             cropped_frames, rejected = crop_extracted_frames(

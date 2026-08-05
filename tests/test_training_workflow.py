@@ -6,6 +6,12 @@ import numpy as np
 import pytest
 from PIL import Image
 
+from src.common.camera_registry import (
+    CameraRecord,
+    CameraRegistry,
+    camera_registry_path,
+    save_registry,
+)
 from src.common.database import Event, create_session_factory
 from src.common.detection_config import CameraDetectionConfig, DetectionConfig
 from src.inference.cat_detector import CatDetection, CatDetectionResult
@@ -155,7 +161,9 @@ def test_build_dataset_uses_selected_events_only(runtime_path: Path, monkeypatch
         "Мало примеров чужих котов для проверки ложных распознаваний",
     ]
     assert [item.label for item in items] == ["Барсик", "Барсик"]
-    assert rotations == [True, True]
+    # Инвентаря в этом наборе нет, значит и разворачивать нечего: клип записан
+    # как есть, а переворот живёт в карточке камеры.
+    assert rotations == [False, False]
     assert report["detector_crops"] == {
         "included": 2,
         "excluded_no_confident_box": 0,
@@ -261,3 +269,91 @@ def test_only_the_last_three_exports_are_kept(runtime_path, monkeypatch) -> None
     assert remaining[0] == "macbook-20250103-000000-aaaa.zip"
     assert remaining[1] == "macbook-20250104-000000-aaaa.zip"
     assert remaining[2].startswith("macbook-2026")
+
+
+def test_frames_follow_the_camera_rotation_from_the_inventory(
+    runtime_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Разворачивать кадры перед детектором нужно ровно тем камерам, что стоят вверх ногами.
+
+    Клип пишется без фильтров ориентации, поэтому кадр из файла повторяет
+    установку камеры. Детектор к повороту не инвариантен: константный разворот
+    сделал 5 августа набор из 354 кадров, в котором уцелело 4 кропа.
+    """
+    database_path = runtime_path / "catdoor.db"
+    factory = create_session_factory(database_path)
+    with factory() as session:
+        session.add(
+            Event(
+                created_at=datetime.now(UTC),
+                status="ready",
+                duration_seconds=5,
+                media_path="events/00000001/face.mp4",
+                side_media_path="events/00000001/side.mp4",
+                label="known_cat",
+                cat_name="Барсик",
+                training_target="local",
+            )
+        )
+        session.commit()
+    for view in ("face", "side"):
+        media = runtime_path / "events" / "00000001" / f"{view}.mp4"
+        media.parent.mkdir(parents=True, exist_ok=True)
+        media.write_bytes(b"")
+
+    save_registry(
+        camera_registry_path(runtime_path),
+        CameraRegistry(
+            cameras=[
+                CameraRecord(
+                    id="upside-down",
+                    host="10.0.0.2",
+                    stream_path="/s",
+                    role="face",
+                    rotate_180=True,
+                ),
+                CameraRecord(
+                    id="upright",
+                    host="10.0.0.3",
+                    stream_path="/s",
+                    role="side",
+                    rotate_180=False,
+                ),
+            ]
+        ),
+    )
+
+    rotations: dict[str, bool] = {}
+
+    def fake_extract(
+        ffmpeg_path: str,
+        source: Path,
+        destination_pattern: Path,
+        *,
+        rotate_180: bool,
+    ) -> list[Path]:
+        rotations[destination_pattern.parent.name] = rotate_180
+        destination = destination_pattern.parent / "frame-01.jpg"
+        destination.parent.mkdir(parents=True)
+        Image.fromarray(
+            np.full((360, 640, 3), 100, dtype=np.uint8),
+            mode="RGB",
+        ).save(destination)
+        return [destination]
+
+    monkeypatch.setattr("training.workflow.extract_frames", fake_extract)
+
+    build_dataset(
+        database_path,
+        runtime_path,
+        "ffmpeg",
+        "local",
+        runtime_path / "training" / "dataset",
+        detector_model_path=Path("unused.onnx"),
+        detector_device="CPU",
+        detector=FixedDetector((CatDetection(box=(80, 115, 240, 205), confidence=0.80),)),
+        default_detection_config=detection_config(),
+    )
+
+    assert rotations == {"face": True, "side": False}
