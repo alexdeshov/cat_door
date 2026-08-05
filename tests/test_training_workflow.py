@@ -1,6 +1,8 @@
 import json
+import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 import pytest
@@ -16,7 +18,12 @@ from src.common.database import Event, create_session_factory
 from src.common.detection_config import CameraDetectionConfig, DetectionConfig
 from src.inference.cat_detector import CatDetection, CatDetectionResult
 from training.dataset import load_manifest
-from training.workflow import StatusHeartbeat, build_dataset
+from training.workflow import (
+    StatusHeartbeat,
+    build_dataset,
+    extract_frames,
+    thin_frames,
+)
 
 
 class FixedDetector:
@@ -357,3 +364,38 @@ def test_frames_follow_the_camera_rotation_from_the_inventory(
     )
 
     assert rotations == {"face": True, "side": False}
+
+
+def test_frames_are_taken_from_the_whole_recording(tmp_path: Path) -> None:
+    """Кадры берутся по всей записи, а не с её начала.
+
+    Событие начинается с преролла: кот появляется позже и виден лишь малую
+    часть записи. Прежние `-frames:v 3` отдавали набору ровно те секунды, где
+    его гарантированно нет.
+    """
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        pattern = Path(command[-1])
+        for index in range(1, 4):
+            pattern.parent.joinpath(f"frame-{index:04d}.jpg").write_bytes(b"jpeg")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    with mock.patch("training.workflow.subprocess.run", fake_run):
+        frames = extract_frames("ffmpeg", tmp_path / "clip.mp4", tmp_path / "frame-%04d.jpg", rotate_180=False)
+
+    assert "-frames:v" not in calls[0]
+    assert len(frames) == 3
+
+
+def test_long_recordings_are_thinned_evenly() -> None:
+    """Прореживание идёт по всей длине, иначе конец записи пропал бы целиком."""
+    frames = [Path(f"frame-{index:04d}.jpg") for index in range(100)]
+
+    kept = thin_frames(list(frames), 10)
+
+    assert len(kept) == 10
+    assert kept[0] == frames[0]
+    # Последний оставленный кадр приходит из конца записи, а не из первой трети.
+    assert kept[-1] == frames[90]
