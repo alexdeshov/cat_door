@@ -126,15 +126,14 @@ def test_dhcp_does_not_answer_dns() -> None:
     assert _dnsmasq_directives()["port"] == ["0"]
 
 
-def test_cameras_are_given_no_way_out() -> None:
-    """Options 3 and 6 carry no address, which tells dnsmasq to omit them.
+def test_cameras_are_given_a_gateway_but_no_resolver() -> None:
+    """Опция 3 — шлюз, опция 6 — DNS; без значения опция не отправляется вовсе.
 
-    Option 3 is the default gateway and option 6 the resolver. Naming an option
-    without a value suppresses it, so a camera gets an address and no route
-    anywhere — docs/cameras.md requires the camera network to have no internet
-    access.
+    Шлюз выдаётся не для дороги наружу, а потому что аренду без него прошивки
+    отвергают: HiWatch уходит в link-local, Dahua — на запасной адрес. Имена
+    камерам по-прежнему не нужны, и DNS на узле отключён.
     """
-    assert _dnsmasq_directives()["dhcp-option"] == ["3", "6"]
+    assert _dnsmasq_directives()["dhcp-option"] == ["3,192.168.1.10", "6"]
 
 
 def test_dhcp_pool_avoids_the_factory_addresses() -> None:
