@@ -90,7 +90,12 @@ from src.common.online_metrics import build_online_metrics
 from src.common.process import spawn_detached
 from src.common.sd_notify import Notifier
 from src.common.settings import ConfigurationError, Settings, validate_runtime_paths
-from src.common.system_stats import cpu_percent, read_cpu_sample, read_memory_mb
+from src.common.system_stats import (
+    cpu_percent,
+    read_cpu_sample,
+    read_cpu_temperature,
+    read_memory_mb,
+)
 from src.recorder.detection_journal import frame_journal_path
 from src.recorder.ffmpeg import RecorderError, mjpeg_stream, probe_stream, record_clip
 from src.recorder.preview import local_mjpeg_stream, preview_is_fresh, preview_path
@@ -988,6 +993,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "memory_used_mb": memory[0] if memory else None,
             "memory_total_mb": memory[1] if memory else None,
             "load": load,
+            "cpu_temperature_c": read_cpu_temperature(),
         }
 
     @app.get("/api/recorder/status")

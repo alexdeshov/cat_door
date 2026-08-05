@@ -83,3 +83,25 @@ def read_memory_mb(path: Path | None = None) -> tuple[int, int] | None:
     except KeyError:
         return None
     return ((total_kb - available_kb) // 1024, total_kb // 1024)
+
+
+THERMAL_GLOB = "/sys/class/thermal/thermal_zone*/temp"
+
+
+def read_cpu_temperature(pattern: str | None = None) -> int | None:
+    """Температура пакета, °C: максимум по тепловым зонам.
+
+    Максимум, а не «нужная зона»: имена зон гуляют между платами, а перегрев
+    интересует какой угодно. На системах без зон — `None`.
+    """
+    import glob
+
+    values: list[int] = []
+    for path in glob.glob(THERMAL_GLOB if pattern is None else pattern):
+        try:
+            values.append(int(Path(path).read_text(encoding="ascii").strip()))
+        except (OSError, ValueError, UnicodeDecodeError):
+            continue
+    if not values:
+        return None
+    return max(values) // 1000

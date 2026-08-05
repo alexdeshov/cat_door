@@ -156,6 +156,7 @@
         const data = await response.json();
         const parts = [];
         if (data.cpu_percent !== null) parts.push(`CPU ${data.cpu_percent}%`);
+        if (data.cpu_temperature_c !== null) parts.push(`${data.cpu_temperature_c}°C`);
         if (data.memory_total_mb) {
           parts.push(`ОЗУ ${(data.memory_used_mb / 1024).toFixed(1)} из ${(data.memory_total_mb / 1024).toFixed(1)} ГБ`);
         }
@@ -164,6 +165,9 @@
           systemStats.hidden = false;
         }
         if (data.load) systemStats.title = `load average: ${data.load.join(", ")}`;
+        // 85°C — не предел чипа, а порог «посмотрите на охлаждение»: до
+        // троттлинга (100°C) ещё далеко, но постоянно жить выше не стоит.
+        systemStats.classList.toggle("chip-hot", (data.cpu_temperature_c ?? 0) >= 85);
       }
     } catch (error) {
       // Сеть моргнула — покажем при следующем опросе.

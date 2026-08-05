@@ -1,0 +1,17 @@
+[Unit]
+Description=CatDoor — запретить турбо-частоты ради температуры
+Documentation=https://github.com/alexdeshov/cat_door/blob/main/docs/deployment-ubuntu.md
+
+# Узел несёт три контура круглосуточно, и работа для процессора есть всегда —
+# значит без запрета он сидит на турбо безвылазно. Замер 2026-08-05: на
+# 3.6 ГГц пакет держал 85–92°C при пределе 100°C, счётчики троттлинга росли.
+# На базовых 3.0 ГГц — 72–77°C, и все конвейеры держат свои частоты кадров:
+# последние 20% частоты стоили ~40% мощности и не были нужны никому.
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'echo 1 > /sys/devices/system/cpu/intel_pstate/no_turbo'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
