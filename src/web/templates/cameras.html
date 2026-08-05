@@ -153,6 +153,13 @@
             <input data-field="detect_stream_path" type="text"
               value="{{ camera.detect_stream_path }}" placeholder="/Streaming/Channels/102">
           </label>
+          <label>
+            <span class="label-with-hint">Поток для превью
+              {{ hint("поток превью", "Путь потока, по которому админка показывает живую картинку. Картинка сжимается до 960 точек, поэтому здесь годится самый мелкий поток камеры — процессор экономится в разы. Пусто — берётся субпоток детекции, а если и его нет, основной поток.") }}
+            </span>
+            <input data-field="preview_stream_path" type="text"
+              value="{{ camera.preview_stream_path }}" placeholder="самый мелкий поток камеры">
+          </label>
           <label>Логин
             <input data-field="username" type="text" value="{{ camera.username }}" autocomplete="off">
           </label>
@@ -264,6 +271,9 @@
       </label>
       <label>Субпоток для детекции
         <input data-field="detect_stream_path" type="text" placeholder="/Streaming/Channels/102">
+      </label>
+      <label>Поток для превью
+        <input data-field="preview_stream_path" type="text" placeholder="самый мелкий поток камеры">
       </label>
       <label>Логин
         <input data-field="username" type="text" autocomplete="off">

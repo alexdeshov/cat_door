@@ -306,3 +306,36 @@ def test_preview_falls_back_to_the_main_stream() -> None:
     camera = CameraRecord(id="cam", host="192.0.2.10", stream_path="/stream1")
 
     assert camera.preview_rtsp_url() == camera.rtsp_url()
+
+
+def test_preview_prefers_its_own_path_over_the_detect_stream() -> None:
+    """Превью и детекция — разные задачи, и поток у каждой свой.
+
+    Детекции нужно разрешение, достаточное чтобы узнать лицо; превью
+    показывается шириной 960 точек, и всё сверх этого — впустую потраченный
+    процессор.
+    """
+    camera = CameraRecord(
+        id="gate-1",
+        host="192.0.2.10",
+        stream_path="/media/video1",
+        detect_stream_path="/media/video2",
+        preview_stream_path="/media/video3",
+    )
+
+    assert camera.preview_rtsp_url().endswith("/media/video3")
+    assert camera.rtsp_url().endswith("/media/video1")
+
+
+def test_preview_falls_back_to_the_detect_stream() -> None:
+    """Без собственного пути превью берёт поток детекции, потом основной."""
+    with_detect = CameraRecord(
+        id="cam",
+        host="192.0.2.10",
+        stream_path="/main",
+        detect_stream_path="/sub",
+    )
+    bare = CameraRecord(id="cam", host="192.0.2.10", stream_path="/main")
+
+    assert with_detect.preview_rtsp_url().endswith("/sub")
+    assert bare.preview_rtsp_url().endswith("/main")
