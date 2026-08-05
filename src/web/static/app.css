@@ -751,3 +751,9 @@ progress { width: 100%; height: 6px; }
     transition-duration: 0.001ms !important;
   }
 }
+
+/* Превью выключены по умолчанию: без src картинка мертва, прячем её и
+   показываем заглушку. Классом на body управляет кнопка в шапке. */
+body:not(.previews-on) img[data-live-stream] { display: none; }
+.preview-off-note { display: none; }
+body:not(.previews-on) .preview-off-note { display: flex; }

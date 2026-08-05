@@ -48,6 +48,7 @@
       <span class="chip" title="Система не отправляет команды двери и калитке">
         Механика не управляется
       </span>
+      <button id="preview-toggle" type="button" hidden aria-pressed="false">Показать превью</button>
       <button id="theme-toggle" type="button" aria-label="Переключить тему">Тема</button>
     </div>
   </div>
@@ -90,9 +91,13 @@
   const liveStreamAttempts = new WeakMap();
 
   function reopenLiveStream(image) {
+    // Выключенное превью не переоткрывается: у него нет src, и открывать
+    // соединение за спиной у кнопки значило бы тратить ffmpeg впустую.
+    const raw = image.getAttribute("src") || image.dataset.streamSrc;
+    if (!raw || !document.body.classList.contains("previews-on")) return;
     const attempt = (liveStreamAttempts.get(image)?.attempt || 0) + 1;
     liveStreamAttempts.set(image, {attempt});
-    const source = new URL(image.getAttribute("src"), location.href);
+    const source = new URL(raw, location.href);
     source.searchParams.set("r", String(attempt));
     image.src = source.pathname + source.search;
   }
@@ -114,6 +119,44 @@
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "visible") liveStreams().forEach(reopenLiveStream);
   });
+
+  // Превью по умолчанию выключены и включаются кнопкой в шапке. Причина не
+  // косметическая: каждая живая картинка — это отдельный ffmpeg на сервере,
+  // 10–35% ядра, и открытая «на всякий случай» админка съедала заметную долю
+  // узла. Картинка без src соединение не открывает, а снятие src обрывает
+  // multipart-ответ — сервер убивает свой ffmpeg сам.
+  const previewToggle = document.querySelector("#preview-toggle");
+  let previewsOn = false;
+
+  function applyPreviewState() {
+    document.body.classList.toggle("previews-on", previewsOn);
+    liveStreams().forEach(image => {
+      if (previewsOn) {
+        const source = image.dataset.streamSrc;
+        if (source && image.getAttribute("src") !== source) image.src = source;
+      } else if (image.getAttribute("src")) {
+        image.removeAttribute("src");
+        liveStreamAttempts.delete(image);
+      }
+    });
+    previewToggle.textContent = previewsOn ? "Скрыть превью" : "Показать превью";
+    previewToggle.setAttribute("aria-pressed", String(previewsOn));
+  }
+
+  if (liveStreams().length) {
+    previewToggle.hidden = false;
+    liveStreams().forEach(image => {
+      const note = document.createElement("div");
+      note.className = "viewport viewport-empty preview-off-note";
+      note.textContent = "Превью выключено — кнопка «Показать превью» в шапке";
+      image.before(note);
+    });
+    previewToggle.addEventListener("click", () => {
+      previewsOn = !previewsOn;
+      applyPreviewState();
+    });
+    applyPreviewState();
+  }
 </script>
 {% block scripts %}{% endblock %}
 </body>

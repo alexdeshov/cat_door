@@ -38,7 +38,13 @@
 <section class="panel">
   <div class="panel-head">
     <h2>Камеры участка</h2>
-    <a class="button" href="/cameras" style="margin-left: auto">Настроить камеры</a>
+    {% if circuits.gate_ui_url %}
+      <a class="button" href="{{ circuits.gate_ui_url }}" target="_blank" rel="noreferrer"
+        style="margin-left: auto">Открыть Frigate</a>
+      <a class="button" href="/cameras">Настроить камеры</a>
+    {% else %}
+      <a class="button" href="/cameras" style="margin-left: auto">Настроить камеры</a>
+    {% endif %}
   </div>
   <div class="panel-body">
     {% if nvr_cameras %}
@@ -49,7 +55,7 @@
               {% if camera.configured and camera.enabled %}
                 <img class="viewport" data-live-stream
                   alt="Живое изображение камеры {{ camera.display_title }}"
-                  src="/stream/camera/{{ camera.id }}.mjpeg?v={{ stream_version }}">
+                  data-stream-src="/stream/camera/{{ camera.id }}.mjpeg?v={{ stream_version }}">
               {% else %}
                 <div class="viewport viewport-empty">
                   {{ "Адрес не задан" if not camera.configured else "Камера выключена" }}

@@ -87,7 +87,7 @@
       <div class="viewport-frame">
         {% if face_configured %}
           <img id="primary-camera-stream" class="viewport" data-live-stream
-            src="/stream/face.mjpeg?v={{ stream_version }}" alt="Живое изображение основной камеры">
+            data-stream-src="/stream/face.mjpeg?v={{ stream_version }}" alt="Живое изображение основной камеры">
         {% else %}
           <div class="viewport viewport-empty">Основной камере не назначен адрес</div>
         {% endif %}
@@ -101,7 +101,7 @@
       <div class="viewport-frame">
         {% if side_configured %}
           <img id="secondary-camera-stream" class="viewport" data-live-stream
-            src="/stream/side.mjpeg?v={{ stream_version }}" alt="Живое изображение дополнительной камеры">
+            data-stream-src="/stream/side.mjpeg?v={{ stream_version }}" alt="Живое изображение дополнительной камеры">
         {% else %}
           <div class="viewport viewport-empty">Дополнительной камере не назначен адрес</div>
         {% endif %}
@@ -386,7 +386,11 @@
   }
 
   function setCameraSource(camera, source) {
-    if (camera.getAttribute("src") !== source) {
+    // Адрес живёт в data-атрибуте: превью по умолчанию выключены, и картинка
+    // без src не открывает соединение — сервер не поднимает свой ffmpeg.
+    camera.dataset.streamSrc = source;
+    const visible = document.body.classList.contains("previews-on");
+    if (visible && camera.getAttribute("src") !== source) {
       camera.src = source;
     }
   }
