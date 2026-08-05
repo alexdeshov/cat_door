@@ -114,7 +114,56 @@ def _camera_block(camera: CameraRecord, continuous_days: int) -> str:
     return "\n".join(lines)
 
 
-def build_config(registry: CameraRegistry, circuits: NodeCircuits) -> str:
+# Разделы верхнего уровня, которые собираются из инвентаря. Всё остальное в
+# `config.yml` поставлено человеком или самим Frigate, и наше дело — не потерять.
+MANAGED_SECTIONS = ("mqtt", "detectors", "model", "record", "snapshots", "cameras")
+
+
+def foreign_sections(config_text: str) -> str:
+    """Разделы чужой настройки из существующего `config.yml`.
+
+    Распознавание лиц, номера, классификаторы Frigate включаются в его же
+    интерфейсе и попадают в тот же файл, который собираем мы. Раньше первая же
+    правка камеры в админке стирала их молча: конфигурация пересобиралась с
+    нуля, и человек узнавал о потере, когда переставали приходить имена.
+
+    Разбор построчный, без YAML-библиотеки: нужно ровно одно — куски текста
+    между ключами нулевого отступа. Разбирать значения незачем, а лишняя
+    зависимость в примирителе, который работает от root, стоит дороже.
+    """
+    kept: list[str] = []
+    block: list[str] = []
+    # Комментарий нулевого отступа принадлежит следующему за ним ключу: человек
+    # писал его про свой раздел, и оторванный от раздела он становится загадкой.
+    pending: list[str] = []
+    keeping = False
+    for line in config_text.splitlines():
+        if line[:1] == "#":
+            pending.append(line)
+            continue
+        if line[:1] not in ("", " ") and ":" in line:
+            if keeping:
+                kept.extend(block)
+            key = line.split(":", 1)[0].strip()
+            keeping = key not in MANAGED_SECTIONS
+            block = [*pending, line] if keeping else []
+            pending = []
+            continue
+        if keeping:
+            block.extend(pending)
+            block.append(line)
+        pending = []
+    if keeping:
+        kept.extend(block)
+    text = "\n".join(kept).strip("\n")
+    return f"{text}\n" if text else ""
+
+
+def build_config(
+    registry: CameraRegistry,
+    circuits: NodeCircuits,
+    preserved: str = "",
+) -> str:
     """Текст `config.yml`. Без камер — валидный конфиг без единой камеры."""
     cameras = frigate_cameras(registry, circuits)
     continuous_days = 1 if circuits.gate_recording == "continuous" else 0
@@ -159,15 +208,16 @@ def build_config(registry: CameraRegistry, circuits: NodeCircuits) -> str:
         "    default: 14",
         "",
     ]
+    tail = [preserved] if preserved else []
     if not cameras:
         header += [
             "# Ни одна камера не назначена действующему контуру Frigate.",
             "cameras: {}",
             "",
         ]
-        return "\n".join(header)
+        return "\n".join([*header, *tail])
     blocks = [_camera_block(camera, continuous_days) for camera in cameras]
-    return "\n".join([*header, "cameras:", *blocks, ""])
+    return "\n".join([*header, "cameras:", *blocks, "", *tail])
 
 
 def build_env(cameras: Iterable[CameraRecord], timezone: str = "Europe/Moscow") -> str:
