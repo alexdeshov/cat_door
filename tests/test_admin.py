@@ -1876,3 +1876,25 @@ def test_nvr_tab_links_to_frigate(runtime_path: Path, monkeypatch) -> None:
     assert page.status_code == 200
     assert "Открыть Frigate" in page.text
     assert "http://node.example:5000" in page.text
+
+
+def test_system_stats_endpoint_and_header_widget(runtime_path: Path, monkeypatch) -> None:
+    """Шапка показывает загрузку узла, а эндпоинт не выдумывает чисел.
+
+    Первый вызов после старта отдаёт null вместо процента: мгновенного CPU у
+    ядра нет, есть только разность двух замеров.
+    """
+    client = make_client(runtime_path, monkeypatch)
+
+    from src.common.system_stats import CpuSample
+
+    samples = iter([CpuSample(busy=250, total=1400)])
+    monkeypatch.setattr("src.web.app.read_cpu_sample", lambda: next(samples, None))
+    monkeypatch.setattr("src.web.app.read_memory_mb", lambda: (2100, 7808))
+
+    payload = client.get("/api/system/stats").json()
+    assert payload["memory_used_mb"] == 2100
+    assert payload["memory_total_mb"] == 7808
+
+    page = client.get("/")
+    assert 'id="system-stats"' in page.text

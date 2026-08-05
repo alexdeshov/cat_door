@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -89,6 +90,7 @@ from src.common.online_metrics import build_online_metrics
 from src.common.process import spawn_detached
 from src.common.sd_notify import Notifier
 from src.common.settings import ConfigurationError, Settings, validate_runtime_paths
+from src.common.system_stats import cpu_percent, read_cpu_sample, read_memory_mb
 from src.recorder.detection_journal import frame_journal_path
 from src.recorder.ffmpeg import RecorderError, mjpeg_stream, probe_stream, record_clip
 from src.recorder.preview import local_mjpeg_stream, preview_is_fresh, preview_path
@@ -473,6 +475,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Признак остановки службы. Событие, а не флаг: живое превью крутится в
     # потоке пула, и ему нужно узнать об остановке, не опрашивая ничего.
     app.state.shutting_down = ThreadEvent()
+    # Предыдущий замер тактов CPU: процент — всегда разность двух чтений,
+    # и первый ответ после старта честно отдаёт null вместо числа с потолка.
+    app.state.cpu_sample = read_cpu_sample()
     templates.env.globals["asset_version"] = asset_version
     templates.env.globals["circuit_titles"] = CIRCUIT_TITLES
 
@@ -960,6 +965,30 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # Здесь роль имеет приоритет намеренно: страница проходов показывает
         # «камеру идентификации», кто бы ею сейчас ни был.
         return camera_stream(lambda registry: registry.resolve(view))
+
+    @app.get("/api/system/stats")
+    def system_stats() -> dict[str, object]:
+        """Загрузка узла для шапки: без psutil, прямо из /proc.
+
+        Процент CPU — разность с прошлым вызовом этого же эндпоинта: браузер
+        опрашивает раз в несколько секунд, и интервал опроса и есть окно
+        усреднения. На системах без /proc все поля — null, шапка молчит.
+        """
+        current = read_cpu_sample()
+        percent = cpu_percent(app.state.cpu_sample, current)
+        if current is not None:
+            app.state.cpu_sample = current
+        memory = read_memory_mb()
+        try:
+            load = [round(value, 2) for value in os.getloadavg()]
+        except OSError:
+            load = None
+        return {
+            "cpu_percent": percent,
+            "memory_used_mb": memory[0] if memory else None,
+            "memory_total_mb": memory[1] if memory else None,
+            "load": load,
+        }
 
     @app.get("/api/recorder/status")
     def recorder_status() -> dict[str, object]:

@@ -48,6 +48,7 @@
       <span class="chip" title="Система не отправляет команды двери и калитке">
         Механика не управляется
       </span>
+      <span id="system-stats" class="chip" hidden></span>
       <button id="preview-toggle" type="button" hidden aria-pressed="false">Показать превью</button>
       <button id="theme-toggle" type="button" aria-label="Переключить тему">Тема</button>
     </div>
@@ -142,6 +143,34 @@
     previewToggle.textContent = previewsOn ? "Скрыть превью" : "Показать превью";
     previewToggle.setAttribute("aria-pressed", String(previewsOn));
   }
+
+  // Загрузка узла в шапке. Опрос раз в 5 секунд; интервал опроса и есть окно
+  // усреднения процента CPU. Узел не ответил — числа просто замирают до
+  // следующего удачного опроса, мигать «ошибкой» тут не о чем.
+  const systemStats = document.querySelector("#system-stats");
+
+  async function refreshSystemStats() {
+    try {
+      const response = await fetch("/api/system/stats");
+      if (response.ok) {
+        const data = await response.json();
+        const parts = [];
+        if (data.cpu_percent !== null) parts.push(`CPU ${data.cpu_percent}%`);
+        if (data.memory_total_mb) {
+          parts.push(`ОЗУ ${(data.memory_used_mb / 1024).toFixed(1)} из ${(data.memory_total_mb / 1024).toFixed(1)} ГБ`);
+        }
+        if (parts.length) {
+          systemStats.textContent = parts.join(" · ");
+          systemStats.hidden = false;
+        }
+        if (data.load) systemStats.title = `load average: ${data.load.join(", ")}`;
+      }
+    } catch (error) {
+      // Сеть моргнула — покажем при следующем опросе.
+    }
+    setTimeout(refreshSystemStats, 5000);
+  }
+  refreshSystemStats();
 
   if (liveStreams().length) {
     previewToggle.hidden = false;
