@@ -25,7 +25,12 @@ CONTAINER_SETTLE_SECONDS = 6.0
 from src.common.camera_registry import camera_registry_path, load_registry
 from src.common.circuits import circuits_path, load_circuits
 from src.common.durable_write import write_text_durably
-from src.common.frigate_config import build_config, build_env, frigate_cameras
+from src.common.frigate_config import (
+    build_config,
+    build_env,
+    foreign_sections,
+    frigate_cameras,
+)
 from src.common.gate_service import gate_status, set_gate_running
 from src.common.settings import Settings
 
@@ -56,6 +61,14 @@ def _unchanged(path: Path, text: str) -> bool:
         return False
 
 
+def _foreign_config(settings: Settings) -> str:
+    """Чужие разделы из живого файла. Нечитаемый файл — просто нечего переносить."""
+    try:
+        return foreign_sections(settings.gate_config_path.read_text(encoding="utf-8"))
+    except OSError:
+        return ""
+
+
 def apply_frigate_config(settings: Settings) -> bool:
     """Собрать конфигурацию Frigate из инвентаря. Вернуть, изменилась ли она.
 
@@ -73,7 +86,11 @@ def apply_frigate_config(settings: Settings) -> bool:
     if registry is None:
         return False
     circuits = load_circuits(circuits_path(settings.data_dir))
-    config = build_config(registry, circuits)
+    # Распознавание лиц, номера и классификаторы включаются в интерфейсе самого
+    # Frigate и живут в том же файле. Пересобирая его из инвентаря, эти разделы
+    # переносим как есть: иначе правка камеры в админке молча стирала бы чужую
+    # настройку, а узнавалось бы это через неделю без имён в событиях.
+    config = build_config(registry, circuits, preserved=_foreign_config(settings))
     env = build_env(frigate_cameras(registry, circuits))
     if _unchanged(settings.gate_applied_config_path, config) and _unchanged(
         settings.gate_env_path, env

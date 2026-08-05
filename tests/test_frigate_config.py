@@ -7,6 +7,7 @@ from src.common.circuits import NodeCircuits
 from src.common.frigate_config import (
     build_config,
     build_env,
+    foreign_sections,
     frigate_camera_name,
     frigate_cameras,
 )
@@ -135,3 +136,60 @@ def test_continuous_recording_follows_the_node_setting() -> None:
     parsed = yaml.safe_load(build_config(inventory, circuits))
 
     assert parsed["record"]["continuous"]["days"] == 1
+
+
+def test_foreign_sections_survive_a_rebuild() -> None:
+    """Настройки, включённые в самом Frigate, переживают пересборку из инвентаря.
+
+    Распознавание лиц и номера включаются в интерфейсе Frigate и попадают в тот
+    же файл, который собираем мы. Пересборка «с нуля» стирала их молча, а
+    замечалось это через неделю по отсутствию имён в событиях.
+    """
+    existing = """mqtt:
+  enabled: false
+cameras:
+  old_camera:
+    detect:
+      fps: 5
+# Лица включены вручную в интерфейсе Frigate.
+face_recognition:
+  enabled: true
+  model_size: small
+lpr:
+  enabled: false
+version: 0.17-0
+"""
+
+    preserved = foreign_sections(existing)
+
+    assert "face_recognition:" in preserved
+    assert "  model_size: small" in preserved
+    assert "lpr:" in preserved
+    assert "version: 0.17-0" in preserved
+    # Комментарий человека едет вместе со своим разделом.
+    assert "# Лица включены вручную" in preserved
+    # Наши разделы не дублируются: их соберут заново.
+    assert "mqtt:" not in preserved
+    assert "old_camera" not in preserved
+
+
+def test_rebuilt_config_keeps_foreign_sections_and_new_cameras() -> None:
+    """Пересобранная конфигурация содержит и свежие камеры, и чужие разделы."""
+    registry = CameraRegistry(
+        cameras=[
+            CameraRecord(
+                id="gate-1",
+                host="192.0.2.5",
+                stream_path="/live",
+                circuit="gate",
+            )
+        ]
+    )
+    preserved = foreign_sections("face_recognition:\n  enabled: true\n")
+
+    config = build_config(registry, NodeCircuits(cats=False, gate=True), preserved=preserved)
+
+    assert "gate_1:" in config
+    assert config.rstrip().endswith("enabled: true")
+    # Раздел остаётся единственным: собранная часть его не дублирует.
+    assert config.count("face_recognition:") == 1
