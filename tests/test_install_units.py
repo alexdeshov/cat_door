@@ -126,14 +126,38 @@ def test_dhcp_does_not_answer_dns() -> None:
     assert _dnsmasq_directives()["port"] == ["0"]
 
 
-def test_cameras_are_given_a_gateway_but_no_resolver() -> None:
-    """Опция 3 — шлюз, опция 6 — DNS; без значения опция не отправляется вовсе.
+def test_cameras_are_given_a_gateway_and_a_clock_but_no_resolver() -> None:
+    """Опция 3 — шлюз, 42 — сервер времени, 6 — DNS без значения, то есть молчок.
 
     Шлюз выдаётся не для дороги наружу, а потому что аренду без него прошивки
-    отвергают: HiWatch уходит в link-local, Dahua — на запасной адрес. Имена
-    камерам по-прежнему не нужны, и DNS на узле отключён.
+    отвергают: HiWatch уходит в link-local, Dahua — на запасной адрес. Время
+    камерам взять больше неоткуда — заводской NTP смотрит в интернет, которого
+    у них нет. Имена по-прежнему не нужны, и DNS на узле отключён.
     """
-    assert _dnsmasq_directives()["dhcp-option"] == ["3,192.168.1.10", "6"]
+    assert _dnsmasq_directives()["dhcp-option"] == [
+        "3,192.168.1.10",
+        "6",
+        "42,192.168.1.10",
+    ]
+
+
+def test_time_is_served_only_to_the_camera_segment() -> None:
+    """Узел раздаёт время камерам и никому больше.
+
+    `allow` без адреса открыл бы NTP всей домашней сети, а `local stratum`
+    нужен, чтобы камеры получали время и в час, когда сам узел не дотянулся до
+    upstream: сеть камер изолирована, и ждать интернета там некому.
+    """
+    chrony = (INSTALL_DIR / "chrony-catdoor-cameras.conf").read_text(encoding="utf-8")
+    directives = [
+        line.strip()
+        for line in chrony.splitlines()
+        if line.strip() and not line.startswith("#")
+    ]
+
+    assert "allow 192.168.1.0/24" in directives
+    assert not any(line == "allow" or line.startswith("allow all") for line in directives)
+    assert any(line.startswith("local stratum") for line in directives)
 
 
 def test_dhcp_pool_avoids_the_factory_addresses() -> None:
