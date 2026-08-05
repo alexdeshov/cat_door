@@ -62,6 +62,13 @@ class CatDetector(Protocol):
     def detect(self, rgb_frame: np.ndarray) -> CatDetectionResult: ...
 
 
+# Потолок кадров с одной записи. Событие длиной в пять минут иначе одно
+# перевесило бы десяток обычных проходов, а соседние секунды всё равно почти
+# одинаковы. Лишнее прореживается равномерно по всей записи, а не отрезается с
+# конца.
+MAX_FRAMES_PER_VIEW = 60
+
+
 def extract_frames(
     ffmpeg_path: str,
     source: Path,
@@ -69,6 +76,14 @@ def extract_frames(
     *,
     rotate_180: bool,
 ) -> list[Path]:
+    """Кадры записи, раз в секунду, по всей её длине.
+
+    Раньше здесь стояло `-frames:v 3`, то есть в набор шли первые три секунды
+    каждого прохода. Это худшие три секунды из возможных: событие начинается с
+    преролла, кот появляется в кадре позже и виден в среднем десятую часть
+    записи. Из 61 размеченного прохода набор получал 354 кадра, и кот был лишь
+    на единицах из них.
+    """
     destination_pattern.parent.mkdir(parents=True, exist_ok=True)
     filters = "fps=1"
     if rotate_180:
@@ -82,8 +97,6 @@ def extract_frames(
         str(source),
         "-vf",
         filters,
-        "-frames:v",
-        "3",
         "-q:v",
         "3",
         "-y",
@@ -95,13 +108,29 @@ def extract_frames(
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
         text=True,
-        timeout=60,
+        # Пять минут записи в 4 Мп декодируются заметно дольше трёх кадров.
+        timeout=600,
         check=False,
     )
-    frames = sorted(destination_pattern.parent.glob(destination_pattern.name.replace("%02d", "*")))
+    pattern = destination_pattern.name
+    for placeholder in ("%02d", "%03d", "%04d"):
+        pattern = pattern.replace(placeholder, "*")
+    frames = sorted(destination_pattern.parent.glob(pattern))
     if result.returncode != 0 or not frames:
         raise RuntimeError(f"ffmpeg could not extract frames from {source.name}")
-    return frames
+    return thin_frames(frames, MAX_FRAMES_PER_VIEW)
+
+
+def thin_frames(frames: list[Path], limit: int) -> list[Path]:
+    """Оставить не больше `limit` кадров, равномерно по всей записи."""
+    if len(frames) <= limit:
+        return frames
+    step = len(frames) / limit
+    keep = {frames[int(index * step)] for index in range(limit)}
+    for frame in frames:
+        if frame not in keep:
+            frame.unlink(missing_ok=True)
+    return [frame for frame in frames if frame in keep]
 
 
 def crop_extracted_frames(
@@ -218,7 +247,9 @@ def build_dataset(
             frames = extract_frames(
                 ffmpeg_path,
                 source,
-                event_dir / "frame-%02d.jpg",
+                # Четыре разряда, чтобы сортировка по имени оставалась
+                # хронологической и после сотого кадра.
+                event_dir / "frame-%04d.jpg",
                 rotate_180=view_rotation(registry, view),
             )
             camera_config = getattr(runtime_config, view)
