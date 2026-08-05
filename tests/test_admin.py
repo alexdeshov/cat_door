@@ -91,7 +91,7 @@ def test_capture_and_label_known_cat(runtime_path: Path, monkeypatch) -> None:
     assert 'id="swap-cameras"' in page.text
     assert 'localStorage.setItem(cameraLayoutKey, swapped ? "swapped" : "default")' in page.text
     assert page.text.count('class="rotate-camera"') == 1
-    assert 'if (camera.getAttribute("src") !== source)' in page.text
+    assert 'camera.dataset.streamSrc = source;' in page.text
     assert "function streamUrl(role)" in page.text
     # Ответ живого превью всё-таки может кончиться — на перезапуске службы или
     # исчерпанном ожидании камеры. Замерший `<img>` об этом молчит, поэтому
@@ -1840,3 +1840,39 @@ def test_gate_tab_shows_its_cameras(runtime_path: Path, monkeypatch) -> None:
     assert page.status_code == 200
     assert "/stream/camera/gate-1.mjpeg" in page.text
     assert "На калитке" in page.text
+
+
+def test_previews_start_hidden_until_the_header_button(runtime_path: Path, monkeypatch) -> None:
+    """Страница не открывает ни одного живого потока сама.
+
+    Каждая живая картинка — отдельный ffmpeg на сервере, 10–35% ядра. Адрес
+    потока лежит в data-атрибуте: картинка без src соединение не открывает,
+    и открытая «на всякий случай» админка ничего не стоит узлу.
+    """
+    client = make_client(runtime_path, monkeypatch, side=True)
+
+    for page in ("/", "/cameras"):
+        html = client.get(page).text
+        assert ' src="/stream/' not in html, page
+        assert 'data-stream-src="/stream/' in html, page
+        assert 'id="preview-toggle"' in html, page
+
+
+def test_nvr_tab_links_to_frigate(runtime_path: Path, monkeypatch) -> None:
+    """У регистратора та же дорога во Frigate, что и у калитки.
+
+    События и архив живут в интерфейсе Frigate; вкладка без ссылки заставляла
+    вспоминать адрес руками.
+    """
+    monkeypatch.setenv("CATDOOR_GATE_UI_URL", "http://node.example:5000")
+    client = make_client(runtime_path, monkeypatch)
+    monkeypatch.setattr(
+        "src.web.app.gate_status",
+        lambda unit: GateStatus("running", ""),
+    )
+
+    page = client.get("/nvr")
+
+    assert page.status_code == 200
+    assert "Открыть Frigate" in page.text
+    assert "http://node.example:5000" in page.text
