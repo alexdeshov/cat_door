@@ -45,3 +45,15 @@ def test_missing_proc_degrades_to_none(tmp_path: Path) -> None:
     assert read_cpu_sample(tmp_path / "absent") is None
     assert read_memory_mb(tmp_path / "absent") is None
     assert read_cpu_sample(tmp_path / "absent") is None
+
+
+def test_cpu_temperature_takes_the_hottest_zone(tmp_path: Path) -> None:
+    (tmp_path / "thermal_zone0").mkdir()
+    (tmp_path / "thermal_zone1").mkdir()
+    (tmp_path / "thermal_zone0" / "temp").write_text("27000\n")
+    (tmp_path / "thermal_zone1" / "temp").write_text("76500\n")
+
+    from src.common.system_stats import read_cpu_temperature
+
+    assert read_cpu_temperature(str(tmp_path / "thermal_zone*" / "temp")) == 76
+    assert read_cpu_temperature(str(tmp_path / "absent*" / "temp")) is None

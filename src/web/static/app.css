@@ -757,3 +757,6 @@ progress { width: 100%; height: 6px; }
 body:not(.previews-on) img[data-live-stream] { display: none; }
 .preview-off-note { display: none; }
 body:not(.previews-on) .preview-off-note { display: flex; }
+
+/* Перегрев в шапке: порог 85°C задаёт скрипт. */
+.chip-hot { color: #f87171; border-color: #f87171; }
