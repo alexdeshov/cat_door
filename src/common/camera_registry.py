@@ -173,8 +173,8 @@ class CameraRecord(BaseModel):
         """Есть ли у камеры адрес, по которому вообще можно постучаться."""
         return bool(self.host) and self.enabled
 
-    def rtsp_url(self) -> str:
-        """Собрать RTSP-адрес. Пустая строка — камера не настроена.
+    def _rtsp_url_for(self, path: str) -> str:
+        """Собрать RTSP-адрес с заданным путём потока.
 
         Логин и пароль экранируются: в паролях камер регулярно встречаются
         `@`, `/` и `:`, которые иначе разрежут URL не в том месте.
@@ -187,7 +187,26 @@ class CameraRecord(BaseModel):
             if self.password:
                 credentials = f"{credentials}:{quote(self.password, safe='')}"
             credentials = f"{credentials}@"
-        return f"rtsp://{credentials}{self.host}:{self.port}{self.stream_path}"
+        return f"rtsp://{credentials}{self.host}:{self.port}{path}"
+
+    def rtsp_url(self) -> str:
+        """Основной поток. Пустая строка — камера не настроена."""
+        return self._rtsp_url_for(self.stream_path)
+
+    def preview_rtsp_url(self) -> str:
+        """Адрес для живой картинки: субпоток, если он задан.
+
+        Превью показывается в браузере шириной 960 точек, и декодировать ради
+        него основной поток — самая дорогая ошибка из дешёвых. Замер 5 августа:
+        одна открытая карточка камеры 2560×1440 стоила 47% ядра, тот же кадр из
+        субпотока 640×360 — около 4%. Разница уходила в никуда: картинка всё
+        равно масштабируется вниз.
+
+        Субпоток задан не у всех камер, поэтому основной остаётся запасным
+        вариантом — пустое поле означает «другого потока нет», а не «показывать
+        нечего».
+        """
+        return self._rtsp_url_for(self.detect_stream_path or self.stream_path)
 
     def stream_signature(self) -> tuple[str, bool]:
         """То, из-за чего поток приходится пересоздавать."""

@@ -915,7 +915,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return until(
                 mjpeg_stream(
                     settings.ffmpeg_path,
-                    camera.rtsp_url(),
+                    # Субпоток, если он есть: превью шириной 960 точек не стоит
+                    # декодирования основного потока. Замер 5 августа — 47%
+                    # ядра на карточку камеры 2560×1440 против ~4% с субпотока.
+                    camera.preview_rtsp_url(),
                     settings.preview_fps,
                     rotate_180=camera.rotate_180,
                     idle_timeout_seconds=settings.preview_idle_timeout_seconds,
@@ -1005,12 +1008,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/gate", response_class=HTMLResponse)
     def gate_page(request: Request) -> HTMLResponse:
         circuits = current_circuits()
+        registry = current_registry()
         return templates.TemplateResponse(
             request,
             "gate.html",
             {
                 "circuits": circuits_view(circuits),
                 "circuit_titles": CIRCUIT_TITLES,
+                "gate_cameras": [
+                    _camera_view(camera)
+                    for camera in registry.cameras
+                    if camera.circuit == "gate"
+                ],
+                "stream_version": uuid4().hex,
             },
         )
 
