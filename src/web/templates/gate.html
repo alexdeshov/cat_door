@@ -37,6 +37,51 @@
 
 <section class="panel">
   <div class="panel-head">
+    <h2>Камеры калитки</h2>
+    <a class="button" href="/cameras" style="margin-left: auto">Настроить камеры</a>
+  </div>
+  <div class="panel-body">
+    {% if gate_cameras %}
+      <div class="passes">
+        {% for camera in gate_cameras %}
+          <article class="pass" data-camera-id="{{ camera.id }}">
+            <div class="pass-media">
+              {% if camera.configured and camera.enabled %}
+                <img class="viewport" data-live-stream
+                  alt="Живое изображение камеры {{ camera.display_title }}"
+                  src="/stream/camera/{{ camera.id }}.mjpeg?v={{ stream_version }}">
+              {% else %}
+                <div class="viewport viewport-empty">
+                  {{ "Адрес не задан" if not camera.configured else "Камера выключена" }}
+                </div>
+              {% endif %}
+            </div>
+            <div class="pass-body">
+              <div class="pass-head">
+                <strong>{{ camera.display_title }}</strong>
+                <span class="faint data">{{ camera.id }}</span>
+                {% if not camera.detect_stream_path %}
+                  <span class="signal">без субпотока</span>
+                {% endif %}
+              </div>
+              <p class="muted" style="font-size: 13px">
+                {{ camera.note or "Пишется клипами вокруг детекций: люди и машины." }}
+              </p>
+            </div>
+          </article>
+        {% endfor %}
+      </div>
+    {% else %}
+      <p class="muted">
+        В контуре калитки нет ни одной камеры. Камеры заводятся и переводятся
+        между контурами на <a href="/cameras">вкладке «Камеры»</a>.
+      </p>
+    {% endif %}
+  </div>
+</section>
+
+<section class="panel">
+  <div class="panel-head">
     <h2>Распознавание людей</h2>
     {% if circuits.gate_ui_url %}
       <a class="button" href="{{ circuits.gate_ui_url }}" target="_blank" rel="noreferrer"

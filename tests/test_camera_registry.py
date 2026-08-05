@@ -279,3 +279,30 @@ def test_a_readable_inventory_is_never_replaced_by_defaults(runtime_path) -> Non
 
     assert [camera.id for camera in registry.cameras] == ["yard"]
     assert not list(path.parent.glob("cameras.json.invalid-*"))
+
+
+def test_preview_prefers_the_detect_substream() -> None:
+    """Живая картинка идёт по субпотоку, если он задан.
+
+    Превью показывается шириной 960 точек, и декодировать ради него основной
+    поток — самая дорогая ошибка из дешёвых: замер 5 августа дал 47% ядра на
+    одну открытую карточку камеры 2560×1440.
+    """
+    camera = CameraRecord(
+        id="nvr-2",
+        host="192.0.2.10",
+        stream_path="/Streaming/Channels/101",
+        detect_stream_path="/Streaming/Channels/102",
+        username="admin",
+        password="secret",
+    )
+
+    assert camera.preview_rtsp_url().endswith("/Streaming/Channels/102")
+    assert camera.rtsp_url().endswith("/Streaming/Channels/101")
+
+
+def test_preview_falls_back_to_the_main_stream() -> None:
+    """Без субпотока показывать нечего, кроме основного потока."""
+    camera = CameraRecord(id="cam", host="192.0.2.10", stream_path="/stream1")
+
+    assert camera.preview_rtsp_url() == camera.rtsp_url()

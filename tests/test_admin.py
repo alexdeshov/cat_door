@@ -1813,3 +1813,30 @@ def test_no_circuit_is_left_without_a_group(runtime_path: Path, monkeypatch) -> 
 
     for title in (*CIRCUIT_TITLES.values(), "Без контура"):
         assert f"<h2>{title}</h2>" in page.text, title
+
+
+def test_gate_tab_shows_its_cameras(runtime_path: Path, monkeypatch) -> None:
+    """Камера калитки видна там же, где ей управляют.
+
+    Прежде страница отсылала за картинкой в интерфейс Frigate, хотя живое
+    изображение админка отдаёт сама и остальным контурам показывает на месте.
+    """
+    client = make_client(runtime_path, monkeypatch)
+    created = client.post(
+        "/api/cameras",
+        json={
+            "id": "gate-1",
+            "title": "На калитке",
+            "host": "192.0.2.7",
+            "stream_path": "/Streaming/Channels/101",
+            "detect_stream_path": "/Streaming/Channels/102",
+            "circuit": "gate",
+        },
+    )
+    assert created.status_code == 201
+
+    page = client.get("/gate")
+
+    assert page.status_code == 200
+    assert "/stream/camera/gate-1.mjpeg" in page.text
+    assert "На калитке" in page.text
