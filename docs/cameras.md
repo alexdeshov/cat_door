@@ -134,7 +134,33 @@ curl --digest -u admin:ПАРОЛЬ \
 флаг встаёт, клиент умирает, камера остаётся без адреса и не шлёт даже
 DHCP Discover. Восстанавливается только через link-local или SADP.
 
-**5. Занести в инвентарь и проверить поток.** Кнопка «Найти камеры» подставит
+**5. Проверить часы.** Заводской NTP камеры смотрит в интернет (`pool.ntp.org`,
+`clock.isc.org`), а из сети камер туда хода нет, поэтому сами они не выставятся
+никогда: HiWatch приезжает с 1970 годом, Dahua — с 2000-м. Время им раздаёт
+узел (`install/chrony-catdoor-cameras.conf`, опция 42 в DHCP), но новой камере
+сервер обычно приходится указать руками:
+
+```sh
+# Dahua: адрес сервера, часовой пояс 3 = Москва, опрос раз в 10 минут
+curl --digest -u admin:ПАРОЛЬ "http://АДРЕС/cgi-bin/configManager.cgi?action=setConfig\
+&NTP.Address=192.168.1.10&NTP.Port=123&NTP.Enable=true&NTP.TimeZone=3&NTP.UpdatePeriod=10"
+
+# Hikvision/HiWatch: сервер, затем режим NTP (CST-3:00:00 у них означает UTC+3)
+curl --digest -u admin:ПАРОЛЬ -X PUT -H "Content-Type: application/xml" \
+  -d '<NTPServer><id>1</id><addressingFormatType>ipaddress</addressingFormatType>
+      <ipAddress>192.168.1.10</ipAddress><portNo>123</portNo>
+      <synchronizeInterval>60</synchronizeInterval></NTPServer>' \
+  "http://АДРЕС/ISAPI/System/time/ntpServers/1"
+curl --digest -u admin:ПАРОЛЬ -X PUT -H "Content-Type: application/xml" \
+  -d '<Time><timeMode>NTP</timeMode><timeZone>CST-3:00:00</timeZone></Time>' \
+  "http://АДРЕС/ISAPI/System/time"
+```
+
+Часы здесь не мелочь: HiWatch вжигает штамп времени в сам кадр, и он попадёт в
+обучающий датасет, а Frigate раскладывает записи по времени события — камера в
+1970 году кладёт их туда, где их никто не найдёт.
+
+**6. Занести в инвентарь и проверить поток.** Кнопка «Найти камеры» подставит
 адрес, MAC и путь; «Проверить поток» возьмёт кадр. Заодно заполнить субпоток
 для детекции — камерам Frigate он экономит процессор в разы.
 

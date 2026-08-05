@@ -454,6 +454,32 @@ sudo systemctl restart dnsmasq
 `sockets bound exclusively to interface eno1`, а `ss -lunp` показывает только
 `0.0.0.0%eno1:67`.
 
+### Время для камер
+
+Часы камер сами по себе не выставятся никогда: заводской NTP смотрит в
+интернет, а из сети камер туда хода нет. HiWatch так и живёт в 1970 году,
+Dahua — в 2000-м, и это видно в кадре: HiWatch вжигает штамп времени в
+изображение, а Frigate раскладывает записи по времени события.
+
+Сервером времени становится узел — единственный, кто стоит в обеих сетях:
+
+```sh
+sudo apt-get install -y chrony
+sudo cp /opt/catdoor/install/chrony-catdoor-cameras.conf \
+        /etc/chrony/conf.d/catdoor-cameras.conf
+sudo ufw allow in on eno1 to any port 123 proto udp
+sudo systemctl restart chrony
+chronyc sources
+```
+
+Пакет `chrony` вытесняет `systemd-timesyncd` — это штатно и ожидаемо:
+`timesyncd` умеет только спрашивать время, а раздавать его не умеет вовсе.
+
+Адрес сервера камеры получают опцией 42 в аренде DHCP, но камере со статикой
+его нужно указать руками — команды для обеих платформ приведены в
+`docs/cameras.md`, пункт 5 порядка подключения. Проверяется с узла: время в
+ответе камеры должно совпадать с `date` секунда в секунду.
+
 ### Установка Docker ломает DHCP камер
 
 Пакет `docker.io` тянет за собой `ubuntu-fan`, а тот кладёт в каталог dnsmasq
