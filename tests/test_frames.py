@@ -27,20 +27,20 @@ def test_rgb_frame_stream_decodes_fixed_frame(monkeypatch) -> None:
     frames = list(rgb_frame_stream("ffmpeg", "rtsp://camera", 3.0))
 
     assert len(frames) == 1
-    assert frames[0].preview.shape == (360, 640, 3)
-    assert frames[0].detector.shape == (360, 640, 3)
+    assert frames[0].preview.shape == (FRAME_HEIGHT, FRAME_WIDTH, 3)
+    assert frames[0].detector.shape == (FRAME_HEIGHT, FRAME_WIDTH, 3)
     assert frames[0].preview.dtype == np.uint8
     assert int(frames[0].preview[0, 0, 0]) == 7
     assert (
-        "fps=3.0,scale=640:360:force_original_aspect_ratio=decrease,"
-        "pad=640:360:(ow-iw)/2:(oh-ih)/2,hflip,vflip"
+        f"fps=3.0,scale={FRAME_WIDTH}:{FRAME_HEIGHT}:force_original_aspect_ratio=decrease,"
+        f"pad={FRAME_WIDTH}:{FRAME_HEIGHT}:(ow-iw)/2:(oh-ih)/2,hflip,vflip"
     ) in commands[0]
     assert "creationflags" not in popen_kwargs[0]
     process.terminate.assert_called_once()
 
 
 def test_detector_frame_remains_square_without_distortion() -> None:
-    preview = np.full((360, 640, 3), 100, dtype=np.uint8)
+    preview = np.full((FRAME_HEIGHT, FRAME_WIDTH, 3), 100, dtype=np.uint8)
 
     detector = prepare_detector_frame(preview)
 
@@ -111,7 +111,7 @@ def test_roi_is_cropped_before_detector_scaling_and_keeps_full_preview(
     assert "vflip" not in filter_complex
     assert (
         "[detector_source]crop=iw*0.5:ih*0.7:iw*0.2:ih*0.1,"
-        "scale=640:360"
+        "scale=960:540"
     ) in filter_complex
     assert commands[0].index("copy") < commands[0].index("-filter_complex")
 
