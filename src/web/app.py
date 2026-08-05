@@ -237,6 +237,7 @@ class CameraPayload(BaseModel):
     port: int = Field(default=554, ge=1, le=65535)
     stream_path: str = ""
     detect_stream_path: str = ""
+    preview_stream_path: str = ""
     username: str = ""
     password: str | None = None
     mac: str = ""
@@ -326,6 +327,7 @@ def _camera_view(camera: CameraRecord) -> dict[str, object]:
         "port": camera.port,
         "stream_path": camera.stream_path,
         "detect_stream_path": camera.detect_stream_path,
+        "preview_stream_path": camera.preview_stream_path,
         "username": camera.username,
         "has_password": bool(camera.password),
         "mac": camera.mac,

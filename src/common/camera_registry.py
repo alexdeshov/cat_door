@@ -78,6 +78,11 @@ class CameraRecord(BaseModel):
     # перекодирования. Пусто — детекция идёт по основному, что честно работает
     # и заметно дороже.
     detect_stream_path: str = ""
+    # Поток для картинки в админке. Отдельный от детекции, потому что задачи у
+    # них разные: детекции нужно разрешение, достаточное чтобы узнать лицо, а
+    # превью показывается шириной 960 точек, и всё сверх этого — впустую
+    # потраченный процессор. У камеры калитки развод дал 32% ядра против 2%.
+    preview_stream_path: str = ""
     username: str = ""
     password: str = ""
     mac: str = ""
@@ -137,7 +142,7 @@ class CameraRecord(BaseModel):
         """То же и для роли: незнакомая роль лучше потерянной камеры."""
         return value if value is None or value in ROLES else None
 
-    @field_validator("stream_path", "detect_stream_path", mode="before")
+    @field_validator("stream_path", "detect_stream_path", "preview_stream_path", mode="before")
     @classmethod
     def _normalize_path(cls, value: object) -> object:
         if not isinstance(value, str):
@@ -202,11 +207,13 @@ class CameraRecord(BaseModel):
         субпотока 640×360 — около 4%. Разница уходила в никуда: картинка всё
         равно масштабируется вниз.
 
-        Субпоток задан не у всех камер, поэтому основной остаётся запасным
-        вариантом — пустое поле означает «другого потока нет», а не «показывать
-        нечего».
+        Порядок предпочтения — от самого дешёвого к самому дорогому: путь,
+        заданный специально для превью, затем поток детекции, затем основной.
+        Пустое поле означает «другого потока нет», а не «показывать нечего».
         """
-        return self._rtsp_url_for(self.detect_stream_path or self.stream_path)
+        return self._rtsp_url_for(
+            self.preview_stream_path or self.detect_stream_path or self.stream_path
+        )
 
     def stream_signature(self) -> tuple[str, bool]:
         """То, из-за чего поток приходится пересоздавать."""
