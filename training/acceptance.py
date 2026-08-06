@@ -68,18 +68,37 @@ def run_onnx_acceptance(
     )
 
 
+def select_test_items(
+    items: list[DatasetItem],
+    view: str | None = None,
+) -> list[DatasetItem]:
+    """Отложенные кадры для приёмки, при заданном `view` — только его.
+
+    Без фильтра face-модель оценивалась и на side-кропах: в отчётах от
+    5 августа у обеих моделей одинаковые 99 сэмплов — весь test обоих
+    ракурсов. Точность выходила заниженной и ничего не говорила о том,
+    как модель работает на своей камере.
+    """
+    selected = [item for item in items if item.split == "test"]
+    if view is not None:
+        selected = [item for item in selected if item.view == view]
+    if not selected:
+        scope = f" for view {view}" if view else ""
+        raise ValueError(f"acceptance manifest has no test items{scope}")
+    return selected
+
+
 def accept_package(
     package_path: Path,
     manifest_path: Path,
     dataset_root: Path,
     model_name: str,
+    view: str | None = None,
 ) -> dict[str, Any]:
     verification = verify_package(package_path)
     all_items = load_manifest(manifest_path)
     validate_manifest(all_items, dataset_root)
-    items = [item for item in all_items if item.split == "test"]
-    if not items:
-        raise ValueError("acceptance manifest has no test items")
+    items = select_test_items(all_items, view)
     with tempfile.TemporaryDirectory(prefix="catdoor-acceptance-") as temporary:
         temporary_path = Path(temporary)
         with zipfile.ZipFile(package_path) as archive:
@@ -91,10 +110,19 @@ def accept_package(
             verification["model_info"],
             verification["thresholds"],
         )
+    warnings: list[str] = []
+    if metrics.foreign_samples == 0:
+        # `passed` при этом всегда False, и без объяснения это выглядит как
+        # провал модели, хотя виноват набор: FAR не из чего считать.
+        warnings.append(
+            "В test-сплите нет чужих котов: FAR не посчитан, приёмка не может пройти"
+        )
     return {
         "package": package_path.name,
         "model": model_name,
+        "view": view,
         "metrics": asdict(metrics),
+        "warnings": warnings,
         "activated": False,
     }
 
@@ -106,8 +134,13 @@ def main() -> None:
     parser.add_argument("dataset_root", type=Path)
     parser.add_argument("--model", default="face_model.onnx")
     parser.add_argument("--report", type=Path, required=True)
+    parser.add_argument(
+        "--view",
+        choices=("face", "side"),
+        help="оценивать только кадры этого ракурса; без флага — весь test",
+    )
     args = parser.parse_args()
-    report = accept_package(args.package, args.manifest, args.dataset_root, args.model)
+    report = accept_package(args.package, args.manifest, args.dataset_root, args.model, args.view)
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(report, ensure_ascii=False, indent=2))
