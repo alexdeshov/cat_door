@@ -196,29 +196,41 @@ def accept(root: Path, package: Path, dataset: Path, split: Path, views: Sequenc
     print("\nПриёмка на отложенных проходах:")
     for view in views:
         report_path = reports / f"{view}-report.json"
+        # Прошлый отчёт стирается заранее: иначе упавшая приёмка выглядела бы
+        # как вчерашняя удачная.
+        report_path.unlink(missing_ok=True)
         try:
             run(
                 [
                     sys.executable, "-m", "training.acceptance",
                     str(package), str(split), str(dataset),
                     "--model", f"{view}_model.onnx",
+                    "--view", view,
                     "--report", str(report_path),
                 ]
             )
         except PipelineError:
-            print(f"  {view}: приёмка не отработала")
-            verdicts.append(False)
-            continue
+            # Ненулевой код — это и «не прошла по порогам» (отчёт записан), и
+            # настоящая поломка (отчёта нет). Отчёт надёжнее кода возврата.
+            if not report_path.is_file():
+                print(f"  {view}: приёмка не отработала")
+                verdicts.append(False)
+                continue
         summary = json.loads(report_path.read_text(encoding="utf-8"))
         metrics = summary.get("metrics", summary)
         passed = bool(metrics.get("passed"))
         verdicts.append(passed)
+        far = metrics.get("false_accept_rate")
+        far_text = f"{far:.0%}" if isinstance(far, int | float) else "не посчитан"
         print(
             f"  {view}: точность {metrics.get('accuracy', 0):.2f}, "
             f"не распознано {metrics.get('false_reject_rate', 0):.0%}, "
-            f"«не уверена» {metrics.get('uncertain_rate', 0):.0%} — "
+            f"«не уверена» {metrics.get('uncertain_rate', 0):.0%}, "
+            f"чужие приняты {far_text} — "
             f"{'прошла' if passed else 'НЕ прошла'}"
         )
+        for warning in summary.get("warnings", []) or []:
+            print(f"    ! {warning}")
     return all(verdicts) and bool(verdicts)
 
 

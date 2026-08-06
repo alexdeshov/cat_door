@@ -84,17 +84,61 @@ def validate_manifest(items: list[DatasetItem], dataset_root: Path | None = None
     }
 
 
-def split_for_event(event_id: str, seed: str = "catdoor-v1") -> str:
-    value = int.from_bytes(hashlib.sha256(f"{seed}:{event_id}".encode()).digest()[:8], "big")
-    bucket = value % 100
-    if bucket < 70:
-        return "train"
-    if bucket < 85:
-        return "validation"
-    return "test"
+def _event_order(event_id: str, seed: str = "catdoor-v1") -> int:
+    return int.from_bytes(hashlib.sha256(f"{seed}:{event_id}".encode()).digest()[:8], "big")
+
+
+def _split_quota(events: int) -> tuple[int, int]:
+    """Сколько проходов метки уходит в test и validation.
+
+    Ровно один проход остаётся только в train: по нему нечего проверять.
+    Из двух один откладывается в test — иначе метка не участвует в приёмке
+    вовсе. От трёх и больше — примерно по 15% туда и туда, но не меньше
+    одного прохода в каждый.
+    """
+    if events <= 1:
+        return 0, 0
+    if events == 2:
+        return 1, 0
+    portion = max(1, round(events * 0.15))
+    return portion, portion
 
 
 def assign_splits(items: list[DatasetItem], seed: str = "catdoor-v1") -> list[DatasetItem]:
+    """Разложить проходы по train/validation/test, не оставляя меток без test.
+
+    Раньше сплит выбирался хэшем каждого прохода независимо, и малочисленные
+    метки целиком проваливались мимо test: шести проходов чужих котов хватило,
+    чтобы ни один не отложился, FAR стало не из чего считать, и приёмка не
+    могла пройти ни при какой модели. Теперь доли распределяются внутри каждой
+    метки: проходы выстраиваются по тому же хэшу и первые из них уходят в test
+    и validation по квоте `_split_quota`.
+
+    Расклад детерминирован для фиксированного набора проходов, но при росте
+    набора отдельный проход может сменить сплит. Это честная цена: модель
+    каждый раз обучается заново на своём train и не видит свой test, а
+    сравнивать приёмки разных наборов между собой и так нельзя.
+    """
+    events_by_label: dict[str, set[str]] = defaultdict(set)
+    label_by_event: dict[str, str] = {}
+    for item in items:
+        events_by_label[item.label].add(item.event_id)
+        label_by_event.setdefault(item.event_id, item.label)
+        if label_by_event[item.event_id] != item.label:
+            raise ValueError(f"event {item.event_id} carries multiple labels")
+
+    split_by_event: dict[str, str] = {}
+    for label in sorted(events_by_label):
+        ordered = sorted(events_by_label[label], key=lambda event: _event_order(event, seed))
+        test_quota, validation_quota = _split_quota(len(ordered))
+        for index, event_id in enumerate(ordered):
+            if index < test_quota:
+                split_by_event[event_id] = "test"
+            elif index < test_quota + validation_quota:
+                split_by_event[event_id] = "validation"
+            else:
+                split_by_event[event_id] = "train"
+
     return [
         DatasetItem(
             event_id=item.event_id,
@@ -102,7 +146,7 @@ def assign_splits(items: list[DatasetItem], seed: str = "catdoor-v1") -> list[Da
             view=item.view,
             image_path=item.image_path,
             label=item.label,
-            split=split_for_event(item.event_id, seed),
+            split=split_by_event[item.event_id],
         )
         for item in items
     ]
