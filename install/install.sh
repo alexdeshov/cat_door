@@ -67,7 +67,18 @@ done
 
 systemctl daemon-reload
 systemctl enable catdoor-recorder.service catdoor-web.service >/dev/null
-systemctl enable --now catdoor-cpu-thermal.service >/dev/null
+# Запрет турбо-частот — лекарство от слабого кулера конкретного железа, а не
+# часть CatDoor. На узле, где он уже включён, обновление его сохраняет; на
+# свежем узле он молча срезал бы производительность, ради которой железо и
+# покупалось, поэтому включается только явной просьбой.
+if systemctl is-enabled --quiet catdoor-cpu-thermal.service 2>/dev/null \
+        || [ "${CATDOOR_THERMAL_CAP:-0}" = "1" ]; then
+    systemctl enable --now catdoor-cpu-thermal.service >/dev/null
+    echo "запрет турбо-частот включён (catdoor-cpu-thermal)"
+else
+    echo "запрет турбо-частот не включён; если кулер не справляется:"
+    echo "  sudo CATDOOR_THERMAL_CAP=1 ./install/install.sh"
+fi
 systemctl enable catdoor-gate-sync.service catdoor-gate-sync.path \
     catdoor-gate-sync.timer >/dev/null
 
