@@ -109,6 +109,15 @@ TRAINING_TARGETS = {"excluded", "macbook", "local"}
 # экран и её приходилось долго листать. Десяток — та порция, после которой ещё
 # видно счётчики и камеры без прокрутки обратно наверх.
 EVENTS_PER_PAGE = 10
+# Счётчики в шапке — они же фильтры списка проходов: ключ приходит в `?show=`
+# и превращается в условие. Ключи совпадают с полями `event_summary`.
+EVENT_FILTERS = {
+    "automatic": Event.trigger_source == "automatic",
+    "pending": Event.label == "pending",
+    "known": Event.label == "known_cat",
+    "foreign": Event.label == "foreign_cat",
+    "failed": Event.status == "failed",
+}
 # Состояние службы Frigate показывается в шапке каждой страницы, а узнаётся
 # запуском systemctl. Короткая память избавляет от процесса на отрисовку, не
 # успевая соврать заметно.
@@ -617,6 +626,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         request: Request,
         session: Annotated[Session, Depends(get_session)],
         page: int = 1,
+        show: str | None = None,
     ) -> HTMLResponse:
         summary_row = session.execute(
             select(
@@ -630,12 +640,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 func.count(Event.id).filter(Event.training_target == "local"),
             )
         ).one()
-        pages = max(1, ceil(summary_row[0] / EVENTS_PER_PAGE))
+        # Незнакомый фильтр молча сбрасывается, а не отвергается — по той же
+        # причине, по которой ниже прижимается номер страницы.
+        if show not in EVENT_FILTERS:
+            show = None
+        if show is None:
+            events_total = summary_row[0]
+        else:
+            events_total = session.execute(
+                select(func.count(Event.id)).where(EVENT_FILTERS[show])
+            ).scalar_one()
+        pages = max(1, ceil(events_total / EVENTS_PER_PAGE))
         # Номер страницы прижимается к диапазону, а не отвергается: после
         # удаления последнего прохода на странице сохранённая ссылка иначе вела
         # бы в пустоту.
         page = min(max(page, 1), pages)
-        events = session.scalars(
+        events_query = (
             select(Event)
             # Тай-брейк по id обязателен: автоматические проходы пишутся пачками
             # и могут делить время создания, а при неустойчивом порядке одна и
@@ -643,7 +663,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             .order_by(Event.created_at.desc(), Event.id.desc())
             .limit(EVENTS_PER_PAGE)
             .offset((page - 1) * EVENTS_PER_PAGE)
-        ).all()
+        )
+        if show is not None:
+            events_query = events_query.where(EVENT_FILTERS[show])
+        events = session.scalars(events_query).all()
         event_ids = [event.id for event in events]
         prediction_rows = (
             session.scalars(
@@ -713,6 +736,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "events_page": page,
                 "events_pages": pages,
                 "events_per_page": EVENTS_PER_PAGE,
+                "events_filter": show,
+                "events_total": events_total,
                 "events_shown_from": (page - 1) * EVENTS_PER_PAGE + 1 if events else 0,
                 "events_shown_to": (page - 1) * EVENTS_PER_PAGE + len(events),
                 "face_configured": bool(_role_stream_url(registry, "face")),
