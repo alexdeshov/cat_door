@@ -43,31 +43,30 @@
   </p>
 {% endif %}
 
+{# Счётчики — они же фильтры списка проходов: клик оставляет только свою
+   категорию, повторный клик (или «проходов») возвращает всё. Ссылки ведут на
+   тот же адрес без JS, чтобы фильтр жил в адресной строке и переживал F5. #}
 <div class="tallies">
-  <div class="tally">
+  <a class="tally" href="/">
     <span class="tally-value">{{ event_summary.total }}</span>
     <span class="tally-key">проходов</span>
-  </div>
-  <div class="tally">
-    <span class="tally-value">{{ event_summary.automatic }}</span>
-    <span class="tally-key">записал детектор</span>
-  </div>
-  <div class="tally">
-    <span class="tally-value">{{ event_summary.pending }}</span>
-    <span class="tally-key">ждут разметки</span>
-  </div>
-  <div class="tally">
-    <span class="tally-value">{{ event_summary.known }}</span>
-    <span class="tally-key">свои коты</span>
-  </div>
-  <div class="tally">
-    <span class="tally-value">{{ event_summary.foreign }}</span>
-    <span class="tally-key">чужие коты</span>
-  </div>
-  <div class="tally {{ 'tally-alert' if event_summary.failed }}">
-    <span class="tally-value">{{ event_summary.failed }}</span>
-    <span class="tally-key">ошибки записи</span>
-  </div>
+  </a>
+  {% for key, value, title in [
+    ("automatic", event_summary.automatic, "записал детектор"),
+    ("pending", event_summary.pending, "ждут разметки"),
+    ("known", event_summary.known, "свои коты"),
+    ("foreign", event_summary.foreign, "чужие коты"),
+    ("failed", event_summary.failed, "ошибки записи"),
+  ] %}
+    <a class="tally
+        {{- ' tally-active' if events_filter == key }}
+        {{- ' tally-alert' if key == 'failed' and value }}"
+      href="{{ '/' if events_filter == key else '/?show=' ~ key }}"
+      aria-pressed="{{ 'true' if events_filter == key else 'false' }}">
+      <span class="tally-value">{{ value }}</span>
+      <span class="tally-key">{{ title }}</span>
+    </a>
+  {% endfor %}
 </div>
 
 <section class="panel">
@@ -135,8 +134,11 @@
   <div class="panel-head">
     <h2>Проходы</h2>
     <span class="muted">
-      {%- if event_summary.total -%}
-        {{ events_shown_from }}–{{ events_shown_to }} из {{ event_summary.total }}
+      {%- if events_total -%}
+        {{ events_shown_from }}–{{ events_shown_to }} из {{ events_total }}
+        {{- ", фильтр включён" if events_filter }}
+      {%- elif events_filter -%}
+        под фильтр ничего не попало
       {%- else -%}
         пока пусто
       {%- endif -%}
@@ -254,7 +256,10 @@
   {% else %}
     <div class="panel-body">
       <p class="muted">
-        {% if event_summary.total %}
+        {% if events_filter and not events_total %}
+          Под этот фильтр не попал ни один проход. Клик по счётчику
+          «проходов» вернёт полный список.
+        {% elif event_summary.total %}
           На этой странице пусто — проходы могли удалить, пока она была открыта.
         {% else %}
           Проходов пока нет. Они появятся сами, когда детектор увидит кота, либо
@@ -265,15 +270,16 @@
   {% endfor %}
   </div>
   {% if events_pages > 1 %}
+    {% set filter_suffix = "&show=" ~ events_filter if events_filter else "" %}
     <nav class="pager" aria-label="Страницы проходов">
       {% if events_page > 1 %}
-        <a class="button" href="/?page={{ events_page - 1 }}">← Назад</a>
+        <a class="button" href="/?page={{ events_page - 1 }}{{ filter_suffix }}">← Назад</a>
       {% else %}
         <span class="button disabled" aria-disabled="true">← Назад</span>
       {% endif %}
       <span class="muted data">{{ events_page }} из {{ events_pages }}</span>
       {% if events_page < events_pages %}
-        <a class="button" href="/?page={{ events_page + 1 }}">Вперёд →</a>
+        <a class="button" href="/?page={{ events_page + 1 }}{{ filter_suffix }}">Вперёд →</a>
       {% else %}
         <span class="button disabled" aria-disabled="true">Вперёд →</span>
       {% endif %}

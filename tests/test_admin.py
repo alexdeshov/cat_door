@@ -157,6 +157,79 @@ def test_summary_is_above_cameras_and_counts_all_events(
     assert '<option value="Барсик">' in page.text
 
 
+def test_summary_tallies_filter_event_list(runtime_path: Path, monkeypatch) -> None:
+    client = make_client(runtime_path, monkeypatch)
+    for _ in range(3):
+        client.post("/api/events", json={"duration_seconds": 5})
+    client.post(
+        "/api/events/1/label",
+        json={"label": "known_cat", "cat_name": "Барсик", "training_target": "macbook"},
+    )
+    client.post(
+        "/api/events/2/label",
+        json={"label": "foreign_cat", "training_target": "excluded"},
+    )
+
+    filtered = client.get("/?show=known")
+    assert filtered.status_code == 200
+    assert 'data-event="1"' in filtered.text
+    assert 'data-event="2"' not in filtered.text
+    assert 'data-event="3"' not in filtered.text
+    assert "1–1 из 1" in filtered.text
+
+    pending = client.get("/?show=pending")
+    assert 'data-event="3"' in pending.text
+    assert 'data-event="1"' not in pending.text
+
+    # Счётчики остаются общими и не зависят от включённого фильтра.
+    assert '<span class="tally-key">проходов</span>' in filtered.text
+    assert '<span class="tally-value">3</span>' in filtered.text
+    # Активный фильтр подсвечен, его ссылка ведёт назад к полному списку;
+    # остальные счётчики ссылаются на свои фильтры.
+    assert "tally-active" in filtered.text
+    assert 'href="/?show=pending"' in filtered.text
+    assert "tally-active" not in client.get("/").text
+
+
+def test_unknown_filter_shows_everything(runtime_path: Path, monkeypatch) -> None:
+    client = make_client(runtime_path, monkeypatch)
+    client.post("/api/events", json={"duration_seconds": 5})
+
+    page = client.get("/?show=nonsense")
+
+    assert page.status_code == 200
+    assert 'data-event="1"' in page.text
+    assert "tally-active" not in page.text
+
+
+def test_filter_with_no_matches_explains_itself(runtime_path: Path, monkeypatch) -> None:
+    client = make_client(runtime_path, monkeypatch)
+    client.post("/api/events", json={"duration_seconds": 5})
+
+    page = client.get("/?show=foreign")
+
+    assert page.status_code == 200
+    assert 'data-event="1"' not in page.text
+    assert "Под этот фильтр не попал ни один проход" in page.text
+
+
+def test_filter_survives_pagination(runtime_path: Path, monkeypatch) -> None:
+    client = make_client(runtime_path, monkeypatch)
+    for index in range(1, 13):
+        client.post("/api/events", json={"duration_seconds": 5})
+        client.post(
+            f"/api/events/{index}/label",
+            json={"label": "known_cat", "cat_name": "Барсик", "training_target": "macbook"},
+        )
+
+    first = client.get("/?show=known")
+    assert "1–10 из 12" in first.text
+    assert 'href="/?page=2&amp;show=known"' in first.text
+
+    second = client.get("/?page=2&show=known")
+    assert "11–12 из 12" in second.text
+
+
 def test_known_cat_requires_name(runtime_path: Path, monkeypatch) -> None:
     client = make_client(runtime_path, monkeypatch)
     client.post("/api/events", json={"duration_seconds": 5})
