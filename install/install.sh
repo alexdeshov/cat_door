@@ -61,7 +61,8 @@ chmod 640 "$CONFIG_FILE"
 # отдельной ручной установкой, и обновления его юнитов молча не доезжали.
 for unit in catdoor-recorder.service catdoor-web.service \
         catdoor-gate-sync.service catdoor-gate-sync.path catdoor-gate-sync.timer \
-        catdoor-cpu-thermal.service; do
+        catdoor-cpu-thermal.service \
+        catdoor-backup.service catdoor-backup.timer; do
     install -m 644 "$REPO_DIR/install/$unit" "$UNIT_DIR/$unit"
 done
 
@@ -81,6 +82,22 @@ else
 fi
 systemctl enable catdoor-gate-sync.service catdoor-gate-sync.path \
     catdoor-gate-sync.timer >/dev/null
+
+# Резервное копирование включается только там, где есть куда копировать.
+# Включённый таймер без внешнего диска каждую ночь писал бы в журнал отказ, и
+# через неделю на него перестали бы смотреть — вместе с настоящими отказами.
+ARCHIVE_DIR=${CATDOOR_ARCHIVE_DIR:-/srv/archive}
+if mountpoint -q "$ARCHIVE_DIR" 2>/dev/null; then
+    # `--now` здесь в отличие от служб: `enable` ставит таймер в очередь только
+    # на следующую загрузку, и без запуска первая копия ждала бы перезагрузки.
+    # Запуск таймера ничего не прерывает — в отличие от перезапуска recorder
+    # посреди прохода, ради которого службы тут и не стартуют.
+    systemctl enable --now catdoor-backup.timer >/dev/null
+    echo "резервное копирование включено, архив: $ARCHIVE_DIR"
+else
+    echo "резервное копирование не включено: $ARCHIVE_DIR не смонтирован"
+    echo "  подключите внешний диск и повторите установку"
+fi
 
 cat <<'NEXT'
 
