@@ -161,12 +161,29 @@ Recorder подхватывает смену в течение секунды и
 ## Установка служб
 
 ```sh
+sudo apt-get install -y python3-venv python3-dev build-essential ffmpeg
 cd /opt/catdoor
 python3 -m venv .venv
-.venv/bin/pip install -e '.[dev]'
+.venv/bin/pip install -e '.[dev,inference]'
 .venv/bin/pytest
 sudo ./install/install.sh
 ```
+
+Две зависимости легко пропустить, потому что тесты проходят и без них, а
+recorder стартует и уходит в `active (running)`:
+
+- **`ffmpeg`** — кадры с камер читает он. Без него recorder бесконечно висит в
+  `waiting_for_frames` с нулевыми `frames_processed` и ничего не пишет в
+  журнал: ошибки нет, работы тоже.
+- **экстра `inference`** (OpenVINO) — без неё детектор падает с
+  `DetectorError: openvino_not_installed`, а в `runtime/detection.jsonl`
+  копятся `recorder_retry` каждые пять секунд. `[dev]` эту зависимость не
+  тянет: тестам она не нужна, поэтому на чистой машине пропажа всплывает
+  только на живых камерах.
+
+Проверять по `runtime/recorder-status.json`: рабочее состояние — `dry_run:
+false`, `detector_connected: true`, `detector_device_actual` не `null` и
+растущий `frames_processed` по обеим ролям.
 
 Скрипт идемпотентен: создаёт системного пользователя `catdoor`, назначает ему
 том с данными, ставит юниты и включает их. Существующий
@@ -459,6 +476,36 @@ sudo systemctl restart dnsmasq
 `sockets bound exclusively to interface eno1`, а `ss -lunp` показывает только
 `0.0.0.0%eno1:67`.
 
+#### Если карта сети камер на шине PCIe
+
+Встроенная карта успевает появиться до dnsmasq, отдельная — не всегда. Тогда в
+журнале при каждой загрузке висит `warning: interface <порт> does not currently
+exist`, а `ss -lunp` показывает `0.0.0.0:67` вместо порта камер. Раздача при
+этом формально работает — директива `interface=` отсекает запросы с чужих
+интерфейсов, — но признака здоровья нет, а вместе с ним и уверенности, что
+камера получит адрес при продлении аренды.
+
+Ждать одного лишь появления устройства мало: dnsmasq считает интерфейс
+несуществующим, пока на нём нет адреса. Лечится дроп-ином:
+
+```sh
+sudo mkdir -p /etc/systemd/system/dnsmasq.service.d
+sudo tee /etc/systemd/system/dnsmasq.service.d/10-wait-camera-nic.conf <<'CONF'
+[Unit]
+Wants=sys-subsystem-net-devices-<порт>.device
+After=sys-subsystem-net-devices-<порт>.device
+
+[Service]
+ExecStartPre=/bin/sh -c "timeout 30 sh -c \"until ip -4 addr show <порт> 2>/dev/null | grep -q \\\"inet \\\"; do sleep 1; done\" || true"
+CONF
+sudo systemctl daemon-reload
+```
+
+Ожидание ограничено тридцатью секундами и всегда заканчивается успехом:
+невоткнутый кабель не должен задерживать загрузку узла, дальше выручает
+`bind-dynamic`. Проверять только перезагрузкой — на живой службе
+`systemctl restart` проходит правильно в любом случае и ничего не доказывает.
+
 ### Время для камер
 
 Часы камер сами по себе не выставятся никогда: заводской NTP смотрит в
@@ -640,11 +687,16 @@ ssh -L 8081:192.168.1.101:80 <логин>@<IP-мини-PC>
    и записями плюс `/etc/frigate`. Машинно-зависимое — netplan, dnsmasq с
    арендами камер, chrony, `~/.ssh`, снимок правил ufw — ляжет в
    `/root/catdoor-migrate-staged`.
-3. На новом узле: клонировать репозиторий, собрать `.venv`, прогнать
-   `pytest`, выполнить `sudo ./install/install.sh` (`/opt/gate_access` приезжает
-   архивом вместе с `.git`, заново его клонировать не нужно). Запрет
-   турбо-частот скрипт по умолчанию не включает — он был лекарством от слабого
-   кулера старого железа; если понадобится, `CATDOOR_THERMAL_CAP=1`.
+3. На новом узле: клонировать репозиторий, собрать `.venv` **со всеми
+   зависимостями из раздела «Установка служб»** (`ffmpeg` и экстра `inference`
+   — без них recorder запускается, но не работает), прогнать `pytest`,
+   выполнить `sudo ./install/install.sh` (`/opt/gate_access` приезжает архивом
+   вместе с `.git`, заново его клонировать не нужно). Запрет турбо-частот
+   скрипт по умолчанию не включает — он был лекарством от слабого кулера
+   старого железа; если понадобится, `CATDOOR_THERMAL_CAP=1`.
+   Ключи для `git clone` приватных репозиториев лежат в
+   `staged/ssh` — нужны `config` с алиасами `github-catdoor`/`github-gate` и
+   оба `id_ed25519_*`; `authorized_keys` нового узла при этом не трогать.
 4. Поставить Docker и юнит `frigate.service` — **до** dnsmasq, иначе
    `ubuntu-fan` ломает DHCP камер отложенно, см. раздел «Установка Docker ломает
    DHCP камер». В автозапуск Frigate не включать: какой контур работает, решает
@@ -652,7 +704,12 @@ ssh -L 8081:192.168.1.101:80 <логин>@<IP-мини-PC>
 5. Разобрать `/root/catdoor-migrate-staged` руками: имена интерфейсов на новом
    железе другие, поэтому netplan/dnsmasq/chrony применяются не копированием, а
    переносом смысла — адрес узла в сети камер, аренды по MAC, раздача времени.
-   Правила ufw восстановить по снимку.
+   Правила ufw восстановить по снимку. Порт для коммутатора камер определяется
+   не по имени, а по факту: погашенный интерфейс не показывает линк, поэтому
+   `ip link set <порт> up` на обоих, а дальше смотреть
+   `/sys/class/net/<порт>/carrier`.
+   В `/etc/catdoor/catdoor.env` поправить `CATDOOR_GATE_UI_URL` — он приезжает
+   с адресом старого узла и ведёт со вкладки калитки в никуда.
 6. Переключение: выключить службы на старом узле, переткнуть сеть камер в
    новый, `systemctl start catdoor-recorder catdoor-web`. Камеры опознаются по
    MAC из приехавшего инвентаря; если адреса изменились, recorder подставит
