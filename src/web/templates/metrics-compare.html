@@ -12,13 +12,13 @@
       <label>Базовый:
         <select name="left" required>
           <option value="">Выберите</option>
-          {% for run in runs %}<option value="{{ run.id }}" {{ "selected" if left == run.id }}>#{{ run.id }} · {{ run.run_kind }} · {{ run.created_at }}</option>{% endfor %}
+          {% for run in runs %}<option value="{{ run.id }}" {{ "selected" if left == run.id }}>#{{ run.id }} · {{ run.run_kind }} · {{ run.created_at | local_time }}</option>{% endfor %}
         </select>
       </label>
       <label>Кандидат:
         <select name="right" required>
           <option value="">Выберите</option>
-          {% for run in runs %}<option value="{{ run.id }}" {{ "selected" if right == run.id }}>#{{ run.id }} · {{ run.run_kind }} · {{ run.created_at }}</option>{% endfor %}
+          {% for run in runs %}<option value="{{ run.id }}" {{ "selected" if right == run.id }}>#{{ run.id }} · {{ run.run_kind }} · {{ run.created_at | local_time }}</option>{% endfor %}
         </select>
       </label>
       <button type="submit">Сравнить</button>

@@ -91,7 +91,7 @@ def apply_frigate_config(settings: Settings) -> bool:
     # переносим как есть: иначе правка камеры в админке молча стирала бы чужую
     # настройку, а узнавалось бы это через неделю без имён в событиях.
     config = build_config(registry, circuits, preserved=_foreign_config(settings))
-    env = build_env(frigate_cameras(registry, circuits))
+    env = build_env(frigate_cameras(registry, circuits), settings.display_timezone)
     if _unchanged(settings.gate_applied_config_path, config) and _unchanged(
         settings.gate_env_path, env
     ):

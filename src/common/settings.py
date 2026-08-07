@@ -1,6 +1,7 @@
 import re
 from pathlib import Path
 from uuid import uuid4
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -131,6 +132,23 @@ class Settings(BaseSettings):
     local_training_epochs: int = Field(default=2, ge=1, le=100)
     web_host: str = "127.0.0.1"
     web_port: int = Field(default=8080, ge=1, le=65535)
+    # Часовой пояс, в котором админка показывает время, а Frigate ведёт свой
+    # архив. В базе метки хранятся в UTC — так они сравнимы между узлами и
+    # переживают перевод часов, — но на экране нужен тот час, который человек
+    # видит на своих часах у дверцы.
+    display_timezone: str = "Europe/Moscow"
+
+    @field_validator("display_timezone")
+    @classmethod
+    def _check_timezone(cls, value: str) -> str:
+        try:
+            ZoneInfo(value)
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            raise ValueError(
+                f"неизвестный часовой пояс: {value!r}, ожидается имя из базы "
+                "IANA, например Europe/Moscow"
+            ) from exc
+        return value
 
     @property
     def resolved_database_path(self) -> Path:

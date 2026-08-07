@@ -160,7 +160,7 @@
         {% for run in runs %}
           <tr>
             <td class="number">#{{ run.id }}</td>
-            <td class="number">{{ run.created_at.strftime("%d.%m %H:%M") }}</td>
+            <td class="number">{{ run.created_at | local_time("%d.%m %H:%M") }}</td>
             <td>{{ run.run_kind }}</td>
             <td class="{{ 'bad' if run.status == 'failed' else '' }}">{{ run.status }}</td>
             <td><a href="/metrics/runs/{{ run.id }}">Открыть</a></td>

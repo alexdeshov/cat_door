@@ -18,6 +18,7 @@ from threading import Event as ThreadEvent
 from time import monotonic
 from typing import Annotated, Literal
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -164,6 +165,21 @@ def _read_status(path: Path) -> dict[str, object] | None:
 
 def _as_utc(value: datetime) -> datetime:
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
+def format_local_time(
+    value: datetime,
+    timezone: ZoneInfo,
+    pattern: str = "%d.%m.%Y %H:%M",
+) -> str:
+    """Метка времени из базы в том виде, в каком её читает человек.
+
+    Хранится всё в UTC, а sqlite отдаёт метки вообще без зоны — печатать их
+    как есть значит показывать проход на несколько часов раньше, чем он был.
+    Значение без зоны здесь считается UTC, а не местным временем: так его
+    записал recorder.
+    """
+    return _as_utc(value).astimezone(timezone).strftime(pattern)
 
 
 def _status_is_stale(
@@ -494,6 +510,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.cpu_sample = read_cpu_sample()
     templates.env.globals["asset_version"] = asset_version
     templates.env.globals["circuit_titles"] = CIRCUIT_TITLES
+    # Пояс читается один раз на сборку приложения: он меняется правкой
+    # конфигурации, то есть с перезапуском службы, а разбор имени зоны на
+    # каждый проход в списке был бы работой впустую.
+    display_timezone = ZoneInfo(settings.display_timezone)
+    templates.env.filters["local_time"] = lambda value, pattern="%d.%m.%Y %H:%M": (
+        format_local_time(value, display_timezone, pattern)
+    )
 
     def current_detection_config() -> DetectionConfig:
         return load_detection_config(
