@@ -29,6 +29,7 @@ from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from src.common.archive_depth import ArchiveDepth, read_archive_depth
 from src.common.camera_discovery import (
     RTSP_PORT,
     DiscoveredDevice,
@@ -86,6 +87,7 @@ from src.common.detection_config import (
     save_detection_config,
 )
 from src.common.detection_stats import read_detection_stats
+from src.common.frigate_config import RECORDING_RETENTION
 from src.common.gate_service import GateStatus, gate_status
 from src.common.model_registry import register_model_version
 from src.common.online_metrics import build_online_metrics
@@ -528,6 +530,33 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     def current_circuits() -> NodeCircuits:
         return load_circuits(circuits_path(settings.data_dir))
+
+    def current_archive_depth() -> ArchiveDepth:
+        _, motion_days = RECORDING_RETENTION.get(
+            current_circuits().gate_recording, (0, 0)
+        )
+        return read_archive_depth(
+            settings.gate_database_path,
+            settings.gate_recordings_path,
+            motion_days,
+        )
+
+    def archive_depth_view(depth: ArchiveDepth) -> dict[str, object]:
+        hours = depth.depth_hours
+        return {
+            "oldest": (
+                format_local_time(depth.oldest, display_timezone)
+                if depth.oldest
+                else None
+            ),
+            "hours": round(hours, 1) if hours is not None else None,
+            "retention_days": depth.retention_days,
+            "free_gb": round(depth.free_gb) if depth.free_gb is not None else None,
+            "total_gb": round(depth.total_gb) if depth.total_gb is not None else None,
+            # Признак «место кончается раньше срока»: настроена неделя, а архива
+            # меньше. Это единственное, ради чего показатель и заведён.
+            "short": depth.short,
+        }
 
     def circuits_view(circuits: NodeCircuits) -> dict[str, object]:
         status = gate_status(settings.gate_service_unit)
@@ -1125,6 +1154,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     for camera in registry.cameras
                     if camera.circuit == "nvr"
                 ],
+                "archive": archive_depth_view(current_archive_depth()),
                 "stream_version": uuid4().hex,
             },
         )

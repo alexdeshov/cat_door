@@ -27,8 +27,37 @@
     </div>
     <div class="readout">
       <span class="readout-key">запись</span>
-      <span class="readout-value">по детекции</span>
+      <span class="readout-value">
+        {{ recording_titles.get(circuits.gate_recording, circuits.gate_recording) }}
+      </span>
     </div>
+    {# Глубина архива, а не пометка «скоро удалится»: последней у Frigate нет и
+       завести её нечем, а первая отвечает на тот же вопрос честнее. Настроена
+       неделя, а глубины трое суток — значит место кончилось раньше срока и
+       Frigate вытесняет свои же записи. #}
+    <div class="readout">
+      <span class="readout-key">архив</span>
+      <span class="readout-value{{ ' chip-hot' if archive.short else '' }}">
+        {% if archive.hours is none %}
+          записей нет
+        {% else %}
+          {{ (archive.hours // 24) | int }} сут {{ (archive.hours % 24) | int }} ч
+          из {{ archive.retention_days }}
+        {% endif %}
+      </span>
+    </div>
+    {% if archive.oldest %}
+    <div class="readout">
+      <span class="readout-key">с</span>
+      <span class="readout-value">{{ archive.oldest }}</span>
+    </div>
+    {% endif %}
+    {% if archive.free_gb is not none %}
+    <div class="readout">
+      <span class="readout-key">место</span>
+      <span class="readout-value">{{ archive.free_gb }} из {{ archive.total_gb }} ГБ</span>
+    </div>
+    {% endif %}
   </div>
   <div class="statusbar-switch">
     {% include "_circuit_switch.html" %}
