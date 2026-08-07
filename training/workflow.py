@@ -21,6 +21,7 @@ from src.common.detection_config import (
     detection_config_path,
     load_detection_config,
 )
+from src.common.metrics import FOREIGN_LABEL, NOCAT_LABEL, REJECT_LABELS
 from src.common.settings import Settings
 from src.inference.cat_detector import CatDetectionResult, OpenVinoCatDetector
 from src.inference.preprocessing import (
@@ -31,7 +32,11 @@ from src.inference.preprocessing import (
 )
 from training.dataset import DatasetItem, assign_splits, validate_manifest, write_manifest
 
-USABLE_LABELS = {"known_cat", "foreign_cat"}
+# Проходы, из которых режется обучающий материал. «Кота не видно» здесь не
+# ошибка: это ложные срабатывания детектора, размеченные рукой, и они учат
+# классификатор отказываться. «Несколько котов» остаётся снаружи — какое имя
+# ставить кадру с двумя котами, неизвестно.
+USABLE_LABELS = {"known_cat", "foreign_cat", "not_visible"}
 _STATUS_LOCK = threading.RLock()
 
 
@@ -231,7 +236,12 @@ def build_dataset(
     crops_rejected = 0
     root = data_dir.resolve()
     for event in events:
-        label = event.cat_name if event.label == "known_cat" else "__foreign__"
+        if event.label == "known_cat":
+            label = event.cat_name
+        elif event.label == "not_visible":
+            label = NOCAT_LABEL
+        else:
+            label = FOREIGN_LABEL
         if not label:
             continue
         for view, relative_media in (
@@ -307,7 +317,9 @@ def build_dataset(
         label: len(event_ids) for label, event_ids in sorted(events_per_label.items())
     }
     known_counts = {
-        label: count for label, count in event_counts.items() if label != "__foreign__"
+        label: count
+        for label, count in event_counts.items()
+        if label not in REJECT_LABELS
     }
     warnings: list[str] = []
     if len(known_counts) < 2:
@@ -317,8 +329,12 @@ def build_dataset(
             warnings.append(
                 f"{label}: независимых проходов — {count}; рекомендуется не менее 100"
             )
-    if event_counts.get("__foreign__", 0) < 30:
+    if event_counts.get(FOREIGN_LABEL, 0) < 30:
         warnings.append("Мало примеров чужих котов для проверки ложных распознаваний")
+    if event_counts.get(NOCAT_LABEL, 0) < 20:
+        warnings.append(
+            "Мало проходов «кота не видно» — классификатору не на чем учиться отказу"
+        )
     report.update(
         {
             "events_per_label": event_counts,

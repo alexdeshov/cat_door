@@ -7,6 +7,17 @@ from statistics import mean
 from typing import TypeAlias
 
 FOREIGN_LABEL = "__foreign__"
+# Кадры проходов, размеченных как «кота не видно»: тени, пустая терраса,
+# качнувшаяся ветка. В отличие от чужих котов этот класс **обучается**, и в этом
+# весь смысл. Без него модель закрыта по своим котам, softmax обязан
+# распределить единицу между ними, и отказаться ей нечем — тень неизбежно
+# получает чьё-то имя, а порог уверенности спасает не всегда: на камере подхода
+# ложные срабатывания идут с медианной уверенностью 0.91 против 0.93 у
+# настоящих проходов.
+NOCAT_LABEL = "__nocat__"
+# Метки, которые означают «имени быть не должно»: и ожидаемые в наборе, и
+# предсказанные моделью. Предсказать `__nocat__` — это отказ, а не ошибка.
+REJECT_LABELS = frozenset({FOREIGN_LABEL, NOCAT_LABEL})
 UNCERTAIN = "uncertain"
 NO_PREDICTION = "no_prediction"
 
@@ -123,7 +134,7 @@ def calculate_metrics(
     if not expected or len(expected) != len(predicted) or len(expected) != len(inference_ms):
         raise ValueError("expected, predicted and inference_ms must have the same non-zero length")
     decisions = [normalize_decision(value) for value in predicted]
-    known_samples = sum(label != FOREIGN_LABEL for label in expected)
+    known_samples = sum(label not in REJECT_LABELS for label in expected)
     foreign_samples = len(expected) - known_samples
     correct = 0
     false_accepts = 0
@@ -131,8 +142,11 @@ def calculate_metrics(
     misidentified_known = 0
     for label, decision in zip(expected, decisions, strict=True):
         predicted_name = decision_name(decision)
-        if label == FOREIGN_LABEL:
-            if predicted_name is None:
+        # Отказом считается и молчание модели, и явное «не кот»: для дверцы это
+        # одно и то же решение — имени не присваивать.
+        rejected = predicted_name is None or predicted_name in REJECT_LABELS
+        if label in REJECT_LABELS:
+            if rejected:
                 correct += 1
             else:
                 false_accepts += 1
@@ -141,7 +155,9 @@ def calculate_metrics(
             correct += 1
         else:
             false_rejects += 1
-            if predicted_name is not None:
+            # Назвать кота другим котом и не узнать его вовсе — разные ошибки:
+            # первая опаснее, потому что выглядит как уверенный ответ.
+            if not rejected:
                 misidentified_known += 1
     uncertain = decisions.count(UNCERTAIN)
     no_prediction = decisions.count(NO_PREDICTION)
