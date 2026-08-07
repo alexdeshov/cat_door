@@ -88,7 +88,11 @@ systemctl enable catdoor-gate-sync.service catdoor-gate-sync.path \
 # через неделю на него перестали бы смотреть — вместе с настоящими отказами.
 ARCHIVE_DIR=${CATDOOR_ARCHIVE_DIR:-/srv/archive}
 if mountpoint -q "$ARCHIVE_DIR" 2>/dev/null; then
-    systemctl enable catdoor-backup.timer >/dev/null
+    # `--now` здесь в отличие от служб: `enable` ставит таймер в очередь только
+    # на следующую загрузку, и без запуска первая копия ждала бы перезагрузки.
+    # Запуск таймера ничего не прерывает — в отличие от перезапуска recorder
+    # посреди прохода, ради которого службы тут и не стартуют.
+    systemctl enable --now catdoor-backup.timer >/dev/null
     echo "резервное копирование включено, архив: $ARCHIVE_DIR"
 else
     echo "резервное копирование не включено: $ARCHIVE_DIR не смонтирован"
