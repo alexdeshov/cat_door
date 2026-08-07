@@ -22,7 +22,7 @@
     <div class="readout">
       <span class="readout-key">запись</span>
       <span class="readout-value">
-        {{ "только события" if circuits.gate_recording == "events" else "круглосуточно" }}
+        {{ recording_titles.get(circuits.gate_recording, circuits.gate_recording) }}
       </span>
     </div>
     <div class="readout">
@@ -158,15 +158,26 @@
         aria-pressed="{{ 'true' if circuits.gate_recording == 'events' else 'false' }}">
         только события
       </button>
+      <button type="button" class="recording-choice" data-recording="motion"
+        aria-pressed="{{ 'true' if circuits.gate_recording == 'motion' else 'false' }}">
+        по движению, неделю
+      </button>
       <button type="button" class="recording-choice" data-recording="continuous"
         aria-pressed="{{ 'true' if circuits.gate_recording == 'continuous' else 'false' }}">
         круглосуточно
       </button>
     </div>
     <p class="muted" style="font-size: 13px">
-      Круглосуточная запись заполняет диск предсказуемо и быстро. Для сбора
-      библиотеки лиц и оценки точности достаточно клипов вокруг событий,
-      поэтому по умолчанию выбраны они.
+      Круглосуточная запись заполняет диск предсказуемо и быстро. Режим «по
+      движению» хранит семь суток и пропускает пустой двор, поэтому обходится
+      заметно дешевле при том же сроке.
+    </p>
+    <p class="muted" style="font-size: 13px">
+      Режим влияет и на предпросмотр в интерфейсе Frigate: превью за час, не
+      перекрытый ни одной сохранённой записью, его уборщик удаляет. В режиме
+      «только события» это значит «Предпросмотр не найден» почти на каждом
+      разборе — записи там живут лишь вокруг событий, а превью покрывает целый
+      час.
     </p>
     <span id="recording-status" class="muted data" style="font-size: 12px"></span>
   </div>

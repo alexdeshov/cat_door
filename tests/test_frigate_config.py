@@ -138,6 +138,37 @@ def test_continuous_recording_follows_the_node_setting() -> None:
     assert parsed["record"]["continuous"]["days"] == 1
 
 
+def test_motion_recording_keeps_a_week_and_thus_keeps_previews() -> None:
+    """Режим «по движению» держит сегменты неделю — и вместе с ними превью.
+
+    Превью в интерфейсе Frigate живут по правилам записей: превью за час, не
+    перекрытый ни одной сохранённой записью, уборщик сносит вместе со строкой в
+    базе. Пока оба срока были нулевыми, разбор события отвечал «Предпросмотр не
+    найден» почти всегда, и чинить это в самом Frigate было нечем.
+    """
+    inventory = registry(camera("yard", "nvr"))
+    circuits = NodeCircuits(cats=False, nvr=True, gate_recording="motion")
+
+    parsed = yaml.safe_load(build_config(inventory, circuits))
+
+    assert parsed["record"]["motion"]["days"] == 7
+    assert parsed["record"]["continuous"]["days"] == 0
+    # Камера наследует тот же режим: Frigate берёт настройку записи с уровня
+    # камеры, если она там есть, и разъехавшиеся уровни дали бы разное
+    # поведение у разных камер одного контура.
+    assert parsed["cameras"]["yard"]["record"]["motion"]["days"] == 7
+
+
+def test_events_recording_keeps_nothing_beyond_events() -> None:
+    inventory = registry(camera("yard", "nvr"))
+    circuits = NodeCircuits(cats=False, nvr=True, gate_recording="events")
+
+    parsed = yaml.safe_load(build_config(inventory, circuits))
+
+    assert parsed["record"]["continuous"]["days"] == 0
+    assert parsed["record"]["motion"]["days"] == 0
+
+
 def test_foreign_sections_survive_a_rebuild() -> None:
     """Настройки, включённые в самом Frigate, переживают пересборку из инвентаря.
 
