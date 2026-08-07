@@ -49,7 +49,7 @@
         Механика не управляется
       </span>
       <span id="system-stats" class="chip" hidden></span>
-      <button id="preview-toggle" type="button" hidden aria-pressed="false">Показать превью</button>
+      <button id="preview-toggle" type="button" hidden aria-pressed="true">Скрыть превью</button>
       <button id="theme-toggle" type="button" aria-label="Переключить тему">Тема</button>
     </div>
   </div>
@@ -121,13 +121,39 @@
     if (document.visibilityState === "visible") liveStreams().forEach(reopenLiveStream);
   });
 
-  // Превью по умолчанию выключены и включаются кнопкой в шапке. Причина не
-  // косметическая: каждая живая картинка — это отдельный ffmpeg на сервере,
-  // 10–35% ядра, и открытая «на всякий случай» админка съедала заметную долю
-  // узла. Картинка без src соединение не открывает, а снятие src обрывает
-  // multipart-ответ — сервер убивает свой ffmpeg сам.
+  // Превью показываются сразу, а кнопка в шапке их прячет. Прежде было
+  // наоборот: каждая живая картинка — отдельный ffmpeg, 10–35% ядра, и на
+  // двухъядерном узле открытая «на всякий случай» админка съедала заметную его
+  // долю. На нынешнем железе этот запас есть, а админка без картинок заставляла
+  // жать кнопку при каждом заходе.
+  //
+  // Механика осталась прежней: адрес потока лежит в data-атрибуте, картинка без
+  // src соединение не открывает, а снятие src обрывает multipart-ответ — сервер
+  // убивает свой ffmpeg сам. Поэтому выключение по-прежнему бесплатно для узла.
+  //
+  // Выбор запоминается: иначе «скрыть» жило бы до первого перехода по вкладкам
+  // и кнопка ничего не решала бы. Приватный режим браузера может запретить
+  // localStorage — тогда просто работает умолчание.
+  const PREVIEWS_STORAGE_KEY = "catdoor.previews";
   const previewToggle = document.querySelector("#preview-toggle");
-  let previewsOn = false;
+
+  function storedPreviewChoice() {
+    try {
+      return localStorage.getItem(PREVIEWS_STORAGE_KEY);
+    } catch (error) {
+      return null;
+    }
+  }
+
+  function rememberPreviewChoice(on) {
+    try {
+      localStorage.setItem(PREVIEWS_STORAGE_KEY, on ? "on" : "off");
+    } catch (error) {
+      // Хранилище недоступно — выбор живёт до перехода на другую страницу.
+    }
+  }
+
+  let previewsOn = storedPreviewChoice() !== "off";
 
   function applyPreviewState() {
     document.body.classList.toggle("previews-on", previewsOn);
@@ -186,6 +212,7 @@
     });
     previewToggle.addEventListener("click", () => {
       previewsOn = !previewsOn;
+      rememberPreviewChoice(previewsOn);
       applyPreviewState();
     });
     applyPreviewState();
