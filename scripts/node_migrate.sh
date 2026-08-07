@@ -16,12 +16,20 @@
 #      имена интерфейсов и адреса на новом железе другие.
 #
 # Что едет в архив:
-#   по местам: база и видео проходов (вся разметка), инвентарь камер и прочие
-#     runtime-файлы, /etc/catdoor/catdoor.env, /opt/gate_access;
+#   по местам: база и видео проходов (вся разметка), наборы для обучения,
+#     инвентарь камер и прочие runtime-файлы, /etc/catdoor/catdoor.env,
+#     /opt/gate_access, а также состояние контура калитки целиком —
+#     /var/lib/frigate (библиотека лиц, frigate.db, записи) и /etc/frigate;
 #   в staged: netplan, dnsmasq (включая аренды камер), chrony, ~/.ssh,
 #     снимок правил ufw.
-#   не едет (пересоздаётся само): кольцевой буфер, exports, .venv,
-#     конфигурация Frigate (её пересобирает примиритель из инвентаря).
+#   не едет (пересоздаётся само): кольцевой буфер, .venv, каталог тестового
+#     запуска. Файл конфигурации Frigate приезжает, но его в любом случае
+#     пересобирает примиритель из инвентаря камер.
+#
+# Данные Frigate едут, а не пересоздаются: библиотека лиц и обученная модель
+# распознавания — та же накопленная разметка, что и проходы котов, и повторить
+# её нечем. Ради согласованного снимка frigate.db контейнер останавливается на
+# время сборки, а примиритель придерживается, чтобы не поднял его посреди tar.
 #
 # Обе стороны спросят пароль sudo — это ожидаемо. Скрипты фаз передаются
 # файлами, а не через stdin: sudo читает пароль с терминала, и занимать stdin
@@ -82,21 +90,59 @@ home=$(getent passwd "${SUDO_USER:-root}" | cut -d: -f6)
 cp -a "$home/.ssh" "$staged/ssh" 2>/dev/null || true
 ufw status verbose > "$staged/ufw-status.txt" 2>/dev/null || true
 
-# База копируется без пишущих служб: остановка на время tar — цена
+# Базы копируются без пишущих служб: остановка на время tar — цена
 # согласованного снимка. Дальше службы возвращаются, узел живёт как жил.
+#
+# Примиритель придерживается отдельно: он следит за состоянием контуров и
+# поднял бы Frigate обратно посреди сборки, а снимок frigate.db на живом
+# контейнере — это база с недописанным WAL.
+gate_units=""
+for unit in catdoor-gate-sync.path catdoor-gate-sync.timer; do
+    if systemctl is-active --quiet "$unit"; then
+        gate_units="$gate_units $unit"
+    fi
+done
+frigate_was_up=no
+if systemctl is-active --quiet frigate; then
+    frigate_was_up=yes
+fi
+
+restore() {
+    systemctl start catdoor-recorder catdoor-web
+    if [ "$frigate_was_up" = yes ]; then
+        systemctl start frigate
+    fi
+    if [ -n "$gate_units" ]; then
+        systemctl start $gate_units
+    fi
+}
+trap restore EXIT
+
+if [ -n "$gate_units" ]; then
+    systemctl stop $gate_units
+fi
+if [ "$frigate_was_up" = yes ]; then
+    systemctl stop frigate
+fi
 systemctl stop catdoor-recorder catdoor-web
-trap 'systemctl start catdoor-recorder catdoor-web' EXIT
+
+# Пути перечисляются по одному и только существующие: контур калитки на узле
+# может быть не развёрнут вовсе, а tar на отсутствующем пути валит всю сборку.
+set -- /etc/catdoor/catdoor.env
+for path in /var/lib/catdoor/catdoor.sqlite3 /var/lib/catdoor/catdoor.sqlite3-wal \
+            /var/lib/catdoor/catdoor.sqlite3-shm /var/lib/catdoor/events \
+            /var/lib/catdoor/runtime /var/lib/catdoor/training \
+            /var/lib/catdoor/exports /var/lib/catdoor/evaluations \
+            /opt/gate_access /etc/frigate /var/lib/frigate; do
+    if [ -e "$path" ]; then
+        set -- "$@" "$path"
+    fi
+done
 
 tar czf /tmp/catdoor-migrate.tar.gz \
     --exclude=/var/lib/catdoor/runtime/ring \
-    --exclude=/var/lib/catdoor/exports \
     --exclude=/var/lib/catdoor/test-runtime \
-    --exclude=/var/lib/catdoor/training \
-    /etc/catdoor/catdoor.env \
-    /var/lib/catdoor/catdoor.sqlite3* \
-    /var/lib/catdoor/events \
-    /var/lib/catdoor/runtime \
-    /opt/gate_access \
+    "$@" \
     "$staged"
 
 chown "${SUDO_USER:-root}" /tmp/catdoor-migrate.tar.gz
@@ -119,17 +165,30 @@ chmod 750 /var/lib/catdoor
 chown root:catdoor /etc/catdoor/catdoor.env
 chmod 640 /etc/catdoor/catdoor.env
 
+# Состояние Frigate остаётся за root: контейнер работает от него, а в /etc
+# лежит файл с паролем камер.
+if [ -d /var/lib/frigate ]; then
+    chown -R root:root /var/lib/frigate
+fi
+if [ -d /etc/frigate ]; then
+    chown -R root:root /etc/frigate
+    chmod 750 /etc/frigate
+    chmod 640 /etc/frigate/frigate.env 2>/dev/null || true
+fi
+
 rm -rf /root/catdoor-migrate-staged
 mv /tmp/catdoor-migrate-staged /root/catdoor-migrate-staged
 rm -f /tmp/catdoor-migrate.tar.gz /tmp/catdoor-phase.sh
 
 echo
 echo "Данные разложены. Дальше по docs/deployment-ubuntu.md, раздел «Переезд»:"
-echo "  1. git clone обоих репозиториев, .venv, sudo ./install/install.sh"
-echo "  2. /root/catdoor-migrate-staged — netplan/dnsmasq/chrony/ssh/ufw:"
+echo "  1. git clone cat_door, .venv, sudo ./install/install.sh"
+echo "  2. Docker и юнит frigate.service — /var/lib/frigate и /etc/frigate уже"
+echo "     на местах, автозапуск Frigate не включать: контур включает админка"
+echo "  3. /root/catdoor-migrate-staged — netplan/dnsmasq/chrony/ssh/ufw:"
 echo "     просмотреть, поправить имена интерфейсов, применить руками"
-echo "  3. systemctl start catdoor-recorder catdoor-web"
-echo "  4. Проверка перезагрузкой — как требует дока"
+echo "  4. systemctl start catdoor-recorder catdoor-web"
+echo "  5. Проверка перезагрузкой — как требует дока"
 NEWSCRIPT
 
 echo "== Старый узел: сбор архива (службы записи остановятся на время сборки) =="
@@ -147,8 +206,14 @@ free=$(ssh -o BatchMode=yes "$NEW" 'df -m /var/lib 2>/dev/null | awk "NR==2 {pri
 echo "архив $(( size / 1024 / 1024 )) МБ, на новом узле свободно ${free} МБ"
 
 echo "== Перевозка через эту машину =="
-scp -q "$OLD:$ARCHIVE" "$workdir/"
-scp -q "$workdir/catdoor-migrate.tar.gz" "$NEW:/tmp/"
+# Архив идёт трубой, а не через диск этой машины: видео проходов — десятки
+# гигабайт, и складывать их на ноутбук ради пересылки незачем. Узлы по-прежнему
+# друг про друга не знают, весь трафик идёт через отсюда открытые соединения.
+ssh -o BatchMode=yes "$OLD" "cat $ARCHIVE" \
+    | ssh -o BatchMode=yes "$NEW" "cat > /tmp/catdoor-migrate.tar.gz"
+new_size=$(ssh -o BatchMode=yes "$NEW" 'stat -c %s /tmp/catdoor-migrate.tar.gz')
+[ "$new_size" = "$size" ] \
+    || fail "архив доехал не целиком: было $size байт, стало $new_size"
 ssh -o BatchMode=yes "$OLD" "rm -f $ARCHIVE"
 
 echo "== Новый узел: раскладка =="
