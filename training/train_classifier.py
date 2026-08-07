@@ -4,6 +4,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from src.common.metrics import FOREIGN_LABEL
 from src.inference.preprocessing import (
     IDENTITY_NORMALIZATION_MEAN,
     IDENTITY_NORMALIZATION_STD,
@@ -105,7 +106,10 @@ def train(
     from torch.utils.data import DataLoader, Dataset
 
     items = [item for item in load_manifest(manifest_path) if item.view == view]
-    labels = sorted({item.label for item in items if item.label != "__foreign__"})
+    # `__foreign__` не обучается — чужих котов всего горстка, и они нужны для
+    # честной open-set проверки. `__nocat__` обучается наравне с котами: это
+    # полноценный класс с собственным видом, и ради него всё и затевалось.
+    labels = sorted({item.label for item in items if item.label != FOREIGN_LABEL})
     label_to_index = {label: index for index, label in enumerate(labels)}
     if len(labels) < 2:
         raise ValueError("training requires at least two known cat labels")

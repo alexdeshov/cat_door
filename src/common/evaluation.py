@@ -11,6 +11,7 @@ import numpy as np
 from src.common.detection_config import CameraDetectionConfig
 from src.common.metrics import (
     FOREIGN_LABEL,
+    NOCAT_LABEL,
     AggregatedPrediction,
     ScoredPrediction,
     aggregate_frame_predictions,
@@ -61,6 +62,8 @@ class EvaluatedEvent:
             return self.cat_name
         if self.label == "foreign_cat":
             return FOREIGN_LABEL
+        if self.label == "not_visible":
+            return NOCAT_LABEL
         return None
 
     @property

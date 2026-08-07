@@ -24,6 +24,8 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
+from src.common.metrics import REJECT_LABELS
+
 VIEWS = ("face", "side")
 DEFAULT_ROOT = Path.home() / "CatDoorTraining"
 DEFAULT_ADMIN = "http://192.168.2.137:8080"
@@ -108,7 +110,11 @@ def usable_for_production(report: dict[str, object]) -> bool:
     per_label = report.get("events_per_label")
     if not isinstance(per_label, dict):
         return False
-    home = {name: count for name, count in per_label.items() if name != "__foreign__"}
+    home = {
+        name: count
+        for name, count in per_label.items()
+        if name not in REJECT_LABELS
+    }
     return len(home) >= MIN_CATS and all(count >= MIN_EVENTS_PER_CAT for count in home.values())
 
 
