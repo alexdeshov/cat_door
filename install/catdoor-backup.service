@@ -1,0 +1,24 @@
+[Unit]
+Description=CatDoor — резервная копия проходов и записей на внешний диск
+Documentation=https://github.com/alexdeshov/cat_door/blob/main/docs/deployment-ubuntu.md
+# Внешний диск смонтирован с `nofail` и может отсутствовать. Ждать его здесь
+# нечем — скрипт сам проверяет точку монтирования и выходит без ошибки, если
+# копировать некуда.
+After=srv-archive.mount
+
+[Service]
+# От root: каталог данных принадлежит служебному пользователю с режимом 750, а
+# состояние Frigate — вовсе root.
+Type=oneshot
+ExecStart=/opt/catdoor/scripts/backup_to_archive.sh
+# Копия видео на внешний диск идёт долго и не должна мешать записи проходов:
+# узел в это время продолжает работать, и вытеснить recorder с процессора или
+# из очереди диска — цена, которой резервное копирование не стоит.
+Nice=10
+IOSchedulingClass=idle
+# Первая копия переносит десяток гигабайт по USB; дальше идут только различия,
+# но запас нужен именно на первый прогон.
+TimeoutStartSec=10800
+
+[Install]
+WantedBy=multi-user.target

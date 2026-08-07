@@ -1,0 +1,16 @@
+[Unit]
+Description=CatDoor — ежедневная резервная копия на внешний диск
+Documentation=https://github.com/alexdeshov/cat_door/blob/main/docs/deployment-ubuntu.md
+
+[Timer]
+# Половина шестого утра: коты ходят ночью и под утро, к этому часу поток
+# проходов стихает, а копия успевает закончиться до дневной активности.
+OnCalendar=*-*-* 05:30:00
+# Узел выключали или он перезагружался в пять утра — копия не пропускается, а
+# делается при ближайшей возможности. Без этого редкая ночная перезагрузка
+# незаметно съедала бы целые сутки архива.
+Persistent=true
+RandomizedDelaySec=600
+
+[Install]
+WantedBy=timers.target
