@@ -78,7 +78,39 @@ def frigate_cameras(registry: CameraRegistry, circuits: NodeCircuits) -> list[Ca
     ]
 
 
-def _camera_block(camera: CameraRecord, continuous_days: int) -> str:
+# Сколько суток хранить записи в каждом режиме: (непрерывно, по движению).
+#
+# Превью в интерфейсе Frigate живут по тем же правилам, что и записи: превью за
+# час, который не перекрывается ни одной сохранённой записью, уборщик сносит
+# вместе со строкой в базе. При обоих нулях — режим «только события» — это
+# значит, что почти все превью исчезают через час после создания, и на странице
+# разбора вместо кадра появляется «Предпросмотр не найден».
+#
+# Отсюда режим «по движению»: он держит сегменты с движением неделю, и превью
+# за эти часы выживают. Пустой ночной двор при этом места не занимает.
+RECORDING_RETENTION: dict[str, tuple[int, int]] = {
+    "events": (0, 0),
+    "motion": (0, 7),
+    "continuous": (1, 0),
+}
+
+
+def _retention(mode: str) -> tuple[int, int]:
+    return RECORDING_RETENTION.get(mode, RECORDING_RETENTION["events"])
+
+
+def _record_block(indent: str, continuous_days: int, motion_days: int) -> list[str]:
+    return [
+        f"{indent}record:",
+        f"{indent}  enabled: true",
+        f"{indent}  continuous:",
+        f"{indent}    days: {continuous_days}",
+        f"{indent}  motion:",
+        f"{indent}    days: {motion_days}",
+    ]
+
+
+def _camera_block(camera: CameraRecord, continuous_days: int, motion_days: int) -> str:
     prefix = _env_prefix(camera)
     name = frigate_camera_name(camera.id)
     address = f"{{{prefix}_USER}}:{{{prefix}_PASSWORD}}@{{{prefix}_HOST}}:{camera.port}"
@@ -116,10 +148,7 @@ def _camera_block(camera: CameraRecord, continuous_days: int) -> str:
         "    objects:",
         "      track:",
         tracked,
-        "    record:",
-        "      enabled: true",
-        "      continuous:",
-        f"        days: {continuous_days}",
+        *_record_block("    ", continuous_days, motion_days),
     ]
     return "\n".join(lines)
 
@@ -176,7 +205,7 @@ def build_config(
 ) -> str:
     """Текст `config.yml`. Без камер — валидный конфиг без единой камеры."""
     cameras = frigate_cameras(registry, circuits)
-    continuous_days = 1 if circuits.gate_recording == "continuous" else 0
+    continuous_days, motion_days = _retention(circuits.gate_recording)
     header = [
         "# Собран автоматически из инвентаря камер CatDoor. Правки руками",
         "# перетрёт примиритель: меняйте камеры на вкладке «Камеры» в админке.",
@@ -199,10 +228,7 @@ def build_config(
         "  path: /openvino-model/ssdlite_mobilenet_v2.xml",
         "  labelmap_path: /openvino-model/coco_91cl_bkgr.txt",
         "",
-        "record:",
-        "  enabled: true",
-        "  continuous:",
-        f"    days: {continuous_days}",
+        *_record_block("", continuous_days, motion_days),
         "  alerts:",
         "    retain:",
         "      days: 14",
@@ -226,7 +252,9 @@ def build_config(
             "",
         ]
         return "\n".join([*header, *tail])
-    blocks = [_camera_block(camera, continuous_days) for camera in cameras]
+    blocks = [
+        _camera_block(camera, continuous_days, motion_days) for camera in cameras
+    ]
     return "\n".join([*header, "cameras:", *blocks, "", *tail])
 
 

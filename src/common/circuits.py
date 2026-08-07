@@ -26,12 +26,21 @@ from pydantic import BaseModel
 from src.common.durable_write import write_text_durably
 
 CircuitName = Literal["cats", "gate", "nvr"]
-GateRecording = Literal["events", "continuous"]
+GateRecording = Literal["events", "motion", "continuous"]
 
 CIRCUIT_TITLES: dict[CircuitName, str] = {
     "cats": "Дверца",
     "gate": "Калитка 1",
     "nvr": "Регистратор",
+}
+
+# Названия режимов записи — в одном месте, потому что их показывают и в шапке
+# вкладки, и на переключателе. Разъехавшись, они врут в самом неприятном виде:
+# шапка утверждает одно, кнопка — другое.
+RECORDING_TITLES: dict[GateRecording, str] = {
+    "events": "только события",
+    "motion": "по движению, неделю",
+    "continuous": "круглосуточно",
 }
 
 # Контуров три, а движка два. Калитка и регистратор — это один и тот же

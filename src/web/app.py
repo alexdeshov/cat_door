@@ -61,6 +61,7 @@ from src.common.capture_mode import (
 )
 from src.common.circuits import (
     CIRCUIT_TITLES,
+    RECORDING_TITLES,
     CircuitConflict,
     CircuitName,
     GateRecording,
@@ -510,6 +511,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.cpu_sample = read_cpu_sample()
     templates.env.globals["asset_version"] = asset_version
     templates.env.globals["circuit_titles"] = CIRCUIT_TITLES
+    templates.env.globals["recording_titles"] = RECORDING_TITLES
     # Пояс читается один раз на сборку приложения: он меняется правкой
     # конфигурации, то есть с перезапуском службы, а разбор имени зоны на
     # каждый проход в списке был бы работой впустую.
