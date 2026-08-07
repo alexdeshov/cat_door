@@ -1922,12 +1922,16 @@ def test_gate_tab_shows_its_cameras(runtime_path: Path, monkeypatch) -> None:
     assert "На калитке" in page.text
 
 
-def test_previews_start_hidden_until_the_header_button(runtime_path: Path, monkeypatch) -> None:
-    """Страница не открывает ни одного живого потока сама.
+def test_previews_are_on_by_default_and_the_header_button_hides_them(
+    runtime_path: Path, monkeypatch
+) -> None:
+    """Превью показываются сразу, а кнопка в шапке их прячет.
 
-    Каждая живая картинка — отдельный ffmpeg на сервере, 10–35% ядра. Адрес
-    потока лежит в data-атрибуте: картинка без src соединение не открывает,
-    и открытая «на всякий случай» админка ничего не стоит узлу.
+    Умолчание перевернулось вместе с переездом на узел, которому живые картинки
+    по карману. Разметка при этом не изменилась: адрес потока по-прежнему лежит
+    в data-атрибуте, а `src` проставляет скрипт. Иначе браузер открывал бы
+    потоки ещё до того, как страница решит, показывать их или нет, и выключение
+    перестало бы быть бесплатным для узла.
     """
     client = make_client(runtime_path, monkeypatch, side=True)
 
@@ -1935,7 +1939,10 @@ def test_previews_start_hidden_until_the_header_button(runtime_path: Path, monke
         html = client.get(page).text
         assert ' src="/stream/' not in html, page
         assert 'data-stream-src="/stream/' in html, page
-        assert 'id="preview-toggle"' in html, page
+        assert (
+            '<button id="preview-toggle" type="button" hidden aria-pressed="true">'
+            "Скрыть превью</button>"
+        ) in html, page
 
 
 def test_nvr_tab_links_to_frigate(runtime_path: Path, monkeypatch) -> None:
