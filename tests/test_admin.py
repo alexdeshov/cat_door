@@ -16,7 +16,13 @@ from src.recorder.status import write_recorder_status
 from src.web.app import create_app
 
 
-def make_client(runtime_path: Path, monkeypatch, *, side: bool = False) -> TestClient:
+def make_client(
+    runtime_path: Path,
+    monkeypatch,
+    *,
+    side: bool = False,
+    timezone: str = "Europe/Moscow",
+) -> TestClient:
     def fake_record(
         ffmpeg_path: str,
         rtsp_url: str,
@@ -56,6 +62,7 @@ def make_client(runtime_path: Path, monkeypatch, *, side: bool = False) -> TestC
         data_dir=runtime_path,
         database_path=runtime_path / "test.sqlite3",
         preview_silence_limit_seconds=10.0,
+        display_timezone=timezone,
     )
     return TestClient(create_app(settings))
 
@@ -1971,3 +1978,55 @@ def test_system_stats_endpoint_and_header_widget(runtime_path: Path, monkeypatch
 
     page = client.get("/")
     assert 'id="system-stats"' in page.text
+
+
+def test_pass_time_is_shown_in_the_local_timezone(runtime_path: Path, monkeypatch) -> None:
+    """Проход показывается по местным часам, а в базе остаётся UTC.
+
+    Recorder пишет метку в UTC, sqlite отдаёт её без зоны, и напечатанная как
+    есть она отставала бы от часов у дверцы на разницу поясов — под Москвой на
+    три часа, да ещё и с прошлой датой у ночного прохода.
+    """
+    client = make_client(runtime_path, monkeypatch)
+    factory = client.app.state.session_factory
+    with factory() as session:
+        session.add(
+            Event(
+                created_at=datetime(2026, 8, 6, 21, 30, 5, tzinfo=UTC),
+                status="ready",
+                duration_seconds=5,
+                media_path="events/00000001/face.mp4",
+            )
+        )
+        session.commit()
+
+    page = client.get("/")
+
+    assert '<span class="pass-time">00:30:05</span>' in page.text
+    assert "<span>07.08</span>" in page.text
+    with factory() as session:
+        stored = session.get(Event, 1)
+        assert stored is not None
+        assert stored.created_at.replace(tzinfo=UTC) == datetime(
+            2026, 8, 6, 21, 30, 5, tzinfo=UTC
+        )
+
+
+def test_display_timezone_setting_moves_the_shown_time(runtime_path: Path, monkeypatch) -> None:
+    """Пояс задаётся конфигурацией: узел может стоять не в Москве."""
+    client = make_client(runtime_path, monkeypatch, timezone="Asia/Novosibirsk")
+    factory = client.app.state.session_factory
+    with factory() as session:
+        session.add(
+            Event(
+                created_at=datetime(2026, 8, 6, 21, 30, 5, tzinfo=UTC),
+                status="ready",
+                duration_seconds=5,
+                media_path="events/00000001/face.mp4",
+            )
+        )
+        session.commit()
+
+    page = client.get("/")
+
+    assert '<span class="pass-time">04:30:05</span>' in page.text

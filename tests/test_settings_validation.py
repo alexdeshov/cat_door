@@ -90,3 +90,9 @@ def test_environment_cameras_are_only_a_seed() -> None:
 def test_camera_id_must_survive_a_url_path_segment() -> None:
     with pytest.raises(ValidationError):
         Settings(cameras=[{"id": "../etc", "rtsp": "rtsp://x"}])
+
+
+def test_unknown_display_timezone_is_rejected() -> None:
+    """Опечатка в поясе иначе всплыла бы отрисовкой страницы, а не запуском."""
+    with pytest.raises(ValidationError, match="часовой пояс"):
+        Settings(display_timezone="Europe/Mosow")

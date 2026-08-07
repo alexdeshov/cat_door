@@ -8,7 +8,7 @@
   <a href="/metrics" style="margin-left: auto">Все метрики</a>
 </div>
   <section class="panel padded">
-    <p>Статус: <strong>{{ run.status }}</strong> · создано {{ run.created_at }}</p>
+    <p>Статус: <strong>{{ run.status }}</strong> · создано {{ run.created_at | local_time }}</p>
     {% if run.error_message %}<p class="bad">{{ run.error_message }}</p>{% endif %}
     <p class="muted">
       Detector:

@@ -193,8 +193,8 @@
       </div>
       <div class="pass-body">
         <div class="pass-head">
-          <span class="pass-time">{{ event.created_at.strftime("%H:%M:%S") }}</span>
-          <span>{{ event.created_at.strftime("%d.%m") }}</span>
+          <span class="pass-time">{{ event.created_at | local_time("%H:%M:%S") }}</span>
+          <span>{{ event.created_at | local_time("%d.%m") }}</span>
           <span>#{{ event.id }}</span>
           <span>{{ event.duration_seconds }} с</span>
           <span>{{ "детектор" if event.trigger_source == "automatic" else "вручную" }}</span>
