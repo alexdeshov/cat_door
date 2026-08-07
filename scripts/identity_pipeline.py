@@ -26,8 +26,8 @@ from pathlib import Path
 
 VIEWS = ("face", "side")
 DEFAULT_ROOT = Path.home() / "CatDoorTraining"
-DEFAULT_ADMIN = "http://192.168.2.152:8080"
-DEFAULT_NODE = "alex@192.168.2.152"
+DEFAULT_ADMIN = "http://192.168.2.137:8080"
+DEFAULT_NODE = "alex@192.168.2.137"
 NODE_MODELS_DIR = "/opt/catdoor/models"
 
 # Порог, ниже которого модель не считается пригодной даже для эксперимента.
@@ -112,8 +112,15 @@ def usable_for_production(report: dict[str, object]) -> bool:
     return len(home) >= MIN_CATS and all(count >= MIN_EVENTS_PER_CAT for count in home.values())
 
 
-def train(root: Path, dataset: Path, *, epochs: int, image_size: int) -> Path:
-    """Обучить оба ракурса и собрать пакет модели. Вернуть каталог релиза."""
+def train(
+    root: Path,
+    dataset: Path,
+    *,
+    epochs: int,
+    image_size: int,
+    views: Sequence[str],
+) -> Path:
+    """Обучить выбранные ракурсы и собрать пакет. Вернуть каталог релиза."""
     work = root / "work"
     work.mkdir(parents=True, exist_ok=True)
     split = work / "manifest.split.jsonl"
@@ -132,7 +139,7 @@ def train(root: Path, dataset: Path, *, epochs: int, image_size: int) -> Path:
     release.mkdir(parents=True)
 
     trained: list[str] = []
-    for view in VIEWS:
+    for view in views:
         checkpoint = work / f"{view}.pt"
         try:
             run(
@@ -295,6 +302,20 @@ def main() -> None:
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--image-size", type=int, default=160)
     parser.add_argument(
+        "--views",
+        nargs="+",
+        choices=VIEWS,
+        default=list(VIEWS),
+        metavar="РАКУРС",
+        help=(
+            "какие ракурсы обучать, принимать и ставить (по умолчанию оба). "
+            "Ракурсы независимы: у камеры подхода кот дальше, мельче и в "
+            "пятнистом свете, и её модель может не годиться, когда модель "
+            "дверцы уже хороша. Без этого выбора негодный ракурс валил приёмку "
+            "целиком и не давал поставить годный"
+        ),
+    )
+    parser.add_argument(
         "--allow-experimental",
         action="store_true",
         help=(
@@ -313,7 +334,13 @@ def main() -> None:
         describe(report)
 
         if args.stage in ("train", "all"):
-            train(args.root, dataset, epochs=args.epochs, image_size=args.image_size)
+            train(
+                args.root,
+                dataset,
+                epochs=args.epochs,
+                image_size=args.image_size,
+                views=args.views,
+            )
 
         if args.stage in ("install", "all"):
             if not usable_for_production(report) and not args.allow_experimental:
@@ -321,12 +348,12 @@ def main() -> None:
                     "набор меньше рекомендованного — модель не установлена. "
                     "Повторите с --allow-experimental, если это проверка конвейера"
                 )
-            if not acceptance_passed(args.root, VIEWS) and not args.allow_experimental:
+            if not acceptance_passed(args.root, args.views) and not args.allow_experimental:
                 raise PipelineError(
                     "приёмка на отложенных проходах не пройдена — модель не установлена. "
                     "Смотрите отчёты в reports/; --allow-experimental ставит вопреки этому"
                 )
-            install(args.root, args.node, views=VIEWS)
+            install(args.root, args.node, views=args.views)
     except PipelineError as error:
         print(f"\nОстановился: {error}", file=sys.stderr)
         raise SystemExit(1) from error
