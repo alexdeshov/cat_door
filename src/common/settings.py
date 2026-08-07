@@ -97,6 +97,11 @@ class Settings(BaseSettings):
     # Пароли камер: отдельный файл с отдельными правами, его же читает Docker
     # как env_file.
     gate_env_path: Path = Path("/etc/frigate/frigate.env")
+    # База и записи Frigate — только для чтения, ради глубины архива на вкладке
+    # регистратора. Записи могут лежать на отдельном томе: недельный архив по
+    # движению не помещается на системный диск, и его выносят на внешний.
+    gate_database_path: Path = Path("/var/lib/frigate/config/frigate.db")
+    gate_recordings_path: Path = Path("/var/lib/frigate/media/recordings")
     data_dir: Path = Path("data")
     database_path: Path | None = None
     ffmpeg_path: str = "ffmpeg"
