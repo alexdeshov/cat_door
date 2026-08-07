@@ -104,7 +104,17 @@ if [ -d "$FRIGATE/media/clips/faces" ]; then
     say "снимков лиц: $(find "$root/frigate/faces" -type f | wc -l)"
 fi
 
-if [ -d "$FRIGATE/media/recordings" ]; then
+# Записи могут уже лежать на этом же диске: неделя записи по движению не
+# помещается на внутренний том, и media Frigate переносят на архивный. Копия
+# внутри того же тома не защищает ни от чего и вдвое ускоряет его заполнение —
+# а заполнение архивного тома означает, что Frigate начнёт вытеснять свои же
+# записи раньше срока.
+recordings_source_device=$(stat -c %d "$FRIGATE/media/recordings" 2>/dev/null || echo x)
+archive_device=$(stat -c %d "$ARCHIVE" 2>/dev/null || echo y)
+
+if [ "$recordings_source_device" = "$archive_device" ]; then
+    say "записи Frigate уже на архивном диске — копировать некуда и незачем"
+elif [ -d "$FRIGATE/media/recordings" ]; then
     cutoff=$(date -d "$RECORDINGS_AGE_DAYS days ago" +%Y-%m-%d)
     copied=0
     # Frigate раскладывает записи как recordings/ГГГГ-ММ-ДД/ЧЧ/камера/*.mp4,
