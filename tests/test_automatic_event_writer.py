@@ -150,3 +150,71 @@ def test_persists_aggregated_online_prediction(
         assert prediction.origin == "online"
         assert prediction.decision == "known:Барсик"
         assert prediction.frames_used == 2
+
+
+def test_event_remembers_the_second_where_the_cat_was_seen(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    """Плеер открывает проход с кота, а не с предбуфера.
+
+    Нулевая секунда записи — начало первого сегмента кольцевого буфера, а не
+    начало события: отсчитывать смещение надо оттуда, иначе плеер промахнётся
+    на длину предбуфера.
+    """
+    make_segment(runtime_path / "runtime" / "ring" / "face" / "segment.mp4", 102.0)
+    make_segment(runtime_path / "runtime" / "ring" / "side" / "segment.mp4", 102.0)
+
+    def fake_concat(ffmpeg_path: str, segments: list[Path], destination: Path) -> None:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(b"combined")
+
+    monkeypatch.setattr("src.recorder.events.concatenate_segments", fake_concat)
+
+    event = persist_automatic_event(
+        runtime_path / "catdoor.sqlite3",
+        runtime_path,
+        "ffmpeg",
+        2,
+        AutomaticEventRequest(
+            started_at=100.0,
+            ended_at=103.2,
+            initiating_camera="face",
+            confidence_face=0.91,
+            confidence_side=0.65,
+            # сегмент дописан в 102.0 и длится две секунды, значит начался в
+            # 100.0 — кот в кадре через полторы секунды после этого
+            best_frame_at=101.5,
+        ),
+    )
+
+    assert event.preview_offset_seconds == 1.5
+
+
+def test_event_without_a_seen_cat_starts_from_the_beginning(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    make_segment(runtime_path / "runtime" / "ring" / "face" / "segment.mp4", 102.0)
+
+    def fake_concat(ffmpeg_path: str, segments: list[Path], destination: Path) -> None:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(b"combined")
+
+    monkeypatch.setattr("src.recorder.events.concatenate_segments", fake_concat)
+
+    event = persist_automatic_event(
+        runtime_path / "catdoor.sqlite3",
+        runtime_path,
+        "ffmpeg",
+        2,
+        AutomaticEventRequest(
+            started_at=100.0,
+            ended_at=103.2,
+            initiating_camera="face",
+            confidence_face=0.91,
+            confidence_side=0.0,
+        ),
+    )
+
+    assert event.preview_offset_seconds is None

@@ -33,6 +33,9 @@ class Event(Base):
     initiating_camera: Mapped[str | None] = mapped_column(String(10), nullable=True)
     detector_confidence_face: Mapped[float | None] = mapped_column(Float, nullable=True)
     detector_confidence_side: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Секунда записи, на которой детектор был увереннее всего в коте. Плеер
+    # открывает проход с неё; `None` — момент неизвестен, тогда с начала.
+    preview_offset_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
 class ModelVersion(Base):

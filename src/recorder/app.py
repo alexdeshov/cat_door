@@ -803,6 +803,7 @@ def monitor_automatic(
     # кадра записи, где кота ещё нет.
     active_best_frame: Any = None
     active_best_confidence = 0.0
+    active_best_at: float | None = None
     active_identity_scores: dict[str, list[ScoredPrediction]] = {
         "face": [],
         "side": [],
@@ -1077,6 +1078,7 @@ def monitor_automatic(
                 if confidence > active_best_confidence and annotated_frame is not None:
                     active_best_confidence = confidence
                     active_best_frame = annotated_frame
+                    active_best_at = time.time()
             if update.action is not None:
                 last_action = update.action.value
             if update.action is not None and update.action.value == "start":
@@ -1086,6 +1088,7 @@ def monitor_automatic(
                 # открывается по подтверждённой детекции, а не по таймеру.
                 active_best_confidence = confidence
                 active_best_frame = annotated_frame
+                active_best_at = time.time()
                 active_confidences = dict(confidences)
                 active_identity_scores = {"face": [], "side": []}
                 active_identity_timings = {"face": [], "side": []}
@@ -1122,6 +1125,7 @@ def monitor_automatic(
                     confidence_face=active_confidences["face"],
                     confidence_side=active_confidences["side"],
                     predictions=online_predictions,
+                    best_frame_at=active_best_at,
                 )
                 low_disk = bool(_disk_status(settings)["disk_low"])
                 if runtime_mode.record_events and low_disk:
@@ -1152,6 +1156,7 @@ def monitor_automatic(
                 active_initiating_camera = None
                 active_best_frame = None
                 active_best_confidence = 0.0
+                active_best_at = None
                 active_confidences = {"face": 0.0, "side": 0.0}
                 active_identity_scores = {"face": [], "side": []}
                 active_identity_timings = {"face": [], "side": []}
