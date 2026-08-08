@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import logging
 import subprocess
+import threading
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -10,8 +12,10 @@ from typing import BinaryIO, cast
 import numpy as np
 
 from src.inference.preprocessing import NormalizedRoi
-from src.recorder.ffmpeg import _base_input
+from src.recorder.ffmpeg import _base_input, _collect_stderr, mask_credentials
 from src.recorder.ring import prune_segments
+
+logger = logging.getLogger("catdoor.frames")
 
 # Размер кадра, в котором работает кошачий контур. Он же задаёт предел
 # детализации кропа для идентификации: кроп режется по рамке кота именно
@@ -58,6 +62,26 @@ def _scale_filter() -> str:
     )
 
 
+def _vaapi_filter(fps: float, rotate_180: bool) -> str:
+    """Тот же кадр 960×540, но уменьшенный медиадвижком.
+
+    В обычную память забирается уже уменьшенный кадр: `hwdownload` стоит тем
+    дороже, чем больше картинка. Поля добавляются после скачивания — на
+    960×540 это копейки, а `pad_vaapi` есть не во всякой сборке ffmpeg.
+    Поворот тоже после полей: они симметричные, картинка выходит та же, что и
+    на программном пути, поэтому превью и детектор видят одну ориентацию.
+    """
+    orientation = ",hflip,vflip" if rotate_180 else ""
+    return (
+        f"fps={fps},"
+        f"scale_vaapi={FRAME_WIDTH}:{FRAME_HEIGHT}:"
+        "force_original_aspect_ratio=decrease:force_divisible_by=2,"
+        "hwdownload,format=nv12,"
+        f"pad={FRAME_WIDTH}:{FRAME_HEIGHT}:(ow-iw)/2:(oh-ih)/2"
+        f"{orientation}"
+    )
+
+
 def _roi_filter(fps: float, roi: NormalizedRoi, rotate_180: bool) -> str:
     crop = (
         f"crop=iw*{roi.width:g}:ih*{roi.height:g}:"
@@ -73,27 +97,90 @@ def _roi_filter(fps: float, roi: NormalizedRoi, rotate_180: bool) -> str:
     )
 
 
-def rgb_frame_stream(
+# Состояние аппаратного декодирования на весь процесс. Отказ запирается
+# защёлкой: `_frame_worker` переподключается вечно, и без неё каждый цикл
+# тратил бы секунду на заведомо мёртвую попытку и строку в журнал.
+_hwaccel_lock = threading.Lock()
+_hwaccel_failed = False
+_hwaccel_confirmed = False
+_roi_notice_shown = False
+
+
+def active_hwaccel() -> str | None:
+    """Что декодирует кадры на самом деле, а не что попросили в настройках.
+
+    `vaapi` — хотя бы один поток отдал кадр через медиадвижок; `none` — попытка
+    была и не удалась, работает программный путь; `None` — ещё не известно.
+    """
+    with _hwaccel_lock:
+        if _hwaccel_failed:
+            return "none"
+        return "vaapi" if _hwaccel_confirmed else None
+
+
+def reset_hwaccel_state() -> None:
+    """Только для тестов: защёлка живёт на весь процесс."""
+    global _hwaccel_failed, _hwaccel_confirmed, _roi_notice_shown
+    with _hwaccel_lock:
+        _hwaccel_failed = False
+        _hwaccel_confirmed = False
+        _roi_notice_shown = False
+
+
+def _confirm_hwaccel() -> None:
+    global _hwaccel_confirmed
+    with _hwaccel_lock:
+        _hwaccel_confirmed = True
+
+
+def _disable_hwaccel(complaints: list[str]) -> None:
+    global _hwaccel_failed
+    with _hwaccel_lock:
+        already_known = _hwaccel_failed
+        _hwaccel_failed = True
+    if already_known:
+        return
+    reason = mask_credentials(" ".join(complaints).strip())
+    logger.warning(
+        "Аппаратное декодирование не дало ни одного кадра, перехожу на "
+        "программное до перезапуска службы: %s",
+        reason or "ffmpeg ничего не сообщил",
+    )
+
+
+def _hwaccel_device(vaapi_device: Path | None, roi: NormalizedRoi | None) -> Path | None:
+    global _roi_notice_shown
+    if vaapi_device is None:
+        return None
+    if roi is not None:
+        # Обрезку видеоядро в ffmpeg не умеет (`crop_vaapi` не существует), а
+        # скачивание кадра 4 Мп ради неё съело бы весь выигрыш. Оговорка раз на
+        # процесс: мёртвая камера переподключается раз в секунду.
+        with _hwaccel_lock:
+            already_shown, _roi_notice_shown = _roi_notice_shown, True
+        if not already_shown:
+            logger.info(
+                "Камера с областью интереса остаётся на программном "
+                "декодировании: обрезка кадра выполняется до масштабирования"
+            )
+        return None
+    with _hwaccel_lock:
+        return None if _hwaccel_failed else vaapi_device
+
+
+def _frame_command(
     ffmpeg_path: str,
     rtsp_url: str,
     fps: float,
     *,
-    segment_directory: Path | None = None,
-    segment_seconds: int = 2,
-    retention_seconds: int = 180,
-    roi: NormalizedRoi | None = None,
-    rotate_180: bool = True,
-    on_process: Callable[[subprocess.Popen[bytes]], None] | None = None,
-) -> Iterator[FrameSample]:
-    """Кадры с камеры. `on_process` отдаёт наружу сам процесс ffmpeg.
-
-    Отдавать его приходится потому, что чтение кадра блокирующее: если камера
-    пропала так, что TCP-сессия не закрылась, поток роли останется в `read`
-    навсегда, и разбудить его можно только со стороны — убив процесс. Кто
-    именно следит за застоем, здесь не решается.
-    """
+    segment_directory: Path | None,
+    segment_seconds: int,
+    roi: NormalizedRoi | None,
+    rotate_180: bool,
+    vaapi_device: Path | None,
+) -> list[str]:
     command = [
-        *_base_input(ffmpeg_path, rtsp_url),
+        *_base_input(ffmpeg_path, rtsp_url, vaapi_device=vaapi_device),
     ]
     if segment_directory is not None:
         segment_directory.mkdir(parents=True, exist_ok=True)
@@ -116,19 +203,12 @@ def rgb_frame_stream(
             ]
         )
     if roi is None:
-        command.extend(
-            [
-                "-map",
-                "0:v:0",
-                "-vf",
-                (
-                    f"fps={fps},{_scale_filter()}"
-                    f"{',hflip,vflip' if rotate_180 else ''}"
-                ),
-            ]
+        filters = (
+            _vaapi_filter(fps, rotate_180)
+            if vaapi_device is not None
+            else f"fps={fps},{_scale_filter()}{',hflip,vflip' if rotate_180 else ''}"
         )
-        frame_bytes = FRAME_BYTES
-        output_width = FRAME_WIDTH
+        command.extend(["-map", "0:v:0", "-vf", filters])
     else:
         command.extend(
             [
@@ -138,8 +218,6 @@ def rgb_frame_stream(
                 "[combined]",
             ]
         )
-        frame_bytes = FRAME_BYTES * 2
-        output_width = FRAME_WIDTH * 2
     command.extend(
         [
             "-an",
@@ -150,12 +228,40 @@ def rgb_frame_stream(
             "pipe:1",
         ]
     )
+    return command
+
+
+def _stream_once(
+    command: list[str],
+    *,
+    frame_bytes: int,
+    output_width: int,
+    roi: NormalizedRoi | None,
+    segment_directory: Path | None,
+    retention_seconds: int,
+    on_process: Callable[[subprocess.Popen[bytes]], None] | None,
+    hardware: bool,
+    complaints: list[str],
+    delivered: list[int],
+) -> Iterator[FrameSample]:
     process = subprocess.Popen(
         command,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
+        # Жалобы ffmpeg нужны только на аппаратной попытке — по ним человек
+        # поймёт, чего не хватило видеоядру. Читать их обязан отдельный поток:
+        # заполненный канал ошибок остановил бы ffmpeg навсегда.
+        stderr=subprocess.PIPE if hardware else subprocess.DEVNULL,
     )
+    drain: threading.Thread | None = None
+    if hardware:
+        drain = threading.Thread(
+            target=_collect_stderr,
+            args=(process.stderr, complaints),
+            daemon=True,
+            name="catdoor-frames-stderr",
+        )
+        drain.start()
     if on_process is not None:
         on_process(process)
     try:
@@ -170,6 +276,9 @@ def rgb_frame_stream(
             if segment_directory is not None and now - last_prune_at >= 5:
                 prune_segments(segment_directory, retention_seconds)
                 last_prune_at = now
+            delivered[0] += 1
+            if hardware and delivered[0] == 1:
+                _confirm_hwaccel()
             decoded = np.frombuffer(frame, dtype=np.uint8).reshape(
                 (FRAME_HEIGHT, output_width, 3)
             )
@@ -188,3 +297,64 @@ def rgb_frame_stream(
             process.wait(timeout=2)
         except subprocess.TimeoutExpired:
             process.kill()
+        if drain is not None:
+            drain.join(timeout=2)
+
+
+def rgb_frame_stream(
+    ffmpeg_path: str,
+    rtsp_url: str,
+    fps: float,
+    *,
+    segment_directory: Path | None = None,
+    segment_seconds: int = 2,
+    retention_seconds: int = 180,
+    roi: NormalizedRoi | None = None,
+    rotate_180: bool = True,
+    on_process: Callable[[subprocess.Popen[bytes]], None] | None = None,
+    vaapi_device: Path | None = None,
+) -> Iterator[FrameSample]:
+    """Кадры с камеры. `on_process` отдаёт наружу сам процесс ffmpeg.
+
+    Отдавать его приходится потому, что чтение кадра блокирующее: если камера
+    пропала так, что TCP-сессия не закрылась, поток роли останется в `read`
+    навсегда, и разбудить его можно только со стороны — убив процесс. Кто
+    именно следит за застоем, здесь не решается.
+
+    `vaapi_device` просит декодировать поток медиадвижком. Если попытка не дала
+    ни одного кадра, поток молча не теряется: команда пересобирается программной
+    и запускается заново, а аппаратный путь выключается до перезапуска службы.
+    """
+    device = _hwaccel_device(vaapi_device, roi)
+    frame_bytes = FRAME_BYTES if roi is None else FRAME_BYTES * 2
+    output_width = FRAME_WIDTH if roi is None else FRAME_WIDTH * 2
+    while True:
+        complaints: list[str] = []
+        delivered = [0]
+        yield from _stream_once(
+            _frame_command(
+                ffmpeg_path,
+                rtsp_url,
+                fps,
+                segment_directory=segment_directory,
+                segment_seconds=segment_seconds,
+                roi=roi,
+                rotate_180=rotate_180,
+                vaapi_device=device,
+            ),
+            frame_bytes=frame_bytes,
+            output_width=output_width,
+            roi=roi,
+            segment_directory=segment_directory,
+            retention_seconds=retention_seconds,
+            on_process=on_process,
+            hardware=device is not None,
+            complaints=complaints,
+            delivered=delivered,
+        )
+        if device is None or delivered[0]:
+            # Поток, отдавший хотя бы кадр, закончился по обычной причине —
+            # камера замолчала или её убили снаружи. Переподключение не здесь.
+            return
+        _disable_hwaccel(complaints)
+        device = None

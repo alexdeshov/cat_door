@@ -85,3 +85,73 @@ def test_export_candidate_writes_reproducible_manifest(
     assert manifest["input"]["shape"] == [1, 3, 416, 416]
     assert manifest["weights_sha256"] == expected
     assert manifest["sha256"] == hashlib.sha256(b"onnx").hexdigest()
+
+
+def test_yolo11_export_takes_its_input_size_from_the_manifest(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    """Вход 640 держится наравне с 416 ради кота в дальнем конце террасы."""
+    weights = runtime_path / "yolo11s.pt"
+    weights.write_bytes(b"candidate-weights")
+    expected = hashlib.sha256(b"candidate-weights").hexdigest()
+    output = runtime_path / "yolo11s-640.onnx"
+    requested: list[int] = []
+    monkeypatch.setattr(
+        "scripts.prepare_detector_candidate._export_yolo11",
+        lambda _weights, candidate_output, input_size: (
+            requested.append(input_size),
+            candidate_output.write_bytes(b"onnx"),
+        ),
+    )
+    monkeypatch.setattr(
+        "scripts.prepare_detector_candidate._onnx_contract",
+        lambda _path: ("images", ["output0"], [1, 3, 640, 640]),
+    )
+
+    result = export_candidate(
+        "yolo11s-640",
+        weights,
+        expected,
+        output,
+        python=Path("python"),
+        source_root=None,
+    )
+    manifest = json.loads(result.with_suffix(".json").read_text(encoding="utf-8"))
+
+    assert requested == [640]
+    assert manifest["architecture"] == "yolo11s"
+    assert manifest["input"]["shape"] == [1, 3, 640, 640]
+    assert manifest["license"] == "AGPL-3.0"
+
+
+def test_export_refuses_a_model_of_the_wrong_input_size(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    """Манифест описывает вход детектору: разойтись с ONNX он не имеет права."""
+    weights = runtime_path / "yolo11n.pt"
+    weights.write_bytes(b"candidate-weights")
+    expected = hashlib.sha256(b"candidate-weights").hexdigest()
+    output = runtime_path / "yolo11n-640.onnx"
+    monkeypatch.setattr(
+        "scripts.prepare_detector_candidate._export_yolo11",
+        lambda _weights, candidate_output, _size: candidate_output.write_bytes(b"onnx"),
+    )
+    monkeypatch.setattr(
+        "scripts.prepare_detector_candidate._onnx_contract",
+        lambda _path: ("images", ["output0"], [1, 3, 416, 416]),
+    )
+
+    with pytest.raises(RuntimeError, match="input shape"):
+        export_candidate(
+            "yolo11n-640",
+            weights,
+            expected,
+            output,
+            python=Path("python"),
+            source_root=None,
+        )
+
+    assert not output.exists()
+    assert not output.with_suffix(".json").exists()
