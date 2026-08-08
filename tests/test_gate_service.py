@@ -1,6 +1,11 @@
 from types import SimpleNamespace
 
-from src.common.gate_service import GateStatus, gate_status, set_gate_running
+from src.common.gate_service import (
+    GateStatus,
+    frigate_safe_mode,
+    gate_status,
+    set_gate_running,
+)
 
 
 def _fake_run(monkeypatch, answers: dict[tuple[str, ...], tuple[int, str]]) -> list[list[str]]:
@@ -107,3 +112,54 @@ def test_start_does_not_block_on_container_readiness(monkeypatch) -> None:
 
     assert set_gate_running("frigate.service", True) is None
     assert calls == [["systemctl", "start", "--no-block", "frigate.service"]]
+
+
+def test_frigate_without_cameras_is_not_reported_running(monkeypatch) -> None:
+    """Служба жива, а камер в ней нет — для systemd это здоровый контур.
+
+    2026-08-08 узел простоял так час: камера, названная цифрой, сделала
+    конфигурацию негодной, Frigate поднялся в safe mode, а пульт показывал
+    «работает».
+    """
+    monkeypatch.setattr("src.common.gate_service._run", lambda command: (0, "active"))
+    monkeypatch.setattr("src.common.gate_service.frigate_safe_mode", lambda url, **kw: True)
+
+    status = gate_status("frigate.service", "http://127.0.0.1:5000")
+
+    assert status.state == "degraded"
+    assert "камер нет" in status.detail
+    # Примирителю с ней делать нечего: беда в конфигурации, а не в запуске.
+    assert status.running is True
+
+
+def test_unreachable_frigate_does_not_invent_a_breakage(monkeypatch) -> None:
+    """Неизвестность и «всё сломано» — разные вещи."""
+    monkeypatch.setattr("src.common.gate_service._run", lambda command: (0, "active"))
+    monkeypatch.setattr("src.common.gate_service.frigate_safe_mode", lambda url, **kw: None)
+
+    assert gate_status("frigate.service", "http://127.0.0.1:5000").state == "running"
+
+
+def test_safe_mode_is_read_without_credentials(monkeypatch) -> None:
+    """Внутренний порт Frigate отвечает без пароля — тем и пользуемся."""
+    import io
+
+    class _Answer:
+        def __init__(self, body: bytes) -> None:
+            self._body = io.BytesIO(body)
+
+        def read(self) -> bytes:
+            return self._body.read()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+    monkeypatch.setattr(
+        "src.common.gate_service.urllib.request.urlopen",
+        lambda url, timeout: _Answer(b'{"safe_mode": true, "cameras": {}}'),
+    )
+
+    assert frigate_safe_mode("http://127.0.0.1:5000") is True

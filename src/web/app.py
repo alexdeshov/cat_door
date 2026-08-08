@@ -135,6 +135,7 @@ GATE_STATE_TITLES = {
     "failed": "отказ",
     "absent": "не развёрнут",
     "unknown": "состояние неизвестно",
+    "degraded": "работает без камер",
 }
 ACTIVE_EVALUATION_STATES = {"starting", "running"}
 ACTIVE_TRAINING_STATES = {"starting", "preparing", "training"}
@@ -574,7 +575,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         }
 
     def circuits_view(circuits: NodeCircuits) -> dict[str, object]:
-        status = gate_status(settings.gate_service_unit)
+        status = gate_status(settings.gate_service_unit, settings.gate_api_url)
         return {
             "gate_state": status.state,
             "gate_detail": status.detail,
@@ -606,7 +607,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         cached = getattr(app.state, "gate_status_cache", None)
         if cached is not None and now - cached[0] < GATE_STATUS_CACHE_SECONDS:
             return cached[1]
-        status = gate_status(settings.gate_service_unit)
+        status = gate_status(settings.gate_service_unit, settings.gate_api_url)
         app.state.gate_status_cache = (now, status)
         return status
 
@@ -636,6 +637,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 tone = {
                     "running": "beacon-ok",
                     "failed": "beacon-bad",
+                    "degraded": "beacon-bad",
                     "unknown": "beacon-bad",
                 }.get(status.state if status else "unknown", "")
             items.append(

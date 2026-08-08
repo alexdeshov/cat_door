@@ -1248,6 +1248,7 @@ def _notification_gate(settings: Settings) -> NotificationGate:
             _notification_gate_instance = NotificationGate(
                 roles=frozenset(settings.notify_roles) if configured else frozenset(),
                 cooldown_seconds=settings.notify_cooldown_seconds,
+                min_confidence=settings.notify_min_confidence,
             )
         return _notification_gate_instance
 
@@ -1287,9 +1288,11 @@ def _notify_about_pass(
     Поэтому здесь ловится всё: проход уже записан и лежит в базе, и падать
     из-за недоступного мессенджера — значит менять важное на второстепенное.
     """
+    confidence = max(request.confidence_face, request.confidence_side)
     reason = _notification_gate(settings).blocked_reason(
         request.initiating_camera,
         time.monotonic(),
+        confidence,
     )
     if reason is not None:
         journal.write("notification_skipped", event_id=event.id, reason=reason)
@@ -1307,7 +1310,7 @@ def _notify_about_pass(
         when=event.created_at,
         timezone=settings.display_timezone,
         role=request.initiating_camera,
-        confidence=max(request.confidence_face, request.confidence_side),
+        confidence=confidence,
         identity=identity,
     )
     snapshot = notification_snapshot_path(settings.data_dir, f"pass-{event.id}")

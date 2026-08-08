@@ -37,9 +37,19 @@ def notification_snapshot_path(data_dir: Path, name: str) -> Path:
 class NotificationGate:
     roles: frozenset[str]
     cooldown_seconds: float
+    # Порог уверенности для сообщения. Он выше порога записи намеренно: писать
+    # стоит всё сомнительное — потом разберём, — а будить человека только тем,
+    # в чём детектор уверен. На дверце при 0.8 остаются 9 из 10 настоящих
+    # проходов, а тени отсекаются почти целиком.
+    min_confidence: float = 0.0
     _last_sent_at: float | None = field(default=None, repr=False)
 
-    def blocked_reason(self, role: str | None, now: float) -> str | None:
+    def blocked_reason(
+        self,
+        role: str | None,
+        now: float,
+        confidence: float | None = None,
+    ) -> str | None:
         """`None` — отправляем. Иначе причина молчания, годная для журнала."""
         if not self.roles:
             return "notifications_disabled"
@@ -47,6 +57,8 @@ class NotificationGate:
             return "unknown_camera"
         if role not in self.roles:
             return f"camera_not_notified:{role}"
+        if confidence is not None and confidence < self.min_confidence:
+            return f"below_notify_threshold:{confidence:.2f}"
         if self._last_sent_at is not None and now - self._last_sent_at < self.cooldown_seconds:
             return "cooldown"
         return None
