@@ -5,6 +5,7 @@ import yaml
 from src.common.camera_registry import CameraRecord, CameraRegistry
 from src.common.circuits import NodeCircuits
 from src.common.frigate_config import (
+    _camera_block,
     build_config,
     build_env,
     foreign_sections,
@@ -250,3 +251,41 @@ def test_detect_resolution_is_left_to_frigate() -> None:
     detect = parsed["cameras"]["gate_1"]["detect"]
 
     assert detect == {"enabled": True, "fps": 5}
+
+
+def test_camera_named_with_a_digit_does_not_topple_frigate() -> None:
+    """Ключ `3:` YAML считает числом, а Frigate ждёт строку — и бракует всё.
+
+    2026-08-08 камера, названная цифрой, подняла Frigate в safe mode вообще без
+    камер: легли разом и регистратор, и калитка. Цена ошибки несоразмерна
+    причине, поэтому имя уходит в кавычках.
+    """
+    camera = CameraRecord(
+        id="3",
+        host="192.168.1.213",
+        username="admin",
+        password="secret",
+        stream_path="/Streaming/Channels/101",
+        circuit="nvr",
+    )
+
+    inventory = CameraRegistry(cameras=[camera])
+
+    parsed = yaml.safe_load(build_config(inventory, NodeCircuits(cats=False, nvr=True)))
+
+    # Ключ обязан остаться строкой: именно на этом Frigate забраковал всё.
+    assert list(parsed["cameras"]) == ["3"]
+    assert _camera_block(camera, 0, 7).startswith('  "3":')
+
+
+def test_ordinary_names_stay_without_quotes() -> None:
+    camera = CameraRecord(
+        id="ursa-minor",
+        host="192.168.1.213",
+        username="admin",
+        password="secret",
+        stream_path="/Streaming/Channels/101",
+        circuit="nvr",
+    )
+
+    assert _camera_block(camera, 0, 7).startswith("  ursa_minor:")

@@ -60,6 +60,21 @@ def frigate_camera_name(camera_id: str) -> str:
     return _UNSAFE_NAME.sub("_", camera_id.lower()).strip("_") or "camera"
 
 
+def frigate_camera_key(camera_id: str) -> str:
+    """Имя камеры так, как его можно положить ключом в YAML.
+
+    Камера, названная цифрой, ложится в конфигурацию ключом `3:` — а YAML
+    считает такой ключ числом, тогда как Frigate ждёт строку. Проверка у него
+    строгая, и отвергается **вся** конфигурация: 2026-08-08 узел поднял Frigate
+    в safe mode вообще без камер, положив разом и регистратор, и калитку.
+
+    Цена ошибки несоразмерна причине — человек ввёл цифру в поле имени, — и
+    чинится она одними кавычками.
+    """
+    name = frigate_camera_name(camera_id)
+    return f'"{name}"' if not name[0].isalpha() else name
+
+
 def _env_prefix(camera: CameraRecord) -> str:
     return f"FRIGATE_{frigate_camera_name(camera.id).upper()}"
 
@@ -112,7 +127,7 @@ def _record_block(indent: str, continuous_days: int, motion_days: int) -> list[s
 
 def _camera_block(camera: CameraRecord, continuous_days: int, motion_days: int) -> str:
     prefix = _env_prefix(camera)
-    name = frigate_camera_name(camera.id)
+    name = frigate_camera_key(camera.id)
     address = f"{{{prefix}_USER}}:{{{prefix}_PASSWORD}}@{{{prefix}_HOST}}:{camera.port}"
     detect_path = camera.detect_stream_path or camera.stream_path
     objects = CIRCUIT_OBJECTS.get(camera.circuit or "nvr", ("person",))
