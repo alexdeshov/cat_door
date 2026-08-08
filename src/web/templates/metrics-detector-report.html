@@ -29,69 +29,75 @@
     {% for section_key, section_title in [("clean", "Чистые события"), ("all", "Все события"), ("night", "Ночные события")] %}
       <section class="panel padded">
         <h2>{{ section_title }}</h2>
-        <table>
-          <thead>
-            <tr>
-              <th>Камера</th><th>Видео</th><th>С котом</th><th>Miss rate</th>
-              <th>Без кота</th><th>False trigger</th><th>Median</th><th>p95</th>
-              <th>Порог</th>
-            </tr>
-          </thead>
-          <tbody>
-          {% for view, values in report.sections[section_key].items() %}
-            <tr>
-              <td>{{ "Hikvision" if view == "face" else "Ursa Minor" }}</td>
-              <td>{{ values.events }} (нет: {{ values.missing_media }})</td>
-              <td>{{ values.cat_events }} (miss: {{ values.misses }})</td>
-              <td>{{ "%.2f%%"|format(values.miss_rate * 100) if values.miss_rate is not none else "—" }}</td>
-              <td>{{ values.not_visible_events }} (trigger: {{ values.false_triggers }})</td>
-              <td>{{ "%.2f%%"|format(values.false_trigger_rate * 100) if values.false_trigger_rate is not none else "—" }}</td>
-              <td>{{ "%.1f мс"|format(values.median_inference_ms) if values.median_inference_ms is not none else "—" }}</td>
-              <td>{{ "%.1f мс"|format(values.p95_inference_ms) if values.p95_inference_ms is not none else "—" }}</td>
-              <td>{{ values.threshold }}</td>
-            </tr>
-          {% endfor %}
-          </tbody>
-        </table>
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>Камера</th><th>Видео</th><th>С котом</th><th>Miss rate</th>
+                <th>Без кота</th><th>False trigger</th><th>Median</th><th>p95</th>
+                <th>Порог</th>
+              </tr>
+            </thead>
+            <tbody>
+            {% for view, values in report.sections[section_key].items() %}
+              <tr>
+                <td>{{ "Hikvision" if view == "face" else "Ursa Minor" }}</td>
+                <td>{{ values.events }} (нет: {{ values.missing_media }})</td>
+                <td>{{ values.cat_events }} (miss: {{ values.misses }})</td>
+                <td>{{ "%.2f%%"|format(values.miss_rate * 100) if values.miss_rate is not none else "—" }}</td>
+                <td>{{ values.not_visible_events }} (trigger: {{ values.false_triggers }})</td>
+                <td>{{ "%.2f%%"|format(values.false_trigger_rate * 100) if values.false_trigger_rate is not none else "—" }}</td>
+                <td>{{ "%.1f мс"|format(values.median_inference_ms) if values.median_inference_ms is not none else "—" }}</td>
+                <td>{{ "%.1f мс"|format(values.p95_inference_ms) if values.p95_inference_ms is not none else "—" }}</td>
+                <td>{{ values.threshold }}</td>
+              </tr>
+            {% endfor %}
+            </tbody>
+          </table>
+        </div>
       </section>
     {% endfor %}
 
     <section class="panel padded">
       <h2>Распределение максимального confidence — чистые события</h2>
-      <table>
-        <thead><tr><th>Камера</th><th>Группа</th><th>N</th><th>Min</th><th>p25</th><th>Median</th><th>p75</th><th>p95</th><th>Max</th></tr></thead>
-        <tbody>
-        {% for view, values in report.sections.clean.items() %}
-          {% for group, distribution in values.confidence_distribution.items() %}
-            <tr>
-              <td>{{ "Hikvision" if view == "face" else "Ursa Minor" }}</td>
-              <td>{{ group }}</td><td>{{ distribution.samples }}</td>
-              {% for key in ["min", "p25", "median", "p75", "p95", "max"] %}
-                <td>{{ "%.3f"|format(distribution[key]) if distribution[key] is not none else "—" }}</td>
-              {% endfor %}
-            </tr>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>Камера</th><th>Группа</th><th>N</th><th>Min</th><th>p25</th><th>Median</th><th>p75</th><th>p95</th><th>Max</th></tr></thead>
+          <tbody>
+          {% for view, values in report.sections.clean.items() %}
+            {% for group, distribution in values.confidence_distribution.items() %}
+              <tr>
+                <td>{{ "Hikvision" if view == "face" else "Ursa Minor" }}</td>
+                <td>{{ group }}</td><td>{{ distribution.samples }}</td>
+                {% for key in ["min", "p25", "median", "p75", "p95", "max"] %}
+                  <td>{{ "%.3f"|format(distribution[key]) if distribution[key] is not none else "—" }}</td>
+                {% endfor %}
+              </tr>
+            {% endfor %}
           {% endfor %}
-        {% endfor %}
-        </tbody>
-      </table>
+          </tbody>
+        </table>
+      </div>
     </section>
 
     {% for view, points in report.threshold_sweep.items() %}
       <section class="panel padded">
         <h2>Пороги: {{ "Hikvision" if view == "face" else "Ursa Minor" }}</h2>
-        <table>
-          <thead><tr><th>Порог</th><th>Miss rate</th><th>False trigger rate</th><th>С котом</th><th>Без кота</th></tr></thead>
-          <tbody>
-          {% for point in points %}
-            <tr>
-              <td>{{ point.threshold }}</td>
-              <td>{{ "%.2f%%"|format(point.miss_rate * 100) if point.miss_rate is not none else "—" }}</td>
-              <td>{{ "%.2f%%"|format(point.false_trigger_rate * 100) if point.false_trigger_rate is not none else "—" }}</td>
-              <td>{{ point.cat_events }}</td><td>{{ point.not_visible_events }}</td>
-            </tr>
-          {% endfor %}
-          </tbody>
-        </table>
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th>Порог</th><th>Miss rate</th><th>False trigger rate</th><th>С котом</th><th>Без кота</th></tr></thead>
+            <tbody>
+            {% for point in points %}
+              <tr>
+                <td>{{ point.threshold }}</td>
+                <td>{{ "%.2f%%"|format(point.miss_rate * 100) if point.miss_rate is not none else "—" }}</td>
+                <td>{{ "%.2f%%"|format(point.false_trigger_rate * 100) if point.false_trigger_rate is not none else "—" }}</td>
+                <td>{{ point.cat_events }}</td><td>{{ point.not_visible_events }}</td>
+              </tr>
+            {% endfor %}
+            </tbody>
+          </table>
+        </div>
       </section>
     {% endfor %}
   {% else %}

@@ -141,6 +141,13 @@ kbd {
   letter-spacing: -0.01em;
 }
 
+/* Показания приборов бывают длинными и без пробелов — RTSP-адрес, SHA-256,
+   путь к файлу. На узком экране такая строка распирает страницу, поэтому ей
+   разрешено переноситься где угодно. */
+.data,
+code,
+td { overflow-wrap: anywhere; }
+
 .muted { color: var(--text-muted); }
 .faint { color: var(--text-faint); }
 .bad { color: var(--bad); }
@@ -602,8 +609,11 @@ td.number { font-family: var(--font-data); font-variant-numeric: tabular-nums; }
 .viewport {
   width: 100%;
   /* Живое изображение не должно вытеснять всё остальное с первого экрана:
-     проходы важнее, чем большой прямоугольник с пустым настилом. */
+     проходы важнее, чем большой прямоугольник с пустым настилом.
+     `dvh` вместо `vh` ради телефона: в Safari `vh` считается по экрану без
+     панелей браузера, и картинка вылезала за него на их высоту. */
   max-height: 46vh;
+  max-height: 46dvh;
   aspect-ratio: 16 / 9;
   object-fit: contain;
   background: #05080a;
@@ -749,6 +759,128 @@ progress { width: 100%; height: 6px; }
   .statusbar { grid-template-columns: 1fr; }
   .statusbar-state { border-right: 0; border-bottom: 1px solid var(--line); }
   .statusbar-switch { border-left: 0; border-top: 1px solid var(--line); }
+}
+
+/* ── Телефон ──────────────────────────────────────────────────────────── */
+
+/* Шапка — единственное, что по-настоящему ломало страницу на телефоне.
+   Замер до правки на ширине 390: документ выходил 596 точек, потому что
+   `.masthead-tools` не переносился (580) и `.nav` не сжимался (385). Всё
+   остальное содержимое в узкую колонку собиралось само. */
+@media (max-width: 640px) {
+  .masthead-inner,
+  .subnav,
+  main { width: min(1180px, calc(100% - 24px)); }
+
+  .masthead-inner {
+    /* Первая строка — метка и инструменты, вторая — лента контуров. */
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: center;
+    gap: 6px 12px;
+    min-height: 0;
+  }
+
+  .nav {
+    order: 2;
+    grid-column: 1 / -1;
+    min-width: 0;
+    margin-right: 0;
+    flex-wrap: nowrap;
+    /* Контуров четыре, и они не помещаются в строку ни при каком размере
+       шрифта. Лента листается пальцем и не тащит за собой страницу. */
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+  }
+
+  .nav::-webkit-scrollbar { display: none; }
+  .nav a { white-space: nowrap; }
+
+  /* «работает», «запись» — подпись для десктопа. На телефоне она удваивает
+     высоту шапки, а то же самое написано на самой странице контура. */
+  .nav-circuit-state { display: none; }
+
+  .masthead-tools {
+    min-width: 0;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 8px;
+  }
+
+  /* Оговорка про механику не меняется никогда, а место занимает как показания
+     узла. На узком экране остаются только те, что меняются. */
+  .masthead-tools .chip:not(#system-stats) { display: none; }
+
+  /* Во flex-раскладке переключатель режима разъезжался на две строки с пустой
+     ячейкой, а рядом с кнопкой «Выключить контур» ужимался до 192 точек и
+     обрезал подписи. На телефоне режим и выключатель встают друг под другом,
+     каждый во всю ширину. */
+  .statusbar-switch {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .segmented {
+    display: grid;
+    grid-auto-flow: column;
+    grid-auto-columns: minmax(0, 1fr);
+    width: 100%;
+  }
+
+  .segmented button {
+    /* Столбцы равные, и подпись должна помещаться в самый узкий: «наблюдение»
+       без этого обрезалось на трёхсотточечной панели. */
+    padding-inline: 4px;
+    justify-content: center;
+  }
+
+  /* Ползунок перемотки жался до 60 точек между кнопками и временем. */
+  .player-bar { grid-template-columns: auto minmax(0, 1fr) auto; }
+  .player-bar .video-seek { grid-column: 1 / -1; grid-row: 2; }
+}
+
+/* Вырез и скруглённые углы: в альбомной ориентации содержимое иначе уезжает
+   под них, а нижняя полоса перекрывает последнюю строку. */
+@supports (padding: max(0px)) {
+  .masthead-inner,
+  .subnav,
+  main {
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
+  }
+
+  main { padding-bottom: max(64px, env(safe-area-inset-bottom)); }
+}
+
+/* ── Касание ──────────────────────────────────────────────────────────── */
+
+/* Правила про палец, а не про ширину экрана: то же самое верно для планшета
+   в полный экран. */
+@media (pointer: coarse) {
+  /* Safari на iPhone увеличивает страницу при фокусе в поле мельче 16 точек и
+     обратно её не отматывает. Это и выглядит как «вёрстка поехала» — хотя
+     поехал вьюпорт. */
+  input,
+  select,
+  textarea { font-size: 16px; }
+
+  /* Палец не попадает в ссылку высотой в двадцать точек. */
+  .nav a,
+  .subnav a,
+  .pager a,
+  button,
+  .button,
+  .segmented button { min-height: 44px; }
+
+  .nav a,
+  .subnav a,
+  .pager a { display: flex; align-items: center; }
+
+  /* Подсказка раскрывается по наведению, которого на касании не бывает.
+     Элемент фокусируемый (`tabindex` в шаблоне), поэтому по нажатию она
+     всё-таки открывается — но попасть в кружок 16 точек пальцем нельзя. */
+  .hint { width: 22px; height: 22px; font-size: 12px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

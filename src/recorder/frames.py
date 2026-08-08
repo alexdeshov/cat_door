@@ -97,20 +97,72 @@ def _roi_filter(fps: float, roi: NormalizedRoi, rotate_180: bool) -> str:
     )
 
 
-# Состояние аппаратного декодирования на весь процесс. Отказ запирается
-# защёлкой: `_frame_worker` переподключается вечно, и без неё каждый цикл
-# тратил бы секунду на заведомо мёртвую попытку и строку в журнал.
+# Состояние аппаратного декодирования на весь процесс. Отказ по железу
+# запирается защёлкой: `_frame_worker` переподключается вечно, и без неё каждый
+# цикл тратил бы секунду на заведомо мёртвую попытку и строку в журнал.
 _hwaccel_lock = threading.Lock()
 _hwaccel_failed = False
 _hwaccel_confirmed = False
+_hwaccel_retry_after = 0.0
 _roi_notice_shown = False
+
+# Пауза после непонятного отказа. Заперать видеоядро навсегда из-за жалобы,
+# которую мы не узнали, слишком дорого; молотить попытками каждую секунду —
+# слишком шумно.
+HWACCEL_COOLDOWN_SECONDS = 60.0
+
+# Жалоба про видеоядро: попытка провалилась там, где мы можем помочь только
+# отказом от аппаратного пути.
+_HARDWARE_COMPLAINTS = (
+    "vaapi",
+    "hwaccel",
+    "hwdownload",
+    "renderd",
+    "device creation failed",
+    "no va display",
+    "function not implemented",
+    "impossible to convert between the formats",
+    "no device available for decoder",
+)
+
+# Жалоба про вход: камера не ответила. Видеоядро тут ни при чём — программный
+# путь на той же камере провалился бы точно так же.
+_INPUT_COMPLAINTS = (
+    "network is unreachable",
+    "no route to host",
+    "connection refused",
+    "connection timed out",
+    "operation timed out",
+    "name or service not known",
+    "immediate exit requested",
+    "401 unauthorized",
+    "403 forbidden",
+    "404 not found",
+    "invalid data found when processing input",
+)
+
+
+def _hwaccel_verdict(complaints: list[str]) -> str:
+    """`hardware`, `camera` или `unknown` по жалобам ffmpeg.
+
+    Порядок проверок не переставлять: при мёртвом видеоядре ffmpeg жалуется и
+    на устройство, и на вход («Error while opening decoder for input stream»),
+    поэтому железо смотрится первым.
+    """
+    text = " ".join(complaints).lower()
+    if any(marker in text for marker in _HARDWARE_COMPLAINTS):
+        return "hardware"
+    if any(marker in text for marker in _INPUT_COMPLAINTS):
+        return "camera"
+    return "unknown"
 
 
 def active_hwaccel() -> str | None:
     """Что декодирует кадры на самом деле, а не что попросили в настройках.
 
-    `vaapi` — хотя бы один поток отдал кадр через медиадвижок; `none` — попытка
-    была и не удалась, работает программный путь; `None` — ещё не известно.
+    `vaapi` — хотя бы один поток отдал кадр через медиадвижок; `none` —
+    видеоядро отказало и до перезапуска службы работает программный путь;
+    `None` — ещё не известно.
     """
     with _hwaccel_lock:
         if _hwaccel_failed:
@@ -120,10 +172,11 @@ def active_hwaccel() -> str | None:
 
 def reset_hwaccel_state() -> None:
     """Только для тестов: защёлка живёт на весь процесс."""
-    global _hwaccel_failed, _hwaccel_confirmed, _roi_notice_shown
+    global _hwaccel_failed, _hwaccel_confirmed, _hwaccel_retry_after, _roi_notice_shown
     with _hwaccel_lock:
         _hwaccel_failed = False
         _hwaccel_confirmed = False
+        _hwaccel_retry_after = 0.0
         _roi_notice_shown = False
 
 
@@ -142,8 +195,30 @@ def _disable_hwaccel(complaints: list[str]) -> None:
         return
     reason = mask_credentials(" ".join(complaints).strip())
     logger.warning(
-        "Аппаратное декодирование не дало ни одного кадра, перехожу на "
-        "программное до перезапуска службы: %s",
+        "Видеоядро отказало, перехожу на программное декодирование до "
+        "перезапуска службы: %s",
+        reason or "ffmpeg ничего не сообщил",
+    )
+
+
+def _defer_hwaccel(complaints: list[str]) -> None:
+    """Отложить аппаратный путь, не отказываясь от него насовсем.
+
+    Сюда попадают жалобы, которых мы не узнали. Камера важнее экономии, поэтому
+    сейчас поток пересобирается программным, но через паузу видеоядро пробуется
+    снова: причина могла быть разовой.
+    """
+    global _hwaccel_retry_after
+    with _hwaccel_lock:
+        already_waiting = time.monotonic() < _hwaccel_retry_after
+        _hwaccel_retry_after = time.monotonic() + HWACCEL_COOLDOWN_SECONDS
+    if already_waiting:
+        return
+    reason = mask_credentials(" ".join(complaints).strip())
+    logger.warning(
+        "Аппаратное декодирование не дало кадров по непонятной причине, "
+        "работаю программно и повторю попытку через %.0f с: %s",
+        HWACCEL_COOLDOWN_SECONDS,
         reason or "ffmpeg ничего не сообщил",
     )
 
@@ -165,7 +240,9 @@ def _hwaccel_device(vaapi_device: Path | None, roi: NormalizedRoi | None) -> Pat
             )
         return None
     with _hwaccel_lock:
-        return None if _hwaccel_failed else vaapi_device
+        if _hwaccel_failed or time.monotonic() < _hwaccel_retry_after:
+            return None
+    return vaapi_device
 
 
 def _frame_command(
@@ -356,5 +433,14 @@ def rgb_frame_stream(
             # Поток, отдавший хотя бы кадр, закончился по обычной причине —
             # камера замолчала или её убили снаружи. Переподключение не здесь.
             return
-        _disable_hwaccel(complaints)
+        verdict = _hwaccel_verdict(complaints)
+        if verdict == "camera":
+            # Камеры нет — программный путь провалился бы ровно так же, и
+            # выключать из-за этого видеоядро нельзя. Ровно это и случилось
+            # после перезагрузки узла: сеть камер поднимается позже службы.
+            return
+        if verdict == "hardware":
+            _disable_hwaccel(complaints)
+        else:
+            _defer_hwaccel(complaints)
         device = None

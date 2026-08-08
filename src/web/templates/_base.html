@@ -66,6 +66,15 @@
 {% block content %}{% endblock %}
 </main>
 <script>
+  // На телефоне контуры лежат лентой с прокруткой, и открытый раздел может
+  // оказаться за её правым краем — страница выглядит так, будто его нет.
+  // Двигаем саму ленту, а не страницу: scrollIntoView прокрутил бы и её.
+  const navStrip = document.querySelector(".nav");
+  const navCurrent = navStrip?.querySelector("[aria-current]");
+  if (navStrip && navCurrent && navStrip.scrollWidth > navStrip.clientWidth) {
+    navStrip.scrollLeft = navCurrent.offsetLeft - 12;
+  }
+
   const themeToggle = document.querySelector("#theme-toggle");
 
   function currentTheme() {

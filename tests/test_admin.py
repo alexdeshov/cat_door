@@ -2037,3 +2037,26 @@ def test_display_timezone_setting_moves_the_shown_time(runtime_path: Path, monke
     page = client.get("/")
 
     assert '<span class="pass-time">04:30:05</span>' in page.text
+
+
+def test_wide_tables_can_scroll_inside_their_panel() -> None:
+    """Таблица шире экрана обязана прокручиваться сама, а не тянуть страницу.
+
+    На телефоне незавёрнутая таблица делала документ шире вьюпорта, и «ехала»
+    вся страница, а не только она. Проверка на шаблонах, а не на отрисовке:
+    отчёты об оценке требуют завершённого запуска, которого в тестах нет.
+    """
+    templates = (Path(__file__).resolve().parent.parent / "src" / "web" / "templates").glob("*.html")
+    unwrapped: list[str] = []
+    for template in templates:
+        lines = template.read_text(encoding="utf-8").split("\n")
+        for number, line in enumerate(lines):
+            if line.strip() != "<table>":
+                continue
+            previous = next(
+                (item for item in reversed(lines[:number]) if item.strip()),
+                "",
+            )
+            if "table-scroll" not in previous:
+                unwrapped.append(f"{template.name}:{number + 1}")
+    assert unwrapped == []
