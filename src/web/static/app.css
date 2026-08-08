@@ -903,5 +903,12 @@ body:not(.previews-on) img[data-live-stream] { display: none; }
 .preview-off-note { display: none; }
 body:not(.previews-on) .preview-off-note { display: flex; }
 
+/* Кнопка вместо картинки сверх предела живых потоков. Предел не про узел, а
+   про браузер: он держит к одному хосту около шести соединений, а поток
+   превью — это соединение, которое никогда не кончается. */
+.preview-queued { cursor: pointer; }
+.preview-queued:hover { color: var(--text); border-color: var(--line-strong); }
+body:not(.previews-on) .preview-queued { display: none; }
+
 /* Перегрев в шапке: порог 85°C задаёт скрипт. */
 .chip-hot { color: #f87171; border-color: #f87171; }

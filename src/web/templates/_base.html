@@ -164,19 +164,58 @@
 
   let previewsOn = storedPreviewChoice() !== "off";
 
+  // Сколько живых картинок открывать разом. Каждая — это HTTP-ответ, который
+  // никогда не кончается, а браузер держит к одному хосту около шести
+  // соединений. Седьмая вставала в очередь навсегда — вместе с обновлением
+  // страницы и опросом статуса, и страница выглядела зависшей. Ровно это и
+  // случилось 2026-08-08, когда камер стало шесть.
+  const MAX_LIVE_STREAMS = 4;
+
   function applyPreviewState() {
     document.body.classList.toggle("previews-on", previewsOn);
-    liveStreams().forEach(image => {
-      if (previewsOn) {
+    const images = [...liveStreams()];
+    // Закреплённые нажатием идут первыми: если человек попросил конкретную
+    // камеру, вытесняться должна не она.
+    const ordered = [...images].sort(
+      (first, second) =>
+        Number(Boolean(second.dataset.streamPinned)) - Number(Boolean(first.dataset.streamPinned)),
+    );
+    const live = new Set(previewsOn ? ordered.slice(0, MAX_LIVE_STREAMS) : []);
+    images.forEach(image => {
+      const holder = image.closest(".pass-media") || image.parentElement;
+      const queued = holder?.querySelector(".preview-queued");
+      if (live.has(image)) {
         const source = image.dataset.streamSrc;
         if (source && image.getAttribute("src") !== source) image.src = source;
-      } else if (image.getAttribute("src")) {
-        image.removeAttribute("src");
-        liveStreamAttempts.delete(image);
+        image.hidden = false;
+        queued?.remove();
+      } else {
+        if (image.getAttribute("src")) {
+          image.removeAttribute("src");
+          liveStreamAttempts.delete(image);
+        }
+        image.hidden = previewsOn;
+        if (previewsOn && !queued) addQueuedButton(image, holder);
+        if (!previewsOn) queued?.remove();
       }
     });
     previewToggle.textContent = previewsOn ? "Скрыть превью" : "Показать превью";
     previewToggle.setAttribute("aria-pressed", String(previewsOn));
+  }
+
+  // Камера сверх предела показывает кнопку, а не пустоту: иначе человек гадал
+  // бы, почему одни картинки живые, а другие нет.
+  function addQueuedButton(image, holder) {
+    if (!holder) return;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "viewport viewport-empty preview-queued";
+    button.textContent = "Показать эту камеру";
+    button.addEventListener("click", () => {
+      image.dataset.streamPinned = "1";
+      applyPreviewState();
+    });
+    image.before(button);
   }
 
   // Загрузка узла в шапке. Опрос раз в 5 секунд; интервал опроса и есть окно
