@@ -96,3 +96,17 @@ def test_unknown_display_timezone_is_rejected() -> None:
     """Опечатка в поясе иначе всплыла бы отрисовкой страницы, а не запуском."""
     with pytest.raises(ValidationError, match="часовой пояс"):
         Settings(display_timezone="Europe/Mosow")
+
+
+def test_unknown_hardware_decoding_mode_is_rejected() -> None:
+    """Опечатка не должна молча означать «выключено».
+
+    Аппаратное декодирование включают ради освобождённого ядра и потом ищут,
+    куда делась экономия. Пусть служба не поднимется.
+    """
+    with pytest.raises(ValidationError, match="аппаратное декодирование"):
+        Settings(recorder_hwaccel="vappi")
+
+
+def test_hardware_decoding_mode_is_case_insensitive() -> None:
+    assert Settings(recorder_hwaccel="VAAPI").recorder_hwaccel == "vaapi"

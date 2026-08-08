@@ -57,12 +57,27 @@ CANDIDATES: dict[str, dict[str, Any]] = {
         },
         "source": "https://github.com/Megvii-BaseDetection/YOLOX",
     },
-    "yolo11n-416": {
-        "architecture": "yolo11n",
+}
+
+
+def _yolo11(weights_name: str, input_size: int) -> dict[str, Any]:
+    """Запись кандидата Ultralytics: отличаются только веса и сторона входа.
+
+    Вход 640 держится наравне с 416 не ради архитектуры, а ради дальнего кота:
+    у него на террасе после сжатия до квадрата остаются десятки точек, и
+    разрешение может дать больше смены модели.
+
+    Лицензия AGPL-3.0 домашнему некоммерческому применению в приватном
+    репозитории не мешает. Публикация репозитория с кодом или дообученными
+    весами Ultralytics потребует сделать AGPL весь проект — это оговорка на
+    будущее, а не запрет сегодня.
+    """
+    return {
+        "architecture": weights_name,
         "license": "AGPL-3.0",
         "input": {
             "name": "images",
-            "shape": [1, 3, 416, 416],
+            "shape": [1, 3, input_size, input_size],
             "channel_order": "rgb",
             "scale": 1.0 / 255.0,
             "mean": [0.0, 0.0, 0.0],
@@ -78,8 +93,16 @@ CANDIDATES: dict[str, dict[str, Any]] = {
             "max_detections": 300,
         },
         "source": "https://github.com/ultralytics/ultralytics",
-    },
-}
+    }
+
+
+CANDIDATES.update(
+    {
+        "yolo11n-416": _yolo11("yolo11n", 416),
+        "yolo11n-640": _yolo11("yolo11n", 640),
+        "yolo11s-640": _yolo11("yolo11s", 640),
+    }
+)
 
 
 def sha256(path: Path) -> str:
@@ -204,7 +227,7 @@ def _export_yolox(
     )
 
 
-def _export_yolo11(weights: Path, output: Path) -> None:
+def _export_yolo11(weights: Path, output: Path, input_size: int) -> None:
     try:
         from ultralytics import YOLO  # type: ignore[import-not-found]
     except ImportError as exc:
@@ -217,7 +240,7 @@ def _export_yolo11(weights: Path, output: Path) -> None:
     exported = Path(
         YOLO(str(weights)).export(
             format="onnx",
-            imgsz=416,
+            imgsz=input_size,
             opset=18,
             simplify=True,
             nms=True,
@@ -271,23 +294,24 @@ def export_candidate(
         raise FileNotFoundError(weights)
     assert_checksum(weights, weights_sha256)
     output.parent.mkdir(parents=True, exist_ok=True)
+    architecture = str(metadata["architecture"])
+    expected_shape = metadata["input"]["shape"]
     try:
-        if candidate == "nanodet-plus-m-416":
+        if architecture == "nanodet_plus_m":
             if source_root is None:
                 raise ValueError("NanoDet export requires --source-root")
             _export_nanodet(python, weights, output, source_root)
-        elif candidate == "yolox-nano-416":
+        elif architecture == "yolox_nano":
             if source_root is None:
                 raise ValueError("YOLOX export requires --source-root")
             _export_yolox(python, weights, output, source_root)
-        elif candidate == "yolo11n-416":
-            _export_yolo11(weights, output)
+        elif architecture.startswith("yolo11"):
+            _export_yolo11(weights, output, int(expected_shape[2]))
         else:
             raise ValueError(f"unknown detector candidate: {candidate}")
         if not output.is_file():
             raise RuntimeError("candidate exporter did not create the requested ONNX file")
         input_name, output_names, input_shape = _onnx_contract(output)
-        expected_shape = metadata["input"]["shape"]
         if input_shape != expected_shape:
             raise RuntimeError(
                 f"candidate input shape is {input_shape}, expected {expected_shape}"

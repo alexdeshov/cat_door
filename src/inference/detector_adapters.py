@@ -310,7 +310,9 @@ def create_output_adapter(
             nms_iou_threshold,
             max_detections,
         )
-    if architecture == "yolo11n":
+    # Экспорт Ultralytics даёт один и тот же end-to-end выход для любого
+    # размера модели, поэтому yolo11n и yolo11s разбираются одинаково.
+    if architecture.startswith("yolo11"):
         if len(output_names) != 1:
             raise DetectorOutputError("YOLO11 requires one end-to-end NMS output")
         return Yolo11OutputAdapter(

@@ -39,7 +39,33 @@ def mask_credentials(text: str) -> str:
     return _CREDENTIALS.sub("***@", text)
 
 
-def _base_input(ffmpeg_path: str, rtsp_url: str) -> list[str]:
+def _base_input(
+    ffmpeg_path: str,
+    rtsp_url: str,
+    *,
+    vaapi_device: Path | None = None,
+) -> list[str]:
+    """Общее начало любой команды ffmpeg проекта.
+
+    `vaapi_device` включает декодирование медиадвижком и задаётся только там,
+    где кадры действительно декодируются, — в `src/recorder/frames.py`. Запись
+    прохода идёт копированием потока (`-c:v copy`), декодирования не требует
+    вовсе, и `-hwaccel` заставил бы ffmpeg делать лишнюю работу.
+    """
+    acceleration = (
+        [
+            "-hwaccel",
+            "vaapi",
+            "-hwaccel_device",
+            str(vaapi_device),
+            # Кадр остаётся в памяти видеоядра: масштабирует его тоже видеоядро,
+            # а в обычную память забирается уже уменьшенный.
+            "-hwaccel_output_format",
+            "vaapi",
+        ]
+        if vaapi_device is not None
+        else []
+    )
     return [
         ffmpeg_path,
         "-hide_banner",
@@ -49,6 +75,7 @@ def _base_input(ffmpeg_path: str, rtsp_url: str) -> list[str]:
         "tcp",
         "-timeout",
         "5000000",
+        *acceleration,
         "-i",
         rtsp_url,
     ]

@@ -767,6 +767,17 @@
       if (result.detector_device_actual) {
         items.push(readout("OpenVINO", result.detector_device_actual));
       }
+      if (result.hwaccel_requested === "vaapi") {
+        // Просили видеоядро — показываем, что вышло на самом деле: попытка
+        // может честно откатиться на программное декодирование.
+        const decoding = readout("декодирование", result.hwaccel_actual === "vaapi"
+          ? "видеоядро"
+          : result.hwaccel_actual === "none" ? "процессор (откат)" : "запускается");
+        if (result.hwaccel_actual === "none") {
+          decoding.querySelector(".readout-value").classList.add("bad");
+        }
+        items.push(decoding);
+      }
       if (result.disk_free_gb != null) {
         const disk = readout("диск", `${result.disk_free_gb} ГБ`);
         if (result.disk_low) {

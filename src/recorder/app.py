@@ -59,7 +59,7 @@ from src.recorder.events import (
     persist_automatic_event,
 )
 from src.recorder.ffmpeg import probe_stream
-from src.recorder.frames import rgb_frame_stream
+from src.recorder.frames import active_hwaccel, rgb_frame_stream
 from src.recorder.preview import annotate_detections, preview_path, publish_preview
 from src.recorder.status import write_recorder_status
 
@@ -348,6 +348,25 @@ def _detector_device_status(
     }
 
 
+def _hwaccel_status(settings: Settings) -> dict[str, str | None]:
+    """Что попросили и что декодирует кадры на самом деле.
+
+    Попытка использовать видеоядро может честно откатиться на программный путь,
+    и разница обязана быть видна: иначе настройка годами показывает `vaapi`, а
+    процессор всё это время греется, и никто не знает почему.
+    """
+    return {
+        "hwaccel_requested": settings.recorder_hwaccel,
+        "hwaccel_actual": active_hwaccel(),
+    }
+
+
+def _vaapi_device(settings: Settings) -> Path | None:
+    if settings.recorder_hwaccel != "vaapi":
+        return None
+    return settings.recorder_hwaccel_device
+
+
 def _put_latest(output: queue.Queue[Any], item: Any) -> None:
     try:
         output.put_nowait(item)
@@ -585,6 +604,7 @@ def publish_heartbeat(
         cameras=_camera_status(stream_targets_from_registry(registry)),
         **_disk_status(settings),
         **_detector_device_status(settings),
+        **_hwaccel_status(settings),
     )
 
 
@@ -642,6 +662,7 @@ def _frame_worker(
                 roi=camera_config.roi,
                 rotate_180=target.rotate_180,
                 on_process=remember_process,
+                vaapi_device=_vaapi_device(settings),
             ):
                 if stop.is_set():
                     return
@@ -951,6 +972,7 @@ def monitor_automatic(
                     cameras=_camera_status(stream_targets),
             **_disk_status(settings),
             **_detector_device_status(settings, detector),
+            **_hwaccel_status(settings),
                 )
                 continue
             inference_started_at = time.monotonic()
@@ -1127,6 +1149,7 @@ def monitor_automatic(
                 cameras=_camera_status(stream_targets),
             **_disk_status(settings),
             **_detector_device_status(settings, detector),
+            **_hwaccel_status(settings),
             )
             last_status_at = now
     except (OSError, RuntimeError, ValueError, SQLAlchemyError) as exc:
@@ -1157,6 +1180,7 @@ def monitor_automatic(
             cameras=_camera_status(stream_targets),
             **_disk_status(settings),
             **_detector_device_status(settings, detector),
+            **_hwaccel_status(settings),
         )
         journal.write(
             "session_stopped",
@@ -1246,6 +1270,7 @@ def run(*, once: bool = False, probe_seconds: float | None = None) -> None:
                     detector_connected=False,
         **_disk_status(settings),
         **_detector_device_status(settings),
+        **_hwaccel_status(settings),
                 )
             except Exception:  # noqa: BLE001,S110 - status failure must not stop recorder
                 pass

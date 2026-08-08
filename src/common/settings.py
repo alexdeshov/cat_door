@@ -15,6 +15,10 @@ class ConfigurationError(RuntimeError):
 # a path segment without escaping.
 _CAMERA_ID = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 
+# Опечатка в имени режима не должна молча означать «выключено»: аппаратное
+# декодирование включают ради экономии ядра и потом ищут, куда она делась.
+_HWACCEL_MODES = frozenset({"none", "vaapi"})
+
 
 class CameraConfig(BaseModel):
     """One camera as it can be declared in the environment.
@@ -111,6 +115,13 @@ class Settings(BaseSettings):
     automatic_capture_dry_run: bool = True
     detector_model_path: Path = Path("models/cat-detector.onnx")
     detector_device: str = "CPU"
+    # Декодирование потока камер медиадвижком. Замер на узле acer: поток дверцы
+    # (4 Мп, 30 секунд, то же масштабирование в 960×540) стоил 12.2 с
+    # процессорного времени программно и 1.2 с через VA-API. Выключено по
+    # умолчанию: на узле без видеоядра путь обязан остаться прежним. Речь
+    # только о декодировании — инференс на видеоядре замерен и отброшен.
+    recorder_hwaccel: str = "none"
+    recorder_hwaccel_device: Path = Path("/dev/dri/renderD128")
     identity_face_model_path: Path | None = None
     identity_side_model_path: Path | None = None
     identity_pretrained_weights_path: Path | None = None
@@ -154,6 +165,17 @@ class Settings(BaseSettings):
                 "IANA, например Europe/Moscow"
             ) from exc
         return value
+
+    @field_validator("recorder_hwaccel")
+    @classmethod
+    def _check_hwaccel(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in _HWACCEL_MODES:
+            raise ValueError(
+                "аппаратное декодирование принимает только "
+                f"{' и '.join(sorted(_HWACCEL_MODES))}, задано: {value!r}"
+            )
+        return normalized
 
     @property
     def resolved_database_path(self) -> Path:
