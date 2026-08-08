@@ -159,11 +159,15 @@ class Settings(BaseSettings):
     gate_api_url: str = "http://127.0.0.1:5000"
     gate_notify_cameras: list[str] = Field(default_factory=list)
     gate_notify_labels: list[str] = Field(default_factory=lambda: ["person"])
-    # Сообщать только о людях с распознанным лицом. Frigate приписывает имя
-    # событию через несколько секунд после появления человека, поэтому события
-    # без имени не отбрасываются сразу, а ждут следующего опроса. Обратная
-    # сторона выбора: незнакомый человек у калитки останется незамеченным.
-    gate_notify_faces_only: bool = True
+    # О своих — с именем, о чужих — отдельным сообщением «неизвестный».
+    # `faces_only` возвращает прежнее поведение: молчать обо всех, кого не
+    # узнали. Выдержка нужна потому, что Frigate приписывает имя событию не
+    # сразу: без неё один гость давал бы два сообщения — сперва «неизвестный»,
+    # потом имя. Пауза у чужих своя: знакомых дома ждут, а чужой у калитки
+    # может оказаться прохожим.
+    gate_notify_faces_only: bool = False
+    gate_notify_face_grace_seconds: float = Field(default=20.0, ge=0.0, le=300.0)
+    gate_notify_unknown_cooldown_seconds: float = Field(default=600.0, ge=0.0, le=86400.0)
     gate_notify_cooldown_seconds: float = Field(default=120.0, ge=0.0, le=86400.0)
     gate_notify_poll_seconds: float = Field(default=10.0, ge=1.0, le=600.0)
     local_training_epochs: int = Field(default=2, ge=1, le=100)

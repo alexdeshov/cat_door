@@ -114,11 +114,14 @@ def test_only_interesting_labels_reach_the_phone(runtime_path: Path, monkeypatch
         [_event(label="person"), _event(id="second", label="car")],
         data_dir=runtime_path,
         now=10.0,
+        wall_now=_event().started_at + 60,
     )
 
     assert delivered == 1
     assert len(sent) == 1
-    assert "человек" in sent[0]
+    # Человек без имени — «неизвестный»: сообщение приходит именно потому,
+    # что узнать его не удалось. Машина при этом молчит по фильтру меток.
+    assert "неизвестный" in sent[0]
 
 
 def test_one_guest_gives_one_message(runtime_path: Path, monkeypatch) -> None:
@@ -138,6 +141,7 @@ def test_one_guest_gives_one_message(runtime_path: Path, monkeypatch) -> None:
         [_event(camera="gate"), _event(id="second", camera="gate_2")],
         data_dir=runtime_path,
         now=10.0,
+        wall_now=_event().started_at + 60,
     )
 
     assert len(sent) == 1
@@ -168,6 +172,7 @@ def test_snapshot_goes_with_the_message_and_is_cleaned_up(
         [_event(sub_label="Алекс")],
         data_dir=runtime_path,
         now=10.0,
+        wall_now=_event().started_at + 60,
     )
 
     assert photos and "Алекс" in photos[0]
@@ -190,6 +195,7 @@ def test_a_silent_telegram_does_not_stop_the_batch(runtime_path: Path, monkeypat
         [_event()],
         data_dir=runtime_path,
         now=10.0,
+        wall_now=_event().started_at + 60,
     )
 
     assert delivered == 0
@@ -235,6 +241,7 @@ def test_only_recognised_faces_reach_the_phone(runtime_path: Path, monkeypatch) 
         [_event(id="без имени"), _event(id="с именем", sub_label="Алекс")],
         data_dir=runtime_path,
         now=10.0,
+        wall_now=_event().started_at + 60,
     )
 
     assert len(sent) == 1
@@ -257,12 +264,12 @@ def test_a_nameless_event_is_not_thrown_away_forever(runtime_path: Path, monkeyp
     # первый опрос: имени ещё нет
     notify_about_events(
         settings, client, gate, [_event(id="гость")],
-        data_dir=runtime_path, now=10.0, already_sent=already,
+        data_dir=runtime_path, now=10.0, wall_now=_event().started_at + 60, already_sent=already,
     )
     # второй опрос: то же событие, но Frigate успел его опознать
     notify_about_events(
         settings, client, gate, [_event(id="гость", sub_label="Алекс")],
-        data_dir=runtime_path, now=20.0, already_sent=already,
+        data_dir=runtime_path, now=20.0, wall_now=_event().started_at + 60, already_sent=already,
     )
 
     assert len(sent) == 1
@@ -285,7 +292,74 @@ def test_the_same_event_is_never_sent_twice(runtime_path: Path, monkeypatch) -> 
     for _ in range(3):
         notify_about_events(
             settings, client, gate, [_event()],
-            data_dir=runtime_path, now=10.0, already_sent=already,
+            data_dir=runtime_path, now=10.0, wall_now=_event().started_at + 60, already_sent=already,
         )
 
     assert len(sent) == 1
+
+
+def test_a_stranger_gets_a_message_of_his_own(runtime_path: Path, monkeypatch) -> None:
+    """О своих — по имени, о чужих — «неизвестный», и паузы у них разные."""
+    sent: list[str] = []
+    monkeypatch.setattr("src.gate.notify.fetch_snapshot", lambda *args, **kwargs: False)
+    monkeypatch.setattr(
+        "src.common.telegram.TelegramClient.send_message",
+        lambda self, text: sent.append(text),
+    )
+    known = NotificationGate(roles=frozenset({GATE_ROLE}), cooldown_seconds=0.0)
+    unknown = NotificationGate(roles=frozenset({GATE_ROLE}), cooldown_seconds=0.0)
+
+    notify_about_events(
+        _settings(gate_notify_face_grace_seconds=20.0),
+        TelegramClient("8999303876:test", "12345"),
+        known,
+        [_event(id="свой", sub_label="Алекс"), _event(id="чужой")],
+        data_dir=runtime_path,
+        now=10.0,
+        wall_now=_event().started_at + 60,
+        unknown_gate=unknown,
+    )
+
+    assert len(sent) == 2
+    assert "Алекс" in sent[0]
+    assert "неизвестный" in sent[1]
+
+
+def test_a_stranger_waits_out_the_grace_period(runtime_path: Path, monkeypatch) -> None:
+    """Иначе один гость дал бы два сообщения: сперва «неизвестный», потом имя."""
+    sent: list[str] = []
+    monkeypatch.setattr("src.gate.notify.fetch_snapshot", lambda *args, **kwargs: False)
+    monkeypatch.setattr(
+        "src.common.telegram.TelegramClient.send_message",
+        lambda self, text: sent.append(text),
+    )
+    gate = NotificationGate(roles=frozenset({GATE_ROLE}), cooldown_seconds=0.0)
+    settings = _settings(gate_notify_face_grace_seconds=20.0)
+    client = TelegramClient("8999303876:test", "12345")
+    already: dict[str, float] = {}
+    guest = _event(id="гость")
+
+    # через пять секунд имени ещё нет — молчим
+    notify_about_events(
+        settings, client, gate, [guest],
+        data_dir=runtime_path, now=10.0,
+        wall_now=guest.started_at + 5, already_sent=already,
+    )
+    assert sent == []
+
+    # через десять Frigate его узнал — уходит одно сообщение, с именем
+    notify_about_events(
+        settings, client, gate, [_event(id="гость", sub_label="Алекс")],
+        data_dir=runtime_path, now=20.0,
+        wall_now=guest.started_at + 10, already_sent=already,
+    )
+
+    assert len(sent) == 1
+    assert "Алекс" in sent[0]
+
+
+def test_frigate_word_for_a_stranger_is_not_a_name() -> None:
+    """Разные версии Frigate пишут «unknown» вместо пустого поля."""
+    caption = gate_caption(_event(sub_label="unknown"), "Europe/Moscow")
+
+    assert "неизвестный" in caption
