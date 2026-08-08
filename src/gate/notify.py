@@ -137,10 +137,30 @@ def fetch_snapshot(api_url: str, event: GateEvent, destination: Path, *, timeout
     return True
 
 
+def recognised_name(event: GateEvent) -> str | None:
+    """Имя из базы лиц, если Frigate его поставил.
+
+    Пустой `sub_label` и слово «unknown» значат одно и то же — лицо не узнано,
+    — но приходят из разных версий Frigate, поэтому проверяются оба.
+    """
+    name = (event.sub_label or "").strip()
+    if not name or name.lower() in {"unknown", "unrecognized"}:
+        return None
+    return name
+
+
 def gate_caption(event: GateEvent, timezone: str) -> str:
     """Подпись под снимком: кто, где и когда."""
     labels = {"person": "человек", "car": "машина", "cat": "кот", "dog": "собака"}
-    who = event.sub_label or labels.get(event.label, event.label or "движение")
+    name = recognised_name(event)
+    if name is not None:
+        who = name
+    elif event.label == "person":
+        # «Человек» здесь сказало бы меньше, чем нужно: сообщение приходит
+        # именно потому, что этого человека узнать не удалось.
+        who = "неизвестный"
+    else:
+        who = labels.get(event.label, event.label or "движение")
     moment = datetime.fromtimestamp(event.started_at, UTC).astimezone(ZoneInfo(timezone))
     return f"Калитка: {who} · {event.camera} · {moment.strftime('%H:%M')}"
 
@@ -153,6 +173,8 @@ def notify_about_events(
     *,
     data_dir: Path,
     now: float,
+    wall_now: float,
+    unknown_gate: NotificationGate | None = None,
     already_sent: dict[str, float] | None = None,
 ) -> int:
     """Разобрать пачку событий. Возвращает число отправленных сообщений."""
@@ -165,17 +187,24 @@ def notify_about_events(
             continue
         if labels and event.label not in labels:
             continue
-        # Имя лица Frigate приписывает событию не сразу: человек сперва
-        # появляется, и лишь потом распознаётся. Поэтому событие без имени не
-        # отбрасывается навсегда — оно просто ждёт следующего опроса, пока не
-        # выйдет из окна наблюдения.
-        if settings.gate_notify_faces_only and not event.sub_label:
-            continue
         # Пустой список камер означает «все»: у калитки их одна-две, и
         # перечислять их руками — лишний повод забыть про новую.
         if cameras and event.camera not in cameras:
             continue
-        reason = gate.blocked_reason(GATE_ROLE, now)
+        name = recognised_name(event)
+        if name is None:
+            # Имя Frigate приписывает событию не сразу: человек сперва
+            # появляется, и лишь потом распознаётся. Объявлять его неизвестным
+            # немедленно значило бы прислать два сообщения про одного гостя —
+            # сперва «неизвестный», потом имя. Поэтому выдержка.
+            if settings.gate_notify_faces_only:
+                continue
+            if wall_now - event.started_at < settings.gate_notify_face_grace_seconds:
+                continue
+        # Пауза у своих и у чужих разная: знакомых дома ждут, а чужой у калитки
+        # может оказаться прохожим, и частить о нём незачем.
+        active_gate = gate if name is not None else (unknown_gate or gate)
+        reason = active_gate.blocked_reason(GATE_ROLE, now)
         if reason is not None:
             logger.info("Событие %s пропущено: %s", event.id, reason)
             continue
@@ -191,7 +220,7 @@ def notify_about_events(
             continue
         finally:
             snapshot.unlink(missing_ok=True)
-        gate.remember_sent(now)
+        active_gate.remember_sent(now)
         seen[event.id] = event.started_at
         sent += 1
     return sent
@@ -211,6 +240,10 @@ def run(*, once: bool = False) -> None:
     gate = NotificationGate(
         roles=frozenset({GATE_ROLE}),
         cooldown_seconds=settings.gate_notify_cooldown_seconds,
+    )
+    unknown_gate = NotificationGate(
+        roles=frozenset({GATE_ROLE}),
+        cooldown_seconds=settings.gate_notify_unknown_cooldown_seconds,
     )
     path = state_path(settings.data_dir)
     sent = load_state(path)
@@ -234,6 +267,8 @@ def run(*, once: bool = False) -> None:
                 events,
                 data_dir=settings.data_dir,
                 now=time.monotonic(),
+                wall_now=time.time(),
+                unknown_gate=unknown_gate,
                 already_sent=sent,
             )
             if delivered:
