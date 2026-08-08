@@ -906,6 +906,12 @@ body:not(.previews-on) .preview-off-note { display: flex; }
 /* Кнопка вместо картинки сверх предела живых потоков. Предел не про узел, а
    про браузер: он держит к одному хосту около шести соединений, а поток
    превью — это соединение, которое никогда не кончается. */
+/* Атрибут `hidden` прячет элемент правилом браузера `display: none`, а у
+   `.viewport` стоит собственный `display: block` — и он сильнее. Без этой
+   строки скрытая картинка оставалась на месте и показывала подпись
+   «Живое изображение камеры…» вместо ничего. */
+.viewport[hidden] { display: none; }
+
 .preview-queued { cursor: pointer; }
 .preview-queued:hover { color: var(--text); border-color: var(--line-strong); }
 body:not(.previews-on) .preview-queued { display: none; }
