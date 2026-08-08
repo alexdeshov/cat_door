@@ -126,8 +126,21 @@
     image.addEventListener("load", () => liveStreamAttempts.delete(image));
   });
 
+  // Вкладка в фоне отпускает потоки, а не держит их. Живое превью — это
+  // соединение, которое никогда не кончается, и лимит браузера общий на все
+  // вкладки: забытая вкладка с камерами занимала места, и соседняя страница
+  // висела бесконечно, хотя узел отвечал за десятую долю секунды.
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible") liveStreams().forEach(reopenLiveStream);
+    if (document.visibilityState === "visible") {
+      applyPreviewState();
+      return;
+    }
+    liveStreams().forEach(image => {
+      if (image.getAttribute("src")) {
+        image.removeAttribute("src");
+        liveStreamAttempts.delete(image);
+      }
+    });
   });
 
   // Превью показываются сразу, а кнопка в шапке их прячет. Прежде было
