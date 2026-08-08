@@ -26,7 +26,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from src.common.durable_write import write_text_durably
-from src.common.notifications import NotificationGate
+from src.common.notifications import NotificationGate, notification_snapshot_path
 from src.common.sd_notify import Notifier
 from src.common.settings import ConfigurationError, Settings, validate_runtime_paths
 from src.common.telegram import TelegramClient, TelegramError
@@ -208,7 +208,7 @@ def notify_about_events(
         if reason is not None:
             logger.info("Событие %s пропущено: %s", event.id, reason)
             continue
-        snapshot = data_dir / "runtime" / f"gate-notify-{event.id}.jpg"
+        snapshot = notification_snapshot_path(data_dir, f"gate-{event.id}")
         caption = gate_caption(event, settings.display_timezone)
         try:
             if fetch_snapshot(settings.gate_api_url, event, snapshot):

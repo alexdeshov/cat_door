@@ -1,3 +1,4 @@
+import os
 import time
 from pathlib import Path
 
@@ -43,3 +44,26 @@ def test_a_write_in_progress_is_left_alone(runtime_path: Path) -> None:
 
 def test_empty_data_directory_is_not_an_error(runtime_path: Path) -> None:
     assert sweep_incomplete_files(runtime_path / "нет-такого") == 0
+
+
+def test_notification_snapshots_do_not_survive_a_power_cut(runtime_path: Path) -> None:
+    """Снимок удаляется в `finally`, а он при пропаже питания не исполняется.
+
+    Каталог отдельный именно поэтому: всё, что в нём осталось, заведомо
+    брошено — сообщение либо ушло, либо уже никогда не уйдёт.
+    """
+    snapshots = runtime_path / "runtime" / "notifications"
+    snapshots.mkdir(parents=True)
+    abandoned = snapshots / "pass-7.jpg"
+    abandoned.write_bytes(b"\xff\xd8jpeg\xff\xd9")
+    fresh = snapshots / "gate-1786171119.jpg"
+    fresh.write_bytes(b"\xff\xd8jpeg\xff\xd9")
+    old = time.time() - 3600
+    os.utime(abandoned, (old, old))
+
+    removed = sweep_incomplete_files(runtime_path)
+
+    assert removed == 1
+    assert not abandoned.exists()
+    # Свежий снимок мог писаться прямо сейчас — его не трогаем.
+    assert fresh.exists()
