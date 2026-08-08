@@ -237,7 +237,12 @@ def notify_about_events(
         active_gate = gate if name is not None else (unknown_gate or gate)
         reason = active_gate.blocked_reason(GATE_ROLE, now)
         if reason is not None:
+            # Пропущенное по паузе событие забывается, а не откладывается.
+            # Иначе оно ждало бы в окне наблюдения и уходило в чат, как только
+            # пауза истечёт, — уведомление о человеке, которого видели три
+            # минуты назад. Пауза означает «не беспокоить», а не «потом».
             logger.info("Событие %s пропущено: %s", event.id, reason)
+            seen[event.id] = event.started_at
             continue
         snapshot = notification_snapshot_path(data_dir, f"gate-{event.id}")
         caption = gate_caption(event, settings.display_timezone, allowed[event.camera])

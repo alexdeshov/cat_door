@@ -424,3 +424,39 @@ def test_gate_cameras_come_from_the_inventory(runtime_path: Path) -> None:
     )
 
     assert gate_cameras(runtime_path) == {"test_cam": "Калитка"}
+
+
+def test_a_skipped_event_is_forgotten_not_postponed(runtime_path: Path, monkeypatch) -> None:
+    """Пауза означает «не беспокоить», а не «расскажу через две минуты».
+
+    Событие, пропущенное по паузе, оставалось в окне наблюдения и уходило в чат,
+    как только пауза истекала, — про человека, которого видели три минуты назад.
+    """
+    sent: list[str] = []
+    monkeypatch.setattr("src.gate.notify.fetch_snapshot", lambda *args, **kwargs: False)
+    monkeypatch.setattr(
+        "src.common.telegram.TelegramClient.send_message",
+        lambda self, text: sent.append(text),
+    )
+    gate = NotificationGate(roles=frozenset({GATE_ROLE}), cooldown_seconds=120.0)
+    gate.remember_sent(now=0.0)
+    settings = _settings()
+    client = TelegramClient("8999303876:test", "12345")
+    already: dict[str, float] = {}
+    guest = _event(id="гость", sub_label="Алекс")
+
+    # пауза ещё идёт — событие пропускается
+    notify_about_events(
+        settings, client, gate, [guest], data_dir=runtime_path,
+        now=10.0, wall_now=guest.started_at + 60,
+        already_sent=already, cameras={"gate": "Калитка"},
+    )
+    # пауза истекла, но старое событие уже забыто
+    notify_about_events(
+        settings, client, gate, [guest], data_dir=runtime_path,
+        now=200.0, wall_now=guest.started_at + 250,
+        already_sent=already, cameras={"gate": "Калитка"},
+    )
+
+    assert sent == []
+    assert "гость" in already
