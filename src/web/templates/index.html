@@ -319,10 +319,61 @@
     </p>
   </div>
 </section>
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>Уведомления</h2>
+    <span class="muted">телеграм</span>
+  </div>
+  <div class="panel-body stack">
+    <div class="controls">
+      <button id="notification-test" type="button" {{ "disabled" if not notifications.configured }}>
+        Отправить тестовое
+      </button>
+      <span id="notification-result" class="muted">
+        {% if notifications.configured %}
+          Камеры: {{ notifications.roles }} · пауза {{ notifications.cooldown_minutes }} мин
+        {% else %}
+          Бот не настроен: нет токена или адреса чата в catdoor.env
+        {% endif %}
+      </span>
+    </div>
+    <p class="muted" style="font-size: 13px">
+      Уведомления шлёт recorder при записи прохода. Камера подхода намеренно
+      молчит: там детектор пока не отличает кота от тени, и каждое пятое
+      сообщение было бы ложным.
+    </p>
+  </div>
+</section>
 {% endblock %}
 
 {% block scripts %}
 {% include "_circuit_scripts.html" %}
+<script>
+  // Проверка бота: единственное место, где неверная настройка проявляется
+  // молчанием, поэтому ответ Телеграма показывается дословно.
+  const notificationTest = document.querySelector("#notification-test");
+  const notificationResult = document.querySelector("#notification-result");
+  notificationTest?.addEventListener("click", async () => {
+    notificationTest.disabled = true;
+    notificationResult.textContent = "Отправляю…";
+    try {
+      const response = await fetch("/api/notifications/test", {method: "POST"});
+      const data = await response.json().catch(() => ({}));
+      if (response.ok && data.ok) {
+        notificationResult.textContent = "Отправлено — проверьте телефон";
+        notificationResult.className = "ok";
+      } else {
+        notificationResult.textContent = data.reason || data.detail || "Не отправилось";
+        notificationResult.className = "bad";
+      }
+    } catch (error) {
+      notificationResult.textContent = "Админка не ответила";
+      notificationResult.className = "bad";
+    }
+    notificationTest.disabled = false;
+  });
+</script>
 <script>
   function formatVideoTime(seconds) {
     if (!Number.isFinite(seconds)) return "0:00";

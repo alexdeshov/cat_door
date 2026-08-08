@@ -28,7 +28,7 @@ from src.common.camera_registry import (
 )
 from src.common.capture_mode import CaptureMode, capture_mode_path, load_capture_mode
 from src.common.circuits import circuits_path, load_circuits
-from src.common.database import create_session_factory
+from src.common.database import Event, create_session_factory
 from src.common.detection_config import (
     CameraDetectionConfig,
     DetectionConfig,
@@ -37,8 +37,10 @@ from src.common.detection_config import (
 )
 from src.common.metrics import ScoredPrediction, aggregate_frame_predictions, mean_or_none
 from src.common.model_registry import register_model_version
+from src.common.notifications import NotificationGate, pass_caption
 from src.common.sd_notify import Notifier
 from src.common.settings import ConfigurationError, Settings, validate_runtime_paths
+from src.common.telegram import TelegramClient, TelegramError
 from src.inference.cat_detector import (
     CatDetectionResult,
     OpenVinoCatDetector,
@@ -58,7 +60,7 @@ from src.recorder.events import (
     expire_stale_recordings,
     persist_automatic_event,
 )
-from src.recorder.ffmpeg import probe_stream
+from src.recorder.ffmpeg import extract_frame, probe_stream
 from src.recorder.frames import active_hwaccel, rgb_frame_stream
 from src.recorder.preview import annotate_detections, preview_path, publish_preview
 from src.recorder.status import write_recorder_status
@@ -1190,6 +1192,95 @@ def monitor_automatic(
         journal.close()
 
 
+_notification_gate_lock = threading.Lock()
+_notification_gate_instance: NotificationGate | None = None
+
+
+def _notification_gate(settings: Settings) -> NotificationGate:
+    """Пауза между уведомлениями — общая на процесс.
+
+    События публикуются каждое своим потоком, и отдельная копия у каждого
+    означала бы, что паузы нет вовсе: три прохода подряд дали бы три сообщения.
+    Пустой набор ролей — выключенные уведомления; ненастроенный бот считается
+    именно этим случаем, а не ошибкой.
+    """
+    global _notification_gate_instance
+    with _notification_gate_lock:
+        if _notification_gate_instance is None:
+            configured = bool(settings.telegram_bot_token and settings.telegram_chat_id)
+            _notification_gate_instance = NotificationGate(
+                roles=frozenset(settings.notify_roles) if configured else frozenset(),
+                cooldown_seconds=settings.notify_cooldown_seconds,
+            )
+        return _notification_gate_instance
+
+
+def reset_notification_gate() -> None:
+    """Только для тестов: пауза живёт на весь процесс."""
+    global _notification_gate_instance
+    with _notification_gate_lock:
+        _notification_gate_instance = None
+
+
+def _notify_about_pass(
+    settings: Settings,
+    request: AutomaticEventRequest,
+    event: Event,
+    journal: DetectionJournal,
+) -> None:
+    """Сообщить о проходе в Телеграм. Отказ уведомления не отменяет проход.
+
+    Поэтому здесь ловится всё: проход уже записан и лежит в базе, и падать
+    из-за недоступного мессенджера — значит менять важное на второстепенное.
+    """
+    reason = _notification_gate(settings).blocked_reason(
+        request.initiating_camera,
+        time.monotonic(),
+    )
+    if reason is not None:
+        journal.write("notification_skipped", event_id=event.id, reason=reason)
+        return
+    client = TelegramClient(settings.telegram_bot_token, settings.telegram_chat_id)
+    identity = next(
+        (
+            prediction.predicted_name
+            for prediction in request.predictions
+            if prediction.decision == "known" and prediction.predicted_name
+        ),
+        None,
+    )
+    caption = pass_caption(
+        when=event.created_at,
+        timezone=settings.display_timezone,
+        role=request.initiating_camera,
+        confidence=max(request.confidence_face, request.confidence_side),
+        identity=identity,
+    )
+    snapshot = settings.data_dir / "runtime" / f"notification-{event.id}.jpg"
+    media = event.media_path or event.side_media_path
+    try:
+        frame_taken = bool(media) and extract_frame(
+            settings.ffmpeg_path,
+            settings.data_dir / str(media),
+            snapshot,
+        )
+        if frame_taken:
+            client.send_photo(snapshot, caption)
+        else:
+            client.send_message(caption)
+    except (TelegramError, OSError) as exc:
+        journal.write(
+            "notification_failed",
+            event_id=event.id,
+            message=str(exc)[:300],
+        )
+        return
+    finally:
+        snapshot.unlink(missing_ok=True)
+    _notification_gate(settings).remember_sent(time.monotonic())
+    journal.write("notification_sent", event_id=event.id)
+
+
 def _persist_after_segment_close(
     settings: Settings,
     request: AutomaticEventRequest,
@@ -1212,6 +1303,7 @@ def _persist_after_segment_close(
         )
         return
     journal.write("event_published", event_id=event.id, status=event.status)
+    _notify_about_pass(settings, request, event, journal)
 
 
 def run(*, once: bool = False, probe_seconds: float | None = None) -> None:

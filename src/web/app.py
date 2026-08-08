@@ -100,6 +100,7 @@ from src.common.system_stats import (
     read_cpu_temperature,
     read_memory_mb,
 )
+from src.common.telegram import TelegramClient, TelegramError
 from src.recorder.detection_journal import frame_journal_path
 from src.recorder.ffmpeg import RecorderError, mjpeg_stream, probe_stream, record_clip
 from src.recorder.preview import local_mjpeg_stream, preview_is_fresh, preview_path
@@ -164,6 +165,20 @@ def _read_status(path: Path) -> dict[str, object] | None:
     except (OSError, json.JSONDecodeError):
         return None
     return payload if isinstance(payload, dict) else None
+
+
+def _notifications_view(settings: Settings) -> dict[str, object]:
+    """Что показать про уведомления, ни разу не назвав токен.
+
+    Страница админки открыта всякому в домашней сети, поэтому наружу уходит
+    только «настроен или нет» и правила тишины.
+    """
+    roles = {"face": "дверца", "side": "подход"}
+    return {
+        "configured": bool(settings.telegram_bot_token and settings.telegram_chat_id),
+        "roles": ", ".join(roles.get(role, role) for role in settings.notify_roles) or "нет",
+        "cooldown_minutes": round(settings.notify_cooldown_seconds / 60),
+    }
 
 
 def _as_utc(value: datetime) -> datetime:
@@ -812,6 +827,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "circuits": circuits_view(current_circuits()),
                 "stream_version": uuid4().hex,
                 "detection_config": current_detection_config(),
+                "notifications": _notifications_view(settings),
             },
         )
 
@@ -971,6 +987,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(422, "У камеры не задан адрес")
         reason = probe_stream(settings.ffmpeg_path, url)
         return {"ok": reason is None, "reason": reason}
+
+    @app.post("/api/notifications/test")
+    def test_notification() -> dict[str, object]:
+        """Проверить бота, не дожидаясь кота.
+
+        Настройка уведомлений — единственное место в системе, где ошибка
+        проявляется молчанием: неверный токен, чужой чат и остановленный бот
+        выглядят одинаково никак. Кнопка превращает это в ответ Телеграма.
+        """
+        client = TelegramClient(settings.telegram_bot_token, settings.telegram_chat_id)
+        if not client.configured:
+            raise HTTPException(422, "Бот не настроен: нет токена или адреса чата")
+        try:
+            client.send_message("CatDoor на связи: проверка уведомлений.")
+        except TelegramError as exc:
+            return {"ok": False, "reason": str(exc)}
+        return {"ok": True, "reason": None}
 
     def camera_stream(find: Callable[[CameraRegistry], CameraRecord | None]) -> StreamingResponse:
         camera = find(current_registry())
