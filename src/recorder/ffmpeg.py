@@ -125,6 +125,60 @@ def record_clip(
     publish_file_durably(temporary, destination)
 
 
+def extract_frame(
+    ffmpeg_path: str,
+    video: Path,
+    destination: Path,
+    *,
+    at_seconds: float = 1.0,
+    timeout_seconds: float = 20.0,
+) -> bool:
+    """Вынуть один кадр из записи прохода. `False` — не получилось.
+
+    Нужен для уведомления: телефон показывает картинку сразу, а ролик надо
+    открывать. Кадр берётся не с начала — там кот ещё только входит в кадр, а
+    иногда его и нет: запись начинается с предбуфера.
+    """
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    command = [
+        ffmpeg_path,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-ss",
+        f"{at_seconds:g}",
+        "-i",
+        str(video),
+        "-frames:v",
+        "1",
+        "-q:v",
+        "3",
+        "-y",
+        str(destination),
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if result.returncode != 0 or not destination.is_file() or destination.stat().st_size == 0:
+        destination.unlink(missing_ok=True)
+        logger.warning(
+            "Кадр для уведомления не вынулся из %s: %s",
+            video.name,
+            mask_credentials((result.stderr or "").strip()) or "ffmpeg ничего не сообщил",
+        )
+        return False
+    return True
+
+
 def probe_stream(
     ffmpeg_path: str,
     rtsp_url: str,

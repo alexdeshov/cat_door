@@ -145,6 +145,14 @@ class Settings(BaseSettings):
     detection_max_event_seconds: float = Field(default=60.0, ge=0.0, le=600.0)
     detection_log_max_bytes: int = Field(default=10_000_000, ge=100_000, le=100_000_000)
     detection_log_backup_count: int = Field(default=5, ge=1, le=20)
+    # Уведомления в Телеграм. Токен — секрет: он живёт в /etc/catdoor/catdoor.env
+    # и не должен попадать ни в журнал, ни в инвентарь камер, ни в снимки
+    # состояния. Роли по умолчанию — только дверца: на подходе детектор пока
+    # не отличает кота от тени, и телефон звонил бы листвой.
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
+    notify_roles: list[str] = Field(default_factory=lambda: ["face"])
+    notify_cooldown_seconds: float = Field(default=300.0, ge=0.0, le=86400.0)
     local_training_epochs: int = Field(default=2, ge=1, le=100)
     web_host: str = "127.0.0.1"
     web_port: int = Field(default=8080, ge=1, le=65535)

@@ -12,6 +12,7 @@ from src.common.circuits import CIRCUIT_TITLES, circuits_path, load_circuits
 from src.common.database import EvaluationRun, Event, create_session_factory
 from src.common.gate_service import GateStatus
 from src.common.settings import Settings
+from src.common.telegram import TelegramError
 from src.recorder.status import write_recorder_status
 from src.web.app import create_app
 
@@ -2060,3 +2061,42 @@ def test_wide_tables_can_scroll_inside_their_panel() -> None:
             if "table-scroll" not in previous:
                 unwrapped.append(f"{template.name}:{number + 1}")
     assert unwrapped == []
+
+
+def test_notification_test_button_reports_what_telegram_answered(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    """Неверный токен и чужой чат выглядят одинаково никак — кроме этой кнопки."""
+    client = TestClient(
+        create_app(
+            Settings(
+                data_dir=runtime_path,
+                database_path=runtime_path / "test.sqlite3",
+                telegram_bot_token="8999303876:test",
+                telegram_chat_id="12345",
+            )
+        )
+    )
+    monkeypatch.setattr(
+        "src.common.telegram.TelegramClient.send_message",
+        lambda self, text: (_ for _ in ()).throw(TelegramError("Телеграм отказал (401)")),
+    )
+
+    response = client.post("/api/notifications/test")
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": False, "reason": "Телеграм отказал (401)"}
+
+
+def test_notification_test_refuses_when_the_bot_is_not_configured(runtime_path: Path) -> None:
+    client = TestClient(
+        create_app(
+            Settings(data_dir=runtime_path, database_path=runtime_path / "test.sqlite3")
+        )
+    )
+
+    response = client.post("/api/notifications/test")
+
+    assert response.status_code == 422
+    assert "не настроен" in response.json()["detail"]
