@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from typing import Self
 
+from src.common.camera_registry import camera_registry_path
 from src.common.notifications import NotificationGate
 from src.common.settings import Settings
 from src.common.telegram import TelegramClient, TelegramError
@@ -115,6 +116,7 @@ def test_only_interesting_labels_reach_the_phone(runtime_path: Path, monkeypatch
         data_dir=runtime_path,
         now=10.0,
         wall_now=_event().started_at + 60,
+        cameras={"gate": "Калитка", "gate_2": "Калитка 2"},
     )
 
     assert delivered == 1
@@ -142,6 +144,7 @@ def test_one_guest_gives_one_message(runtime_path: Path, monkeypatch) -> None:
         data_dir=runtime_path,
         now=10.0,
         wall_now=_event().started_at + 60,
+        cameras={"gate": "Калитка", "gate_2": "Калитка 2"},
     )
 
     assert len(sent) == 1
@@ -173,6 +176,7 @@ def test_snapshot_goes_with_the_message_and_is_cleaned_up(
         data_dir=runtime_path,
         now=10.0,
         wall_now=_event().started_at + 60,
+        cameras={"gate": "Калитка", "gate_2": "Калитка 2"},
     )
 
     assert photos and "Алекс" in photos[0]
@@ -196,6 +200,7 @@ def test_a_silent_telegram_does_not_stop_the_batch(runtime_path: Path, monkeypat
         data_dir=runtime_path,
         now=10.0,
         wall_now=_event().started_at + 60,
+        cameras={"gate": "Калитка", "gate_2": "Калитка 2"},
     )
 
     assert delivered == 0
@@ -221,7 +226,7 @@ def test_old_events_leave_the_memory(runtime_path: Path) -> None:
 def test_caption_shows_the_local_time_and_the_recognised_name() -> None:
     caption = gate_caption(_event(sub_label="Алекс", started_at=1786171119.0), "Europe/Moscow")
 
-    assert caption.startswith("Калитка: Алекс · gate · ")
+    assert caption.startswith("Калитка: Алекс · ")
 
 
 def test_only_recognised_faces_reach_the_phone(runtime_path: Path, monkeypatch) -> None:
@@ -242,6 +247,7 @@ def test_only_recognised_faces_reach_the_phone(runtime_path: Path, monkeypatch) 
         data_dir=runtime_path,
         now=10.0,
         wall_now=_event().started_at + 60,
+        cameras={"gate": "Калитка", "gate_2": "Калитка 2"},
     )
 
     assert len(sent) == 1
@@ -265,11 +271,13 @@ def test_a_nameless_event_is_not_thrown_away_forever(runtime_path: Path, monkeyp
     notify_about_events(
         settings, client, gate, [_event(id="гость")],
         data_dir=runtime_path, now=10.0, wall_now=_event().started_at + 60, already_sent=already,
+        cameras={"gate": "Калитка"},
     )
     # второй опрос: то же событие, но Frigate успел его опознать
     notify_about_events(
         settings, client, gate, [_event(id="гость", sub_label="Алекс")],
         data_dir=runtime_path, now=20.0, wall_now=_event().started_at + 60, already_sent=already,
+        cameras={"gate": "Калитка"},
     )
 
     assert len(sent) == 1
@@ -293,6 +301,7 @@ def test_the_same_event_is_never_sent_twice(runtime_path: Path, monkeypatch) -> 
         notify_about_events(
             settings, client, gate, [_event()],
             data_dir=runtime_path, now=10.0, wall_now=_event().started_at + 60, already_sent=already,
+        cameras={"gate": "Калитка"},
         )
 
     assert len(sent) == 1
@@ -318,6 +327,7 @@ def test_a_stranger_gets_a_message_of_his_own(runtime_path: Path, monkeypatch) -
         now=10.0,
         wall_now=_event().started_at + 60,
         unknown_gate=unknown,
+        cameras={"gate": "Калитка"},
     )
 
     assert len(sent) == 2
@@ -343,7 +353,7 @@ def test_a_stranger_waits_out_the_grace_period(runtime_path: Path, monkeypatch) 
     notify_about_events(
         settings, client, gate, [guest],
         data_dir=runtime_path, now=10.0,
-        wall_now=guest.started_at + 5, already_sent=already,
+        wall_now=guest.started_at + 5, already_sent=already, cameras={"gate": "Калитка"},
     )
     assert sent == []
 
@@ -351,7 +361,7 @@ def test_a_stranger_waits_out_the_grace_period(runtime_path: Path, monkeypatch) 
     notify_about_events(
         settings, client, gate, [_event(id="гость", sub_label="Алекс")],
         data_dir=runtime_path, now=20.0,
-        wall_now=guest.started_at + 10, already_sent=already,
+        wall_now=guest.started_at + 10, already_sent=already, cameras={"gate": "Калитка"},
     )
 
     assert len(sent) == 1
@@ -363,3 +373,54 @@ def test_frigate_word_for_a_stranger_is_not_a_name() -> None:
     caption = gate_caption(_event(sub_label="unknown"), "Europe/Moscow")
 
     assert "неизвестный" in caption
+
+
+def test_only_the_gate_circuit_reaches_the_phone(runtime_path: Path, monkeypatch) -> None:
+    """Frigate ведёт общую ленту на оба контура узла.
+
+    Без отбора в чат шли уведомления и от камер регистратора — да ещё и с
+    подписью «Калитка», потому что источник считался очевидным.
+    """
+    sent: list[str] = []
+    monkeypatch.setattr("src.gate.notify.fetch_snapshot", lambda *args, **kwargs: False)
+    monkeypatch.setattr(
+        "src.common.telegram.TelegramClient.send_message",
+        lambda self, text: sent.append(text),
+    )
+    gate = NotificationGate(roles=frozenset({GATE_ROLE}), cooldown_seconds=0.0)
+
+    notify_about_events(
+        _settings(),
+        TelegramClient("8999303876:test", "12345"),
+        gate,
+        [
+            _event(id="калитка", camera="test_cam", sub_label="Алекс"),
+            _event(id="регистратор", camera="nvr_2", sub_label="Алекс"),
+        ],
+        data_dir=runtime_path,
+        now=10.0,
+        wall_now=_event().started_at + 60,
+        cameras={"test_cam": "Калитка"},
+    )
+
+    assert len(sent) == 1
+    assert sent[0].startswith("Калитка: Алекс · ")
+
+
+def test_gate_cameras_come_from_the_inventory(runtime_path: Path) -> None:
+    """Камеру могли перевести в другой контур минуту назад."""
+    from src.common.camera_registry import CameraRecord, CameraRegistry, save_registry
+    from src.gate.notify import gate_cameras
+
+    save_registry(
+        camera_registry_path(runtime_path),
+        CameraRegistry(
+            cameras=[
+                CameraRecord(id="test-cam", title="Калитка", circuit="gate", host="10.0.0.1"),
+                CameraRecord(id="nvr-2", title="Двор", circuit="nvr", host="10.0.0.2"),
+                CameraRecord(id="off", title="Снята", circuit="gate", host="10.0.0.3", enabled=False),
+            ]
+        ),
+    )
+
+    assert gate_cameras(runtime_path) == {"test_cam": "Калитка"}

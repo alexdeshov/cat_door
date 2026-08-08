@@ -25,7 +25,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from src.common.camera_registry import camera_registry_path, load_registry
 from src.common.durable_write import write_text_durably
+from src.common.frigate_config import frigate_camera_name
 from src.common.notifications import NotificationGate, notification_snapshot_path
 from src.common.sd_notify import Notifier
 from src.common.settings import ConfigurationError, Settings, validate_runtime_paths
@@ -54,6 +56,24 @@ class GateEvent:
     sub_label: str | None
     started_at: float
     has_snapshot: bool
+
+
+def gate_cameras(data_dir: Path) -> dict[str, str]:
+    """Камеры контура калитки: имя во Frigate — заголовок из инвентаря.
+
+    Frigate обслуживает оба контура узла разом, и его лента событий общая. Без
+    этого отбора в чат шли уведомления и от камер регистратора — с подписью
+    «Калитка», потому что источник считался очевидным. Инвентарь читается на
+    каждом опросе: камеру могли перевести в другой контур минуту назад.
+    """
+    registry = load_registry(camera_registry_path(data_dir))
+    if registry is None:
+        return {}
+    return {
+        frigate_camera_name(camera.id): (camera.title or camera.id)
+        for camera in registry.cameras
+        if camera.circuit == "gate" and camera.enabled
+    }
 
 
 def state_path(data_dir: Path) -> Path:
@@ -149,7 +169,7 @@ def recognised_name(event: GateEvent) -> str | None:
     return name
 
 
-def gate_caption(event: GateEvent, timezone: str) -> str:
+def gate_caption(event: GateEvent, timezone: str, title: str = "Калитка") -> str:
     """Подпись под снимком: кто, где и когда."""
     labels = {"person": "человек", "car": "машина", "cat": "кот", "dog": "собака"}
     name = recognised_name(event)
@@ -162,7 +182,7 @@ def gate_caption(event: GateEvent, timezone: str) -> str:
     else:
         who = labels.get(event.label, event.label or "движение")
     moment = datetime.fromtimestamp(event.started_at, UTC).astimezone(ZoneInfo(timezone))
-    return f"Калитка: {who} · {event.camera} · {moment.strftime('%H:%M')}"
+    return f"{title}: {who} · {moment.strftime('%H:%M')}"
 
 
 def notify_about_events(
@@ -176,20 +196,31 @@ def notify_about_events(
     wall_now: float,
     unknown_gate: NotificationGate | None = None,
     already_sent: dict[str, float] | None = None,
+    cameras: dict[str, str] | None = None,
 ) -> int:
     """Разобрать пачку событий. Возвращает число отправленных сообщений."""
     labels = set(settings.gate_notify_labels)
-    cameras = set(settings.gate_notify_cameras)
+    # Явный список камер в настройке — исключение на случай нестандартной
+    # схемы; обычно источник берётся из инвентаря по контуру.
+    allowed = (
+        {name: name for name in settings.gate_notify_cameras}
+        if settings.gate_notify_cameras
+        else (cameras if cameras is not None else gate_cameras(data_dir))
+    )
     seen = already_sent if already_sent is not None else {}
+    if events and not allowed:
+        # Молчание из-за нечитаемого инвентаря выглядело бы как «ничего не
+        # происходит», а это разные вещи.
+        logger.warning("Ни одной камеры контура калитки — сообщать не о чем")
     sent = 0
     for event in events:
         if event.id in seen:
             continue
         if labels and event.label not in labels:
             continue
-        # Пустой список камер означает «все»: у калитки их одна-две, и
-        # перечислять их руками — лишний повод забыть про новую.
-        if cameras and event.camera not in cameras:
+        # Frigate ведёт общую ленту на оба контура узла, и без этого отбора в
+        # чат шли бы события камер регистратора.
+        if event.camera not in allowed:
             continue
         name = recognised_name(event)
         if name is None:
@@ -209,7 +240,7 @@ def notify_about_events(
             logger.info("Событие %s пропущено: %s", event.id, reason)
             continue
         snapshot = notification_snapshot_path(data_dir, f"gate-{event.id}")
-        caption = gate_caption(event, settings.display_timezone)
+        caption = gate_caption(event, settings.display_timezone, allowed[event.camera])
         try:
             if fetch_snapshot(settings.gate_api_url, event, snapshot):
                 client.send_photo(snapshot, caption)
