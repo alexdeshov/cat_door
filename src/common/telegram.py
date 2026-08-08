@@ -26,6 +26,38 @@ class TelegramError(RuntimeError):
     """Сообщение не ушло. Текст уже без токена."""
 
 
+# Отказы Телеграма формально точны и совершенно непонятны тому, кто настраивает
+# бота впервые. Каждая подсказка здесь — из реальной попытки, а не из
+# документации.
+_HINTS = (
+    (
+        "can't send messages to the bot",
+        (
+            "адрес чата — это ваш личный идентификатор, а не идентификатор бота: "
+            "бот не может писать сам себе"
+        ),
+    ),
+    (
+        "chat not found",
+        (
+            "напишите боту первым: пока вы не нажали «Start», он не имеет права "
+            "начать разговор"
+        ),
+    ),
+    (
+        "bot was blocked by the user",
+        "бот заблокирован в телеграме — разблокируйте его в переписке",
+    ),
+    ("unauthorized", "токен не принят: проверьте, что скопирован он целиком, вместе с двоеточием"),
+)
+
+
+def hint_for(reason: str) -> str | None:
+    """Человеческое объяснение к отказу Телеграма, если оно известно."""
+    lowered = reason.lower()
+    return next((hint for marker, hint in _HINTS if marker in lowered), None)
+
+
 def _multipart(fields: dict[str, str], file_field: str, file_path: Path) -> tuple[bytes, str]:
     boundary = uuid.uuid4().hex
     parts: list[bytes] = []
