@@ -1470,7 +1470,7 @@ def test_gate_tab_is_honest_about_not_being_deployed(runtime_path: Path, monkeyp
 
     monkeypatch.setattr(
         "src.web.app.gate_status",
-        lambda unit: GateStatus("absent", "служба не установлена на узле"),
+        lambda unit, api_url="": GateStatus("absent", "служба не установлена на узле"),
     )
 
     page = client.get("/gate")
@@ -1576,7 +1576,7 @@ def test_the_panel_records_the_choice_without_touching_the_service(
     `NoNewPrivileges` в его юните запрещает любое повышение прав, поэтому
     попытка управлять службой отсюда была бы обречена в любом случае.
     """
-    monkeypatch.setattr("src.web.app.gate_status", lambda unit: GateStatus("stopped"))
+    monkeypatch.setattr("src.web.app.gate_status", lambda unit, api_url="": GateStatus("stopped"))
     client = make_client(runtime_path, monkeypatch)
 
     response = client.put("/api/circuits", json={"active": "gate"})
@@ -1587,7 +1587,7 @@ def test_the_panel_records_the_choice_without_touching_the_service(
 
 
 def test_an_undeployed_circuit_is_reported_as_such(runtime_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr("src.web.app.gate_status", lambda unit: GateStatus("absent"))
+    monkeypatch.setattr("src.web.app.gate_status", lambda unit, api_url="": GateStatus("absent"))
     client = make_client(runtime_path, monkeypatch)
 
     response = client.put("/api/circuits", json={"active": "cats"})
@@ -1956,7 +1956,7 @@ def test_nvr_tab_links_to_frigate(runtime_path: Path, monkeypatch) -> None:
     client = make_client(runtime_path, monkeypatch)
     monkeypatch.setattr(
         "src.web.app.gate_status",
-        lambda unit: GateStatus("running", ""),
+        lambda unit, api_url="": GateStatus("running", ""),
     )
 
     page = client.get("/nvr")

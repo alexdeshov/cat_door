@@ -346,3 +346,21 @@ def test_notification_uses_the_frame_the_detector_was_surest_about(
 
     assert len(photos) == 1
     assert not list((runtime_path / "runtime").glob("notification-*.jpg"))
+
+
+def test_uncertain_pass_is_recorded_but_not_announced() -> None:
+    """Порог уведомления выше порога записи намеренно.
+
+    Писать стоит всё сомнительное — потом разберём по ленте, — а будить
+    человека только тем, в чём детектор уверен.
+    """
+    gate = NotificationGate(
+        roles=frozenset({"face"}),
+        cooldown_seconds=0.0,
+        min_confidence=0.8,
+    )
+
+    assert gate.blocked_reason("face", now=1.0, confidence=0.62) == "below_notify_threshold:0.62"
+    assert gate.blocked_reason("face", now=1.0, confidence=0.81) is None
+    # Без переданной уверенности порог не проверяется: калитка судит иначе.
+    assert gate.blocked_reason("face", now=1.0) is None

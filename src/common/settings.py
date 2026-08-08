@@ -153,6 +153,9 @@ class Settings(BaseSettings):
     telegram_chat_id: str = ""
     notify_roles: list[str] = Field(default_factory=lambda: ["face"])
     notify_cooldown_seconds: float = Field(default=300.0, ge=0.0, le=86400.0)
+    # Порог уверенности для уведомления — выше порога записи намеренно: писать
+    # стоит всё сомнительное, а будить человека только уверенным.
+    notify_min_confidence: float = Field(default=0.8, ge=0.0, le=1.0)
     # Уведомления контура калитки. Источник — HTTP API самого Frigate на
     # локальном порту: наружу он не смотрит и пароля не спрашивает. Пустой
     # список камер означает «все», пустой список меток — «любые».
