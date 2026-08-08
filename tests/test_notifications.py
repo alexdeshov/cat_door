@@ -266,3 +266,14 @@ def test_recorder_survives_a_silent_telegram(runtime_path: Path, monkeypatch) ->
 
     written = (runtime_path / "runtime" / "detection.jsonl").read_text(encoding="utf-8")
     assert "notification_failed" in written
+
+
+def test_confusing_telegram_refusals_get_a_human_hint() -> None:
+    """«Бот не может писать боту» формально точно и совершенно непонятно."""
+    from src.common.telegram import hint_for
+
+    assert "не идентификатор бота" in (
+        hint_for("Телеграм отказал (403): Forbidden: the bot can't send messages to the bot") or ""
+    )
+    assert "нажали «Start»" in (hint_for("Bad Request: chat not found") or "")
+    assert hint_for("Телеграм отказал: что-то новое") is None

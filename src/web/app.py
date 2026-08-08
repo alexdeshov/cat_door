@@ -100,7 +100,7 @@ from src.common.system_stats import (
     read_cpu_temperature,
     read_memory_mb,
 )
-from src.common.telegram import TelegramClient, TelegramError
+from src.common.telegram import TelegramClient, TelegramError, hint_for
 from src.recorder.detection_journal import frame_journal_path
 from src.recorder.ffmpeg import RecorderError, mjpeg_stream, probe_stream, record_clip
 from src.recorder.preview import local_mjpeg_stream, preview_is_fresh, preview_path
@@ -1002,7 +1002,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             client.send_message("CatDoor на связи: проверка уведомлений.")
         except TelegramError as exc:
-            return {"ok": False, "reason": str(exc)}
+            hint = hint_for(str(exc))
+            return {"ok": False, "reason": f"{exc} — {hint}" if hint else str(exc)}
         return {"ok": True, "reason": None}
 
     def camera_stream(find: Callable[[CameraRegistry], CameraRecord | None]) -> StreamingResponse:
