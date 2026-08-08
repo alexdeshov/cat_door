@@ -157,7 +157,8 @@
           <div class="event-media stack">
             <div class="event-recording" data-camera-role="face">
               <div class="event-player">
-                <video preload="metadata" src="/media/{{ event.id }}/face"></video>
+                <video preload="metadata" src="/media/{{ event.id }}/face"
+                  {% if event.preview_offset_seconds %}data-start="{{ event.preview_offset_seconds }}"{% endif %}></video>
                 <div class="player-bar">
                   <button class="video-play" type="button" aria-label="Воспроизвести">▶</button>
                   <input class="video-seek" type="range" min="0" max="1000" value="0"
@@ -171,7 +172,8 @@
             {% if event.side_media_path %}
               <div class="event-recording" data-camera-role="side">
                 <div class="event-player">
-                  <video preload="metadata" src="/media/{{ event.id }}/side"></video>
+                  <video preload="metadata" src="/media/{{ event.id }}/side"
+                    {% if event.preview_offset_seconds %}data-start="{{ event.preview_offset_seconds }}"{% endif %}></video>
                   <div class="player-bar">
                     <button class="video-play" type="button" aria-label="Воспроизвести">▶</button>
                     <input class="video-seek" type="range" min="0" max="1000" value="0"
@@ -392,7 +394,16 @@
         `${formatVideoTime(video.currentTime)} / ${formatVideoTime(video.duration)}`;
     }
 
-    video.addEventListener("loadedmetadata", renderTime);
+    // Запись начинается с предбуфера в двенадцать секунд, и первые кадры —
+    // пустой настил. Открываем её на той секунде, где детектор был увереннее
+    // всего в коте; если такой секунды нет — с начала, как и раньше.
+    video.addEventListener("loadedmetadata", () => {
+      const start = Number(video.dataset.start);
+      if (Number.isFinite(start) && start > 0 && video.duration && start < video.duration) {
+        video.currentTime = start;
+      }
+      renderTime();
+    });
     video.addEventListener("timeupdate", () => {
       if (video.duration) seek.value = String((video.currentTime / video.duration) * 1000);
       renderTime();

@@ -21,6 +21,9 @@ class AutomaticEventRequest:
     confidence_face: float
     confidence_side: float
     predictions: tuple[AutomaticEventPrediction, ...] = ()
+    # Момент, когда детектор был увереннее всего в коте. Нужен, чтобы плеер
+    # открывал проход с него, а не с предбуфера, где кота ещё нет.
+    best_frame_at: float | None = None
 
 
 @dataclass(frozen=True)
@@ -65,6 +68,27 @@ def expire_stale_recordings(
     return len(stale)
 
 
+def _preview_offset(
+    first_segment: Path,
+    segment_seconds: float,
+    best_frame_at: float,
+) -> float | None:
+    """Секунда записи, на которой детектор увидел кота лучше всего.
+
+    Отсчёт от начала первого сегмента: сегмент считается завершённым по времени
+    правки файла, а начался он на свою длину раньше — так же, как их отбирает
+    `select_segments`.
+    """
+    try:
+        segment_started_at = first_segment.stat().st_mtime - segment_seconds
+    except OSError:
+        return None
+    offset = best_frame_at - segment_started_at
+    # Отрицательное смещение означало бы кадр раньше записи — такого не бывает,
+    # но округление часов и подмена сегментов теоретически могут его дать.
+    return round(offset, 1) if offset >= 0 else None
+
+
 def persist_automatic_event(
     database_path: Path,
     data_dir: Path,
@@ -91,6 +115,7 @@ def persist_automatic_event(
     ring_root = data_dir / "runtime" / "ring"
     completed: dict[str, Path] = {}
     errors: list[str] = []
+    preview_offset: float | None = None
     for role in ("face", "side"):
         segments = select_segments(
             ring_root / role,
@@ -98,6 +123,12 @@ def persist_automatic_event(
             request.ended_at,
             segment_seconds,
         )
+        # Запись склеивается из сегментов кольцевого буфера, и её нулевая
+        # секунда — начало первого из них, а не начало события. Отсчитывать
+        # смещение надо именно отсюда, иначе плеер промахнётся на длину
+        # предбуфера.
+        if role == "face" and segments and request.best_frame_at is not None:
+            preview_offset = _preview_offset(segments[0], segment_seconds, request.best_frame_at)
         destination = event_dir / f"{role}.mp4"
         try:
             concatenate_segments(ffmpeg_path, segments, destination)
@@ -118,6 +149,7 @@ def persist_automatic_event(
         stored_event.error_code = (
             f"automatic_capture_failed:{','.join(errors)}" if errors else None
         )
+        stored_event.preview_offset_seconds = preview_offset
         for prediction in request.predictions:
             session.add(
                 EventPrediction(
