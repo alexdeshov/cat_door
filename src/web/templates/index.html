@@ -815,6 +815,14 @@
           : `${confidences[role] ?? 0} · ${frames[role] ?? 0} кадров`;
         items.push(readout(role === "face" ? "идентификация" : "подход", value));
       }
+      if (result.detector_model) {
+        // Имя работающей модели, а не настройка: путь в конфиге могли
+        // поправить, а службу не перезапустить.
+        const model = result.detector_model.replace(/\.onnx$/, "");
+        const readoutModel = readout("детектор", model);
+        readoutModel.title = `вход ${result.detector_input_size || "?"} · ${result.detector_sha256 || ""}`;
+        items.push(readoutModel);
+      }
       if (result.detector_device_actual) {
         items.push(readout("OpenVINO", result.detector_device_actual));
       }

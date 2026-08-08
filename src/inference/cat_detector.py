@@ -108,6 +108,11 @@ class OpenVinoCatDetector:
             raise DetectorError("detector_manifest_invalid") from exc
         if _sha256(model_path) != expected_hash:
             raise DetectorError("detector_checksum_mismatch")
+        # Имя файла и начало контрольной суммы — чтобы человек мог убедиться,
+        # что работает та модель, которую он поставил. Настройка говорит лишь
+        # о намерении: путь могли поправить и забыть перезапустить службу.
+        self.model_name = model_path.name
+        self.model_sha256 = expected_hash
 
         try:
             import openvino as ov

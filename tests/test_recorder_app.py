@@ -833,6 +833,8 @@ def test_disabling_from_the_admin_stops_the_running_monitor(
         letterbox_value = 114
         resize_mode = "letterbox"
         letterbox_alignment = "center"
+        model_name = "cat-detector.onnx"
+        model_sha256 = "0" * 64
 
     monkeypatch.setattr("src.recorder.app.OpenVinoCatDetector", lambda *args: SilentDetector())
     monkeypatch.setattr("src.recorder.app._register_loaded_models", lambda *args: {"detector": 1})
@@ -906,3 +908,36 @@ def test_frame_worker_survives_an_unexpected_exception(
         stop.set()
         worker.join(timeout=10)
         assert not worker.is_alive()
+
+
+def test_status_names_the_model_that_actually_runs(runtime_path: Path) -> None:
+    """Путь в конфиге — намерение; служба могла подняться до правки.
+
+    Вопрос «какая модель работает» до этого требовал пароля от файла настроек:
+    в статусе не было ничего, кроме устройства OpenVINO.
+    """
+    from types import SimpleNamespace
+
+    from src.recorder.app import _detector_device_status
+
+    detector = SimpleNamespace(
+        device="CPU",
+        model_name="yolo11n-416.onnx",
+        input_size=416,
+        model_sha256="0123456789abcdef" * 4,
+    )
+
+    status = _detector_device_status(Settings(data_dir=runtime_path), detector)
+
+    assert status["detector_model"] == "yolo11n-416.onnx"
+    assert status["detector_input_size"] == "416"
+    assert status["detector_sha256"] == "0123456789ab"
+
+
+def test_status_without_a_detector_says_nothing_about_the_model(runtime_path: Path) -> None:
+    from src.recorder.app import _detector_device_status
+
+    status = _detector_device_status(Settings(data_dir=runtime_path))
+
+    assert status["detector_model"] is None
+    assert status["detector_sha256"] is None

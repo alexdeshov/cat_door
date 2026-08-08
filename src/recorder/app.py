@@ -344,9 +344,19 @@ def _detector_device_status(
     settings: Settings,
     detector: OpenVinoCatDetector | None = None,
 ) -> dict[str, str | None]:
+    """Чем и на чём считает детектор — по факту, а не по настройке.
+
+    Имя модели здесь по той же причине, по какой рядом стоит `hwaccel_actual`:
+    путь в конфиге говорит о намерении, а служба могла подняться до правки. С
+    именем в статусе вопрос «какая модель работает» перестаёт требовать пароля
+    от файла настроек.
+    """
     return {
         "detector_device_requested": settings.detector_device,
         "detector_device_actual": detector.device if detector is not None else None,
+        "detector_model": detector.model_name if detector is not None else None,
+        "detector_input_size": str(detector.input_size) if detector is not None else None,
+        "detector_sha256": detector.model_sha256[:12] if detector is not None else None,
     }
 
 
