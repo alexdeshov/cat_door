@@ -25,7 +25,15 @@ from pathlib import Path
 # отключениями питания.
 ABANDONED_AFTER_SECONDS = 60.0
 
-_TEMPORARY_PATTERNS = ("**/.*.tmp", "**/*.part.mp4", "**/*.concat.txt")
+# Снимок для уведомления удаляется сразу после отправки — в `finally`, который
+# при пропаже питания не исполняется. Поэтому он лежит в отдельном каталоге:
+# любой оставшийся там файл заведомо брошен.
+_TEMPORARY_PATTERNS = (
+    "**/.*.tmp",
+    "**/*.part.mp4",
+    "**/*.concat.txt",
+    "notifications/*.jpg",
+)
 
 
 def _older_than(path: Path, cutoff: float) -> bool:

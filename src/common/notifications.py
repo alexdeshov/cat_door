@@ -19,7 +19,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 from zoneinfo import ZoneInfo
+
+
+def notification_snapshot_path(data_dir: Path, name: str) -> Path:
+    """Куда класть снимок, который вот-вот уедет в сообщение.
+
+    Отдельный каталог не про порядок, а про уборку: снимок удаляется в
+    `finally`, а он при пропаже питания не исполняется. Всё, что осталось в
+    этом каталоге, заведомо брошено — и подметается при старте recorder.
+    """
+    return data_dir / "runtime" / "notifications" / f"{name}.jpg"
 
 
 @dataclass

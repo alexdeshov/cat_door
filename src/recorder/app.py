@@ -37,7 +37,11 @@ from src.common.detection_config import (
 )
 from src.common.metrics import ScoredPrediction, aggregate_frame_predictions, mean_or_none
 from src.common.model_registry import register_model_version
-from src.common.notifications import NotificationGate, pass_caption
+from src.common.notifications import (
+    NotificationGate,
+    notification_snapshot_path,
+    pass_caption,
+)
 from src.common.sd_notify import Notifier
 from src.common.settings import ConfigurationError, Settings, validate_runtime_paths
 from src.common.telegram import TelegramClient, TelegramError
@@ -1306,7 +1310,7 @@ def _notify_about_pass(
         confidence=max(request.confidence_face, request.confidence_side),
         identity=identity,
     )
-    snapshot = settings.data_dir / "runtime" / f"notification-{event.id}.jpg"
+    snapshot = notification_snapshot_path(settings.data_dir, f"pass-{event.id}")
     media = event.media_path or event.side_media_path
     try:
         # Кадр с наибольшей уверенностью детектора запомнен ещё живым потоком.
