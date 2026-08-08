@@ -25,9 +25,14 @@ def _forget_hwaccel_verdict() -> None:
     reset_hwaccel_state()
 
 
-def _hardware_process(reads: list[bytes]) -> Mock:
+def _hardware_process(reads: list[bytes] | None = None) -> Mock:
     process = Mock()
-    process.stdout.read.side_effect = reads
+    if reads:
+        process.stdout.read.side_effect = reads
+    else:
+        # Молчащий поток: чтение отвечает пустотой сколько угодно раз — процесс
+        # может быть переиспользован и на программной попытке.
+        process.stdout.read.return_value = b""
     # На аппаратной попытке жалобы ffmpeg читает отдельный поток, поэтому
     # канал ошибок обязан быть настоящим итератором строк.
     process.stderr = io.BytesIO(b"")
@@ -217,9 +222,7 @@ def test_ring_segments_are_still_copied_under_hardware_decoding(
     monkeypatch,
 ) -> None:
     """Запись прохода идёт копированием: декодирование её не касается."""
-    process = _hardware_process([])
-    process.stdout.read.side_effect = None
-    process.stdout.read.return_value = b""
+    process = _hardware_process()
     commands = []
     monkeypatch.setattr(
         "src.recorder.frames.subprocess.Popen",
@@ -313,7 +316,7 @@ def test_failed_hardware_attempt_falls_back_without_losing_the_camera(
 
 def test_hardware_is_not_retried_after_it_failed_once(monkeypatch) -> None:
     """`_frame_worker` переподключается вечно, и каждый цикл пробовал бы снова."""
-    processes = [_hardware_process([b""]), Mock(), Mock()]
+    processes = [_hardware_process(), Mock(), Mock()]
     processes[1].stdout.read.return_value = b""
     processes[2].stdout.read.return_value = b""
     commands = []
@@ -344,3 +347,87 @@ def test_hardware_stream_that_died_after_frames_is_not_blamed(monkeypatch) -> No
 
     assert len(commands) == 1
     assert active_hwaccel() == "vaapi"
+
+
+def test_unreachable_camera_does_not_blame_the_media_engine(monkeypatch, caplog) -> None:
+    """Ровно это и случилось после перезагрузки: сеть камер поднялась позже.
+
+    Программный путь на недоступной камере провалился бы точно так же, поэтому
+    переоткрывать поток без ускорения незачем — и уж тем более нельзя терять
+    экономию до перезапуска службы.
+    """
+    commands = []
+
+    def fake_popen(command, **kwargs):
+        commands.append(command)
+        # Свой процесс на каждую попытку: канал ошибок читается один раз, и
+        # общий на всех молча превратил бы вторую жалобу в пустую.
+        process = _hardware_process()
+        process.stderr = io.BytesIO(
+            b"[tcp @ 0x1] Connection to tcp://192.168.1.170:554 failed: "
+            b"Network is unreachable\n"
+        )
+        return process
+
+    monkeypatch.setattr("src.recorder.frames.subprocess.Popen", fake_popen)
+
+    with caplog.at_level("WARNING", logger="catdoor.frames"):
+        list(rgb_frame_stream("ffmpeg", "rtsp://camera", 3.0, vaapi_device=RENDER_NODE))
+        list(rgb_frame_stream("ffmpeg", "rtsp://camera", 3.0, vaapi_device=RENDER_NODE))
+
+    assert len(commands) == 2
+    assert all("-hwaccel" in command for command in commands)
+    assert caplog.text == ""
+    assert active_hwaccel() is None
+
+
+def test_unknown_complaint_is_retried_after_the_cooldown(monkeypatch) -> None:
+    """Незнакомая жалоба — не приговор: причина могла быть разовой."""
+    monkeypatch.setattr("src.recorder.frames.HWACCEL_COOLDOWN_SECONDS", 0.0)
+    processes = [_hardware_process(), Mock(), _hardware_process(), Mock()]
+    for process in processes:
+        process.stdout.read.return_value = b""
+    commands = []
+
+    def fake_popen(command, **kwargs):
+        commands.append(command)
+        return processes.pop(0)
+
+    monkeypatch.setattr("src.recorder.frames.subprocess.Popen", fake_popen)
+
+    list(rgb_frame_stream("ffmpeg", "rtsp://camera", 3.0, vaapi_device=RENDER_NODE))
+    list(rgb_frame_stream("ffmpeg", "rtsp://camera", 3.0, vaapi_device=RENDER_NODE))
+
+    # Первая попытка аппаратная, откат программный, а следующее подключение
+    # снова пробует видеоядро.
+    assert "-hwaccel" in commands[0]
+    assert "-hwaccel" not in commands[1]
+    assert "-hwaccel" in commands[2]
+
+
+def test_device_failure_still_locks_the_hardware_path(monkeypatch) -> None:
+    """Жалоба про устройство — приговор до перезапуска службы."""
+    broken = _hardware_process()
+    broken.stderr = io.BytesIO(
+        b"[AVHWDeviceContext @ 0x1] Failed to initialise VAAPI connection: -1.\n"
+        b"Device creation failed: -22.\n"
+    )
+    software = Mock()
+    software.stdout.read.return_value = b""
+    processes = [broken, software, Mock()]
+    processes[2].stdout.read.return_value = b""
+    commands = []
+
+    def fake_popen(command, **kwargs):
+        commands.append(command)
+        return processes.pop(0)
+
+    monkeypatch.setattr("src.recorder.frames.subprocess.Popen", fake_popen)
+
+    list(rgb_frame_stream("ffmpeg", "rtsp://camera", 3.0, vaapi_device=RENDER_NODE))
+    list(rgb_frame_stream("ffmpeg", "rtsp://camera", 3.0, vaapi_device=RENDER_NODE))
+
+    assert "-hwaccel" in commands[0]
+    assert "-hwaccel" not in commands[1]
+    assert "-hwaccel" not in commands[2]
+    assert active_hwaccel() == "none"

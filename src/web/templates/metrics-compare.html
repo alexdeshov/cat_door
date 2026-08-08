@@ -33,19 +33,21 @@
       {% else %}
         <p class="bad">Можно сравнивать только два запуска одного типа.</p>
       {% endif %}
-      <table>
-        <thead><tr><th>Метрика</th><th>#{{ selected[0].id }}</th><th>#{{ selected[1].id }}</th><th>Дельта</th></tr></thead>
-        <tbody>
-        {% for row in metric_rows %}
-          <tr>
-            <td>{{ row.label }}</td>
-            <td>{{ "%.4f"|format(row.left) if row.left is not none else "—" }}</td>
-            <td>{{ "%.4f"|format(row.right) if row.right is not none else "—" }}</td>
-            <td class="{{ row.delta_class }}">{{ "%+.4f"|format(row.delta) if row.delta is not none else "—" }}</td>
-          </tr>
-        {% endfor %}
-        </tbody>
-      </table>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>Метрика</th><th>#{{ selected[0].id }}</th><th>#{{ selected[1].id }}</th><th>Дельта</th></tr></thead>
+          <tbody>
+          {% for row in metric_rows %}
+            <tr>
+              <td>{{ row.label }}</td>
+              <td>{{ "%.4f"|format(row.left) if row.left is not none else "—" }}</td>
+              <td>{{ "%.4f"|format(row.right) if row.right is not none else "—" }}</td>
+              <td class="{{ row.delta_class }}">{{ "%+.4f"|format(row.delta) if row.delta is not none else "—" }}</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
     </section>
   {% endif %}
 {% endblock %}
