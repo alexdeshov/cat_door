@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import json
 
+import pytest
+from pydantic import ValidationError
+
 from src.common.detection_config import (
+    CameraDetectionConfig,
     DetectionConfig,
     load_detection_config,
     save_detection_config,
@@ -99,3 +103,30 @@ def test_roi_outside_frame_falls_back_to_defaults(runtime_path) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
 
     assert load_detection_config(path, config) == config
+
+
+def test_sampling_ceiling_follows_the_hardware() -> None:
+    """Потолок частоты ставился под детектор на процессоре.
+
+    Там кадр стоил 26–41 мс, и одиннадцать кадров в секунду с двух камер были
+    практическим пределом. На видеоядре кадр стоит 10 мс, и двадцать кадров
+    занимают пятую часть его времени.
+    """
+    config = CameraDetectionConfig(
+        confidence_threshold=0.3,
+        box_min_confidence=0.15,
+        confirmation_frames=2,
+        window_frames=5,
+        sample_fps=12.0,
+    )
+
+    assert config.sample_fps == 12.0
+
+    with pytest.raises(ValidationError):
+        CameraDetectionConfig(
+            confidence_threshold=0.3,
+            box_min_confidence=0.15,
+            confirmation_frames=2,
+            window_frames=5,
+            sample_fps=25.0,
+        )

@@ -28,7 +28,13 @@ class CameraDetectionConfig(BaseModel):
     box_min_confidence: float = Field(ge=0.0, le=1.0)
     confirmation_frames: int = Field(ge=1, le=20)
     window_frames: int = Field(ge=1, le=30)
-    sample_fps: float = Field(default=3.0, gt=0.0, le=10.0)
+    # Потолок частоты опроса. Прежние десять кадров ставились под детектор на
+    # процессоре: он стоил 26–41 мс на кадр, и одиннадцать кадров в секунду с
+    # двух камер были практическим пределом. На видеоядре кадр стоит 10 мс
+    # (замер 2026-08-08), и предел сместился: двадцать кадров занимают пятую
+    # часть его времени. Потолок остаётся, потому что настройка правится на
+    # живом узле и опечатка не должна ронять конвейер.
+    sample_fps: float = Field(default=3.0, gt=0.0, le=20.0)
     roi: DetectorRoi | None = None
 
     @model_validator(mode="after")
