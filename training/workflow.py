@@ -1,4 +1,5 @@
 import json
+import logging
 import shutil
 import subprocess
 import threading
@@ -67,6 +68,8 @@ class CatDetector(Protocol):
     def detect(self, rgb_frame: np.ndarray) -> CatDetectionResult: ...
 
 
+logger = logging.getLogger("catdoor.training")
+
 # Потолок кадров с одной записи. Событие длиной в пять минут иначе одно
 # перевесило бы десяток обычных проходов, а соседние секунды всё равно почти
 # одинаковы. Лишнее прореживается равномерно по всей записи, а не отрезается с
@@ -74,30 +77,37 @@ class CatDetector(Protocol):
 MAX_FRAMES_PER_VIEW = 60
 
 
-def extract_frames(
+def _extraction_command(
     ffmpeg_path: str,
     source: Path,
     destination_pattern: Path,
     *,
     rotate_180: bool,
-) -> list[Path]:
-    """Кадры записи, раз в секунду, по всей её длине.
-
-    Раньше здесь стояло `-frames:v 3`, то есть в набор шли первые три секунды
-    каждого прохода. Это худшие три секунды из возможных: событие начинается с
-    преролла, кот появляется в кадре позже и виден в среднем десятую часть
-    записи. Из 61 размеченного прохода набор получал 354 кадра, и кот был лишь
-    на единицах из них.
-    """
-    destination_pattern.parent.mkdir(parents=True, exist_ok=True)
+    vaapi_device: Path | None,
+) -> list[str]:
+    acceleration: list[str] = []
     filters = "fps=1"
+    if vaapi_device is not None:
+        acceleration = [
+            "-hwaccel",
+            "vaapi",
+            "-hwaccel_device",
+            str(vaapi_device),
+            "-hwaccel_output_format",
+            "vaapi",
+        ]
+        # Кадры прореживаются до скачивания: раз в секунду видеоядро отдаёт
+        # один кадр вместо двадцати пяти, и в обычную память едет ровно то,
+        # что нужно.
+        filters += ",hwdownload,format=nv12"
     if rotate_180:
         filters += ",transpose=2,transpose=2"
-    command = [
+    return [
         ffmpeg_path,
         "-hide_banner",
         "-loglevel",
         "error",
+        *acceleration,
         "-i",
         str(source),
         "-vf",
@@ -107,6 +117,9 @@ def extract_frames(
         "-y",
         str(destination_pattern),
     ]
+
+
+def _run_extraction(command: list[str], destination_pattern: Path) -> tuple[bool, list[Path], str]:
     result = subprocess.run(
         command,
         stdin=subprocess.DEVNULL,
@@ -121,7 +134,63 @@ def extract_frames(
     for placeholder in ("%02d", "%03d", "%04d"):
         pattern = pattern.replace(placeholder, "*")
     frames = sorted(destination_pattern.parent.glob(pattern))
-    if result.returncode != 0 or not frames:
+    return result.returncode == 0 and bool(frames), frames, (result.stderr or "").strip()
+
+
+def extract_frames(
+    ffmpeg_path: str,
+    source: Path,
+    destination_pattern: Path,
+    *,
+    rotate_180: bool,
+    vaapi_device: Path | None = None,
+) -> list[Path]:
+    """Кадры записи, раз в секунду, по всей её длине.
+
+    Раньше здесь стояло `-frames:v 3`, то есть в набор шли первые три секунды
+    каждого прохода. Это худшие три секунды из возможных: событие начинается с
+    преролла, кот появляется в кадре позже и виден в среднем десятую часть
+    записи. Из 61 размеченного прохода набор получал 354 кадра, и кот был лишь
+    на единицах из них.
+
+    `vaapi_device` отдаёт декодирование медиадвижку. Здесь это главный расход:
+    замер на настоящем проходе (58 секунд, 2688×1520) — 2.9 секунды по часам и
+    **20 секунд процессорного времени** на одну камеру, тогда как инференс по
+    полученным кадрам стоит полторы. Отказ видеоядра не должен ломать оценку,
+    поэтому команда пересобирается программной и запускается заново.
+    """
+    destination_pattern.parent.mkdir(parents=True, exist_ok=True)
+    if vaapi_device is not None:
+        succeeded, frames, complaint = _run_extraction(
+            _extraction_command(
+                ffmpeg_path,
+                source,
+                destination_pattern,
+                rotate_180=rotate_180,
+                vaapi_device=vaapi_device,
+            ),
+            destination_pattern,
+        )
+        if succeeded:
+            return thin_frames(frames, MAX_FRAMES_PER_VIEW)
+        for leftover in frames:
+            leftover.unlink(missing_ok=True)
+        logger.warning(
+            "Видеоядро не вырезало кадры из %s, перехожу на процессор: %s",
+            source.name,
+            complaint or "ffmpeg ничего не сообщил",
+        )
+    succeeded, frames, complaint = _run_extraction(
+        _extraction_command(
+            ffmpeg_path,
+            source,
+            destination_pattern,
+            rotate_180=rotate_180,
+            vaapi_device=None,
+        ),
+        destination_pattern,
+    )
+    if not succeeded:
         raise RuntimeError(f"ffmpeg could not extract frames from {source.name}")
     return thin_frames(frames, MAX_FRAMES_PER_VIEW)
 
