@@ -61,6 +61,7 @@ chmod 640 "$CONFIG_FILE"
 # отдельной ручной установкой, и обновления его юнитов молча не доезжали.
 for unit in catdoor-recorder.service catdoor-web.service \
         catdoor-gate-sync.service catdoor-gate-sync.path catdoor-gate-sync.timer \
+        catdoor-gate-notify.service \
         catdoor-cpu-thermal.service \
         catdoor-backup.service catdoor-backup.timer; do
     install -m 644 "$REPO_DIR/install/$unit" "$UNIT_DIR/$unit"
@@ -82,6 +83,15 @@ else
 fi
 systemctl enable catdoor-gate-sync.service catdoor-gate-sync.path \
     catdoor-gate-sync.timer >/dev/null
+
+# Уведомления о калитке включаются только там, где настроен бот: без токена
+# служба падала бы каждые пять секунд и засыпала журнал одной и той же жалобой.
+if grep -q '^CATDOOR_TELEGRAM_BOT_TOKEN=.\+' "$CONFIG_FILE" 2>/dev/null; then
+    systemctl enable catdoor-gate-notify.service >/dev/null
+    echo "уведомления о калитке включены (catdoor-gate-notify)"
+else
+    echo "уведомления о калитке не включены: в catdoor.env нет токена бота"
+fi
 
 # Резервное копирование включается только там, где есть куда копировать.
 # Включённый таймер без внешнего диска каждую ночь писал бы в журнал отказ, и

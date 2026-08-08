@@ -1,5 +1,6 @@
 import json
 import logging
+import math
 import shutil
 import subprocess
 import threading
@@ -193,6 +194,199 @@ def extract_frames(
     if not succeeded:
         raise RuntimeError(f"ffmpeg could not extract frames from {source.name}")
     return thin_frames(frames, MAX_FRAMES_PER_VIEW)
+
+
+def _ffprobe_path(ffmpeg_path: str) -> str:
+    """Рядом с ffmpeg лежит ffprobe: это одна поставка, не две."""
+    path = Path(ffmpeg_path)
+    if "ffmpeg" in path.name:
+        return str(path.with_name(path.name.replace("ffmpeg", "ffprobe", 1)))
+    return "ffprobe"
+
+
+def _video_geometry(ffmpeg_path: str, source: Path) -> tuple[int, int, float]:
+    """Размер кадра и длительность записи.
+
+    Без них сырой поток не разобрать: в нём нет ни заголовков, ни границ кадров
+    — только байты один за другим, и знать, где кончается кадр, можно лишь
+    заранее.
+    """
+    command = [
+        _ffprobe_path(ffmpeg_path),
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=width,height",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "json",
+        str(source),
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        payload = json.loads(result.stdout or "{}")
+        stream = payload["streams"][0]
+        width, height = int(stream["width"]), int(stream["height"])
+        duration = float(payload["format"]["duration"])
+    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError, KeyError, ValueError, IndexError) as exc:
+        raise RuntimeError(f"ffprobe could not describe {source.name}") from exc
+    if width <= 0 or height <= 0 or duration <= 0:
+        raise RuntimeError(f"ffprobe returned nonsense for {source.name}")
+    return width, height, duration
+
+
+def _kept_indices(total: int, limit: int) -> set[int]:
+    """Те же кадры, что оставил бы `thin_frames`, но по номерам, а не по файлам."""
+    if total <= limit:
+        return set(range(total))
+    step = total / limit
+    return {int(index * step) for index in range(limit)}
+
+
+def _decode_command(
+    ffmpeg_path: str,
+    source: Path,
+    *,
+    rotate_180: bool,
+    vaapi_device: Path | None,
+) -> list[str]:
+    acceleration: list[str] = []
+    filters = "fps=1"
+    if vaapi_device is not None:
+        acceleration = [
+            "-hwaccel",
+            "vaapi",
+            "-hwaccel_device",
+            str(vaapi_device),
+            "-hwaccel_output_format",
+            "vaapi",
+        ]
+        filters += ",hwdownload,format=nv12"
+    if rotate_180:
+        filters += ",transpose=2,transpose=2"
+    return [
+        ffmpeg_path,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        *acceleration,
+        "-i",
+        str(source),
+        "-vf",
+        filters,
+        "-an",
+        "-pix_fmt",
+        "rgb24",
+        "-f",
+        "rawvideo",
+        "pipe:1",
+    ]
+
+
+def _read_raw_frames(
+    command: list[str],
+    *,
+    width: int,
+    height: int,
+    keep: set[int],
+) -> list[np.ndarray]:
+    frame_bytes = width * height * 3
+    process = subprocess.Popen(
+        command,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+    frames: list[np.ndarray] = []
+    try:
+        assert process.stdout is not None
+        index = 0
+        while True:
+            chunks = bytearray()
+            while len(chunks) < frame_bytes:
+                chunk = process.stdout.read(frame_bytes - len(chunks))
+                if not chunk:
+                    break
+                chunks.extend(chunk)
+            if len(chunks) != frame_bytes:
+                return frames
+            # Ненужные кадры не копируются в память вовсе: запись в пять минут
+            # иначе держала бы в оперативке под четыре гигабайта.
+            if index in keep:
+                frames.append(
+                    np.frombuffer(bytes(chunks), dtype=np.uint8).reshape((height, width, 3))
+                )
+            index += 1
+    finally:
+        if process.stdout:
+            process.stdout.close()
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+
+
+def decode_sampled_frames(
+    ffmpeg_path: str,
+    source: Path,
+    *,
+    rotate_180: bool,
+    vaapi_device: Path | None = None,
+    limit: int = MAX_FRAMES_PER_VIEW,
+) -> list[np.ndarray]:
+    """Те же кадры раз в секунду, но сразу в память, без круга через JPEG.
+
+    Прежний путь кодировал каждый кадр в JPEG на диск, а следом распаковывал
+    обратно через PIL — четыре мегапикселя туда и столько же назад на каждый
+    кадр, полторы сотни кадров на событие. По замеру это около пятой части
+    времени оценки, и она уходила целиком в переупаковку.
+
+    Кадры выбираются тем же правилом, что и раньше: раз в секунду, не больше
+    `limit`, равномерно по всей записи.
+    """
+    width, height, duration = _video_geometry(ffmpeg_path, source)
+    # Фильтр `fps=1` отдаёт кадры в моменты 0, 1, 2 … пока они попадают в
+    # запись, то есть ровно `ceil(duration)` штук.
+    expected = max(1, math.ceil(duration))
+    keep = _kept_indices(expected, limit)
+    if vaapi_device is not None:
+        frames = _read_raw_frames(
+            _decode_command(
+                ffmpeg_path,
+                source,
+                rotate_180=rotate_180,
+                vaapi_device=vaapi_device,
+            ),
+            width=width,
+            height=height,
+            keep=keep,
+        )
+        if frames:
+            return frames
+        logger.warning(
+            "Видеоядро не отдало кадров из %s, перехожу на процессор",
+            source.name,
+        )
+    frames = _read_raw_frames(
+        _decode_command(ffmpeg_path, source, rotate_180=rotate_180, vaapi_device=None),
+        width=width,
+        height=height,
+        keep=keep,
+    )
+    if not frames:
+        raise RuntimeError(f"ffmpeg could not decode frames from {source.name}")
+    return frames
 
 
 def thin_frames(frames: list[Path], limit: int) -> list[Path]:
