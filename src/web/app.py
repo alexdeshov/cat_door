@@ -1560,6 +1560,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "--run-kind",
             payload.run_kind,
         ]
+        # Замер на настоящем проходе: вырезание кадров стоит 20 секунд
+        # процессорного времени на камеру, инференс по ним — полторы. Значит
+        # оценку ускоряет не модель, а видеоядро.
+        if settings.recorder_hwaccel == "vaapi":
+            command.extend(["--vaapi-device", str(settings.recorder_hwaccel_device)])
         for role in ("face", "side"):
             if role in identity_paths:
                 command.extend(

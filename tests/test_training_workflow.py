@@ -2,6 +2,7 @@ import json
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import numpy as np
@@ -400,3 +401,58 @@ def test_long_recordings_are_thinned_evenly() -> None:
     assert kept[0] == frames[0]
     # Последний оставленный кадр приходит из конца записи, а не из первой трети.
     assert kept[-1] == frames[90]
+
+
+def test_extraction_asks_the_media_engine_first(tmp_path: Path, monkeypatch) -> None:
+    """Декодирование — главный расход оценки, а не инференс."""
+    commands: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        (tmp_path / "frame-01.jpg").write_bytes(b"jpeg")
+        return SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr("training.workflow.subprocess.run", fake_run)
+
+    frames = extract_frames(
+        "ffmpeg",
+        tmp_path / "clip.mp4",
+        tmp_path / "frame-%02d.jpg",
+        rotate_180=False,
+        vaapi_device=Path("/dev/dri/renderD128"),
+    )
+
+    assert len(commands) == 1
+    command = commands[0]
+    assert command.index("-hwaccel") < command.index("-i")
+    assert command[command.index("-vf") + 1] == "fps=1,hwdownload,format=nv12"
+    assert len(frames) == 1
+
+
+def test_extraction_falls_back_to_the_processor(tmp_path: Path, monkeypatch, caplog) -> None:
+    """Узел без видеоядра обязан считать так же, просто медленнее."""
+    commands: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        if "-hwaccel" in command:
+            return SimpleNamespace(returncode=1, stderr="No VA display found")
+        (tmp_path / "frame-01.jpg").write_bytes(b"jpeg")
+        return SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr("training.workflow.subprocess.run", fake_run)
+
+    with caplog.at_level("WARNING", logger="catdoor.training"):
+        frames = extract_frames(
+            "ffmpeg",
+            tmp_path / "clip.mp4",
+            tmp_path / "frame-%02d.jpg",
+            rotate_180=True,
+            vaapi_device=Path("/dev/dri/renderD128"),
+        )
+
+    assert len(commands) == 2
+    assert "-hwaccel" not in commands[1]
+    assert commands[1][commands[1].index("-vf") + 1] == "fps=1,transpose=2,transpose=2"
+    assert len(frames) == 1
+    assert "No VA display found" in caplog.text

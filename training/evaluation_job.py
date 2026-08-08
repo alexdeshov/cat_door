@@ -72,12 +72,14 @@ def _load_frames(
     ffmpeg_path: str,
     source: Path,
     destination: Path,
+    vaapi_device: Path | None = None,
 ) -> list[np.ndarray]:
     paths = extract_frames(
         ffmpeg_path,
         source,
         destination / "frame-%02d.jpg",
         rotate_180=True,
+        vaapi_device=vaapi_device,
     )
     frames: list[np.ndarray] = []
     for frame_path in paths:
@@ -172,6 +174,7 @@ def run_evaluation(
     identity_threshold: float,
     status_path: Path,
     expected_run_kind: str | None = None,
+    vaapi_device: Path | None = None,
 ) -> None:
     factory = create_session_factory(database_path)
     temporary_root = data_dir / "runtime" / "evaluations" / f"{run_id:08d}"
@@ -248,6 +251,7 @@ def run_evaluation(
                                 ffmpeg_path,
                                 source,
                                 event_directory / role,
+                                vaapi_device,
                             )
                         camera_config = getattr(runtime_config, role)
                         detector_result = evaluate_detector_frames(
@@ -294,6 +298,7 @@ def run_evaluation(
                                 ffmpeg_path,
                                 source,
                                 event_directory / role,
+                                vaapi_device,
                             )
                             identity_result = evaluate_view_frames(
                                 frames,
@@ -405,6 +410,9 @@ def main() -> None:
     parser.add_argument("--side-model", type=Path)
     parser.add_argument("--identity-threshold", type=float, default=0.8)
     parser.add_argument("--run-kind", choices=("identity", "detector"), default="identity")
+    # Декодирование записей — главный расход оценки: 20 секунд процессорного
+    # времени на камеру против полутора на инференс по её кадрам.
+    parser.add_argument("--vaapi-device", type=Path)
     args = parser.parse_args()
     identities = {
         role: path
@@ -424,6 +432,7 @@ def main() -> None:
         identity_threshold=args.identity_threshold,
         status_path=args.status_path,
         expected_run_kind=args.run_kind,
+        vaapi_device=args.vaapi_device,
     )
 
 
