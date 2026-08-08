@@ -22,6 +22,7 @@ from training.dataset import load_manifest
 from training.workflow import (
     StatusHeartbeat,
     build_dataset,
+    decode_sampled_frames,
     extract_frames,
     thin_frames,
 )
@@ -456,3 +457,100 @@ def test_extraction_falls_back_to_the_processor(tmp_path: Path, monkeypatch, cap
     assert commands[1][commands[1].index("-vf") + 1] == "fps=1,transpose=2,transpose=2"
     assert len(frames) == 1
     assert "No VA display found" in caplog.text
+
+
+def _raw_process(frames: list[bytes]) -> mock.Mock:
+    process = mock.Mock()
+    stream = iter([*frames, b""])
+    process.stdout.read.side_effect = lambda size: next(stream, b"")
+    return process
+
+
+def test_frames_come_straight_from_ffmpeg_without_a_jpeg_round_trip(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Кодировать кадр в JPEG, чтобы тут же его распаковать, — чистая трата."""
+    monkeypatch.setattr(
+        "training.workflow._video_geometry",
+        lambda ffmpeg_path, source: (4, 2, 2.4),
+    )
+    commands: list[list[str]] = []
+    frame = bytes(range(24))
+
+    def fake_popen(command, **kwargs):
+        commands.append(command)
+        return _raw_process([frame, frame, frame])
+
+    monkeypatch.setattr("training.workflow.subprocess.Popen", fake_popen)
+
+    frames = decode_sampled_frames(
+        "ffmpeg",
+        tmp_path / "clip.mp4",
+        rotate_180=False,
+        vaapi_device=Path("/dev/dri/renderD128"),
+    )
+
+    command = commands[0]
+    assert command[command.index("-vf") + 1] == "fps=1,hwdownload,format=nv12"
+    assert command[command.index("-pix_fmt") + 1] == "rgb24"
+    assert command[-1] == "pipe:1"
+    # ceil(2.4) = 3 кадра, все влезают в предел
+    assert len(frames) == 3
+    assert frames[0].shape == (2, 4, 3)
+
+
+def test_only_the_needed_frames_reach_memory(tmp_path: Path, monkeypatch) -> None:
+    """Запись в пять минут иначе держала бы в оперативке гигабайты."""
+    monkeypatch.setattr(
+        "training.workflow._video_geometry",
+        lambda ffmpeg_path, source: (4, 2, 6.0),
+    )
+    frame = bytes(range(24))
+    monkeypatch.setattr(
+        "training.workflow.subprocess.Popen",
+        lambda command, **kwargs: _raw_process([frame] * 6),
+    )
+
+    frames = decode_sampled_frames(
+        "ffmpeg",
+        tmp_path / "clip.mp4",
+        rotate_180=False,
+        limit=2,
+    )
+
+    assert len(frames) == 2
+
+
+def test_raw_decoding_falls_back_to_the_processor(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "training.workflow._video_geometry",
+        lambda ffmpeg_path, source: (4, 2, 1.0),
+    )
+    commands: list[list[str]] = []
+    frame = bytes(range(24))
+
+    def fake_popen(command, **kwargs):
+        commands.append(command)
+        return _raw_process([] if "-hwaccel" in command else [frame])
+
+    monkeypatch.setattr("training.workflow.subprocess.Popen", fake_popen)
+
+    frames = decode_sampled_frames(
+        "ffmpeg",
+        tmp_path / "clip.mp4",
+        rotate_180=True,
+        vaapi_device=Path("/dev/dri/renderD128"),
+    )
+
+    assert len(commands) == 2
+    assert "-hwaccel" not in commands[1]
+    assert commands[1][commands[1].index("-vf") + 1] == "fps=1,transpose=2,transpose=2"
+    assert len(frames) == 1
+
+
+def test_ffprobe_sits_next_to_ffmpeg() -> None:
+    from training.workflow import _ffprobe_path
+
+    assert _ffprobe_path("ffmpeg") == "ffprobe"
+    assert _ffprobe_path("/usr/bin/ffmpeg") == "/usr/bin/ffprobe"

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import shutil
 import traceback
 from datetime import UTC, datetime
@@ -37,7 +38,12 @@ from src.common.evaluation import (
 from src.common.settings import Settings
 from src.inference.cat_detector import OpenVinoCatDetector
 from src.inference.cat_identity import OpenVinoCatIdentity
-from training.workflow import StatusHeartbeat, extract_frames, write_status
+from training.workflow import (
+    StatusHeartbeat,
+    decode_sampled_frames,
+    extract_frames,
+    write_status,
+)
 
 
 def _load_filter(raw: str) -> dict[str, Any]:
@@ -74,6 +80,27 @@ def _load_frames(
     destination: Path,
     vaapi_device: Path | None = None,
 ) -> list[np.ndarray]:
+    """Кадры записи в память — коротким путём, а если он не вышел, то прежним.
+
+    Короткий путь берёт сырые кадры прямо из ffmpeg. Прежний кодировал каждый в
+    JPEG на диск и распаковывал обратно через PIL: четыре мегапикселя туда и
+    столько же назад, полторы сотни кадров на событие. Он остаётся страховкой —
+    сырой поток требует знать размер кадра заранее, и на записи, о которой
+    ffprobe ничего не сказал, оценка не должна останавливаться.
+    """
+    try:
+        return decode_sampled_frames(
+            ffmpeg_path,
+            source,
+            rotate_180=True,
+            vaapi_device=vaapi_device,
+        )
+    except RuntimeError as exc:
+        logging.getLogger("catdoor.evaluation").warning(
+            "Сырые кадры из %s не получились (%s), возвращаюсь к JPEG",
+            source.name,
+            exc,
+        )
     paths = extract_frames(
         ffmpeg_path,
         source,
