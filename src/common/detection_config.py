@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 from pydantic import BaseModel, Field, model_validator
@@ -8,6 +9,8 @@ from pydantic import BaseModel, Field, model_validator
 from src.common.durable_write import write_text_durably
 from src.common.settings import Settings
 from src.recorder.automatic import AutomaticEventConfig
+
+logger = logging.getLogger("catdoor.detection-config")
 
 
 class DetectorRoi(BaseModel):
@@ -100,9 +103,22 @@ def detection_config_path(data_dir: Path) -> Path:
 
 
 def load_detection_config(path: Path, defaults: DetectionConfig) -> DetectionConfig:
+    """Настройки детекции с диска; при негодном файле — прежние значения.
+
+    Откат обязан быть **громким**. 2026-08-08 веб-служба записала в файл
+    частоту опроса выше потолка, который знал recorder: она была уже с новым
+    кодом, а он ещё со старым. Recorder молча оставил прежнюю настройку, и
+    админка полчаса показывала двенадцать кадров там, где шло десять. Разница
+    между «настройка применена» и «настройка записана» невидима ничем, кроме
+    этой строки в журнале.
+    """
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except FileNotFoundError:
+        # Файла нет — это не беда, а первый запуск.
+        return defaults
+    except (OSError, ValueError) as exc:
+        logger.warning("Файл настроек детекции не прочитан (%s), беру прежние", exc)
         return defaults
     if "face" not in payload or "side" not in payload:
         camera = {
@@ -141,7 +157,12 @@ def load_detection_config(path: Path, defaults: DetectionConfig) -> DetectionCon
         }
     try:
         return DetectionConfig.model_validate(payload)
-    except ValueError:
+    except ValueError as exc:
+        logger.warning(
+            "Настройки детекции из %s не приняты, работаю на прежних: %s",
+            path.name,
+            str(exc).replace("\n", " ")[:300],
+        )
         return defaults
 
 

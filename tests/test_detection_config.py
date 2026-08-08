@@ -8,9 +8,11 @@ from pydantic import ValidationError
 from src.common.detection_config import (
     CameraDetectionConfig,
     DetectionConfig,
+    detection_config_path,
     load_detection_config,
     save_detection_config,
 )
+from src.common.settings import Settings
 
 
 def make_config(**overrides: object) -> DetectionConfig:
@@ -130,3 +132,32 @@ def test_sampling_ceiling_follows_the_hardware() -> None:
             window_frames=5,
             sample_fps=25.0,
         )
+
+
+def test_rejected_settings_leave_a_trace(runtime_path, caplog) -> None:
+    """Молчаливый откат неотличим от применённой настройки.
+
+    2026-08-08 веб-служба записала частоту выше потолка, который знал recorder:
+    она была с новым кодом, он со старым. Recorder оставил прежние значения, и
+    админка полчаса показывала двенадцать кадров там, где шло десять.
+    """
+    path = detection_config_path(runtime_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"face": {"sample_fps": 999.0}, "side": {}}), encoding="utf-8")
+    defaults = DetectionConfig.from_settings(Settings(data_dir=runtime_path))
+
+    with caplog.at_level("WARNING", logger="catdoor.detection-config"):
+        config = load_detection_config(path, defaults)
+
+    assert config.face.sample_fps == defaults.face.sample_fps
+    assert "не приняты" in caplog.text
+
+
+def test_missing_settings_are_not_worth_a_warning(runtime_path, caplog) -> None:
+    """Файла нет — это первый запуск, а не беда."""
+    defaults = DetectionConfig.from_settings(Settings(data_dir=runtime_path))
+
+    with caplog.at_level("WARNING", logger="catdoor.detection-config"):
+        assert load_detection_config(detection_config_path(runtime_path), defaults) == defaults
+
+    assert caplog.text == ""
