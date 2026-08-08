@@ -153,6 +153,14 @@ class Settings(BaseSettings):
     telegram_chat_id: str = ""
     notify_roles: list[str] = Field(default_factory=lambda: ["face"])
     notify_cooldown_seconds: float = Field(default=300.0, ge=0.0, le=86400.0)
+    # Уведомления контура калитки. Источник — HTTP API самого Frigate на
+    # локальном порту: наружу он не смотрит и пароля не спрашивает. Пустой
+    # список камер означает «все», пустой список меток — «любые».
+    gate_api_url: str = "http://127.0.0.1:5000"
+    gate_notify_cameras: list[str] = Field(default_factory=list)
+    gate_notify_labels: list[str] = Field(default_factory=lambda: ["person"])
+    gate_notify_cooldown_seconds: float = Field(default=120.0, ge=0.0, le=86400.0)
+    gate_notify_poll_seconds: float = Field(default=10.0, ge=1.0, le=600.0)
     local_training_epochs: int = Field(default=2, ge=1, le=100)
     web_host: str = "127.0.0.1"
     web_port: int = Field(default=8080, ge=1, le=65535)

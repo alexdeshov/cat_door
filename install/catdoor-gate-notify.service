@@ -1,0 +1,40 @@
+[Unit]
+Description=CatDoor — уведомления о событиях калитки
+Documentation=https://github.com/alexdeshov/cat_door/blob/main/docs/admin-mvp.md
+# Опрашивать Frigate до того, как он поднялся, бессмысленно, но и падать от
+# этого служба не должна: она просто ждёт и спрашивает снова.
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=notify
+NotifyAccess=main
+# Опрос идёт раз в десять секунд, и каждый цикл кормит watchdog. Минута
+# оставляет запас на неспешный ответ Frigate и на таймауты Телеграма.
+WatchdogSec=60
+
+User=catdoor
+Group=catdoor
+WorkingDirectory=/opt/catdoor
+EnvironmentFile=/etc/catdoor/catdoor.env
+ExecStart=/opt/catdoor/.venv/bin/python -m src.gate.notify
+
+# Та же выдержка, что у остальных служб узла: сдаваться нельзя, но и
+# долбиться каждую секунду незачем.
+Restart=always
+RestartSec=5
+RestartSteps=5
+RestartMaxDelaySec=1800
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+ReadWritePaths=/var/lib/catdoor
+
+[Install]
+WantedBy=multi-user.target
