@@ -11,10 +11,11 @@ from src.gate.notify import (
     GATE_ROLE,
     GateEvent,
     fetch_events,
+    forget_old,
     gate_caption,
-    load_last_seen,
+    load_state,
     notify_about_events,
-    save_last_seen,
+    save_state,
     state_path,
 )
 
@@ -47,14 +48,16 @@ def _event(**overrides: object) -> GateEvent:
 
 
 def _settings(**overrides: object) -> Settings:
-    return Settings.model_construct(
-        display_timezone="Europe/Moscow",
-        gate_api_url="http://127.0.0.1:5000",
-        gate_notify_cameras=[],
-        gate_notify_labels=["person"],
-        gate_notify_cooldown_seconds=120.0,
-        **overrides,  # type: ignore[arg-type]
-    )
+    values: dict[str, object] = {
+        "display_timezone": "Europe/Moscow",
+        "gate_api_url": "http://127.0.0.1:5000",
+        "gate_notify_cameras": [],
+        "gate_notify_labels": ["person"],
+        "gate_notify_faces_only": False,
+        "gate_notify_cooldown_seconds": 120.0,
+    }
+    values.update(overrides)
+    return Settings.model_construct(**values)  # type: ignore[arg-type]
 
 
 def test_events_arrive_oldest_first(monkeypatch) -> None:
@@ -192,18 +195,97 @@ def test_a_silent_telegram_does_not_stop_the_batch(runtime_path: Path, monkeypat
     assert delivered == 0
 
 
-def test_first_start_does_not_dump_the_archive(runtime_path: Path) -> None:
-    """Файла отметки нет — значит служба поднялась впервые."""
+def test_sent_events_are_remembered_across_restarts(runtime_path: Path) -> None:
+    """Окно наблюдения перечитывает те же события каждый опрос."""
     path = state_path(runtime_path)
 
-    assert load_last_seen(path) is None
+    assert load_state(path) == {}
 
-    save_last_seen(path, 1786171119.5)
+    save_state(path, {"a": 1786171119.5})
 
-    assert load_last_seen(path) == 1786171119.5
+    assert load_state(path) == {"a": 1786171119.5}
+
+
+def test_old_events_leave_the_memory(runtime_path: Path) -> None:
+    kept = forget_old({"старое": 100.0, "свежее": 500.0}, older_than=400.0)
+
+    assert kept == {"свежее": 500.0}
 
 
 def test_caption_shows_the_local_time_and_the_recognised_name() -> None:
     caption = gate_caption(_event(sub_label="Алекс", started_at=1786171119.0), "Europe/Moscow")
 
     assert caption.startswith("Калитка: Алекс · gate · ")
+
+
+def test_only_recognised_faces_reach_the_phone(runtime_path: Path, monkeypatch) -> None:
+    """Владелец просил сообщать о людях с лицом из базы, а не о всяком движении."""
+    sent: list[str] = []
+    monkeypatch.setattr("src.gate.notify.fetch_snapshot", lambda *args, **kwargs: False)
+    monkeypatch.setattr(
+        "src.common.telegram.TelegramClient.send_message",
+        lambda self, text: sent.append(text),
+    )
+    gate = NotificationGate(roles=frozenset({GATE_ROLE}), cooldown_seconds=0.0)
+
+    notify_about_events(
+        _settings(gate_notify_faces_only=True),
+        TelegramClient("8999303876:test", "12345"),
+        gate,
+        [_event(id="без имени"), _event(id="с именем", sub_label="Алекс")],
+        data_dir=runtime_path,
+        now=10.0,
+    )
+
+    assert len(sent) == 1
+    assert "Алекс" in sent[0]
+
+
+def test_a_nameless_event_is_not_thrown_away_forever(runtime_path: Path, monkeypatch) -> None:
+    """Frigate приписывает имя не сразу — событие ждёт следующего опроса."""
+    sent: list[str] = []
+    monkeypatch.setattr("src.gate.notify.fetch_snapshot", lambda *args, **kwargs: False)
+    monkeypatch.setattr(
+        "src.common.telegram.TelegramClient.send_message",
+        lambda self, text: sent.append(text),
+    )
+    gate = NotificationGate(roles=frozenset({GATE_ROLE}), cooldown_seconds=0.0)
+    settings = _settings(gate_notify_faces_only=True)
+    client = TelegramClient("8999303876:test", "12345")
+    already: dict[str, float] = {}
+
+    # первый опрос: имени ещё нет
+    notify_about_events(
+        settings, client, gate, [_event(id="гость")],
+        data_dir=runtime_path, now=10.0, already_sent=already,
+    )
+    # второй опрос: то же событие, но Frigate успел его опознать
+    notify_about_events(
+        settings, client, gate, [_event(id="гость", sub_label="Алекс")],
+        data_dir=runtime_path, now=20.0, already_sent=already,
+    )
+
+    assert len(sent) == 1
+    assert "Алекс" in sent[0]
+    assert "гость" in already
+
+
+def test_the_same_event_is_never_sent_twice(runtime_path: Path, monkeypatch) -> None:
+    sent: list[str] = []
+    monkeypatch.setattr("src.gate.notify.fetch_snapshot", lambda *args, **kwargs: False)
+    monkeypatch.setattr(
+        "src.common.telegram.TelegramClient.send_message",
+        lambda self, text: sent.append(text),
+    )
+    gate = NotificationGate(roles=frozenset({GATE_ROLE}), cooldown_seconds=0.0)
+    settings = _settings()
+    client = TelegramClient("8999303876:test", "12345")
+    already: dict[str, float] = {}
+
+    for _ in range(3):
+        notify_about_events(
+            settings, client, gate, [_event()],
+            data_dir=runtime_path, now=10.0, already_sent=already,
+        )
+
+    assert len(sent) == 1

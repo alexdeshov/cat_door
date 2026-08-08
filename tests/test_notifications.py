@@ -277,3 +277,72 @@ def test_confusing_telegram_refusals_get_a_human_hint() -> None:
     )
     assert "нажали «Start»" in (hint_for("Bad Request: chat not found") or "")
     assert hint_for("Телеграм отказал: что-то новое") is None
+
+
+def test_notification_uses_the_frame_the_detector_was_surest_about(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    """Первый кадр записи не годится: она начинается с предбуфера, кота там нет."""
+    import numpy as np
+
+    from src.common.settings import Settings
+    from src.recorder import app as recorder_app
+    from src.recorder.detection_journal import DetectionJournal
+    from src.recorder.events import AutomaticEventRequest
+
+    recorder_app.reset_notification_gate()
+    settings = Settings.model_construct(
+        data_dir=runtime_path,
+        database_path=runtime_path / "catdoor.sqlite3",
+        ffmpeg_path="ffmpeg",
+        display_timezone="Europe/Moscow",
+        telegram_bot_token=TOKEN,
+        telegram_chat_id="12345",
+        notify_roles=["face"],
+        notify_cooldown_seconds=300.0,
+    )
+    event = type(
+        "StoredEvent",
+        (),
+        {
+            "id": 9,
+            "created_at": datetime(2026, 8, 8, 11, 32),  # noqa: DTZ001
+            "media_path": "events/00000009/face.mp4",
+            "side_media_path": None,
+        },
+    )()
+    best_frame = np.full((540, 960, 3), 42, dtype=np.uint8)
+    photos: list[Path] = []
+
+    def refuse_extraction(*args, **kwargs):
+        raise AssertionError("кадр из записи брать не должны — есть запомненный")
+
+    monkeypatch.setattr("src.recorder.app.extract_frame", refuse_extraction)
+    monkeypatch.setattr(
+        "src.common.telegram.TelegramClient.send_photo",
+        lambda self, photo, caption: photos.append(Path(photo)),
+    )
+    journal = DetectionJournal(
+        runtime_path / "runtime" / "detection.jsonl",
+        max_bytes=100_000,
+        backup_count=1,
+    )
+
+    recorder_app._notify_about_pass(  # type: ignore[arg-type]
+        settings,
+        AutomaticEventRequest(
+            started_at=1.0,
+            ended_at=9.0,
+            initiating_camera="face",
+            confidence_face=0.98,
+            confidence_side=0.0,
+        ),
+        event,
+        journal,
+        best_frame,
+    )
+    journal.close()
+
+    assert len(photos) == 1
+    assert not list((runtime_path / "runtime").glob("notification-*.jpg"))

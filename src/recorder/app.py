@@ -799,6 +799,10 @@ def monitor_automatic(
     active_started_at: float | None = None
     active_initiating_camera: str | None = None
     active_confidences = {"face": 0.0, "side": 0.0}
+    # Лучший кадр текущего прохода: он уедет в уведомление вместо первого
+    # кадра записи, где кота ещё нет.
+    active_best_frame: Any = None
+    active_best_confidence = 0.0
     active_identity_scores: dict[str, list[ScoredPrediction]] = {
         "face": [],
         "side": [],
@@ -993,6 +997,7 @@ def monitor_automatic(
             frame_age_ms = (time.monotonic() - captured_at) * 1000
             confidence = detection.confidence
             camera_confirmed = trackers[role].observe(confidence)
+            annotated_frame = None
             try:
                 annotated_frame = annotate_detections(
                     preview_frame,
@@ -1065,11 +1070,22 @@ def monitor_automatic(
             )
             if active_started_at is not None:
                 active_confidences[role] = max(active_confidences[role], confidence)
+                # Кадр для уведомления — тот, на котором детектор был увереннее
+                # всего. Первый кадр записи для этого не годится вовсе: запись
+                # начинается с предбуфера в двенадцать секунд, и кота там ещё
+                # нет. Рамки на кадре уже нарисованы — видно, на что сработало.
+                if confidence > active_best_confidence and annotated_frame is not None:
+                    active_best_confidence = confidence
+                    active_best_frame = annotated_frame
             if update.action is not None:
                 last_action = update.action.value
             if update.action is not None and update.action.value == "start":
                 active_started_at = time.time() - settings.automatic_prebuffer_seconds
                 active_initiating_camera = update.initiating_camera
+                # Кадр, на котором проход начался, — уже с котом: событие
+                # открывается по подтверждённой детекции, а не по таймеру.
+                active_best_confidence = confidence
+                active_best_frame = annotated_frame
                 active_confidences = dict(confidences)
                 active_identity_scores = {"face": [], "side": []}
                 active_identity_timings = {"face": [], "side": []}
@@ -1128,12 +1144,14 @@ def monitor_automatic(
                     )
                     threading.Thread(
                         target=_persist_after_segment_close,
-                        args=(settings, request, journal),
+                        args=(settings, request, journal, active_best_frame),
                         daemon=True,
                         name="catdoor-event-writer",
                     ).start()
                 active_started_at = None
                 active_initiating_camera = None
+                active_best_frame = None
+                active_best_confidence = 0.0
                 active_confidences = {"face": 0.0, "side": 0.0}
                 active_identity_scores = {"face": [], "side": []}
                 active_identity_timings = {"face": [], "side": []}
@@ -1232,11 +1250,28 @@ def reset_notification_gate() -> None:
         _notification_gate_instance = None
 
 
+def _publish_notification_frame(frame: Any, destination: Path) -> bool:
+    """Сохранить запомненный кадр прохода. `False` — кадра не было.
+
+    Отдельной функцией, потому что отказ здесь не должен ронять уведомление:
+    вместо запомненного кадра оно уйдёт с кадром из записи, а в худшем случае
+    текстом.
+    """
+    if frame is None:
+        return False
+    try:
+        publish_preview(destination, frame)
+    except (OSError, ValueError):
+        return False
+    return destination.is_file()
+
+
 def _notify_about_pass(
     settings: Settings,
     request: AutomaticEventRequest,
     event: Event,
     journal: DetectionJournal,
+    best_frame: Any = None,
 ) -> None:
     """Сообщить о проходе в Телеграм. Отказ уведомления не отменяет проход.
 
@@ -1269,11 +1304,16 @@ def _notify_about_pass(
     snapshot = settings.data_dir / "runtime" / f"notification-{event.id}.jpg"
     media = event.media_path or event.side_media_path
     try:
-        frame_taken = bool(media) and extract_frame(
-            settings.ffmpeg_path,
-            settings.data_dir / str(media),
-            snapshot,
-        )
+        # Кадр с наибольшей уверенностью детектора запомнен ещё живым потоком.
+        # Вырезать его из записи нечем: где именно в ней был кот, знает только
+        # тот, кто на него смотрел, а первая секунда — это предбуфер.
+        frame_taken = _publish_notification_frame(best_frame, snapshot)
+        if not frame_taken and media:
+            frame_taken = extract_frame(
+                settings.ffmpeg_path,
+                settings.data_dir / str(media),
+                snapshot,
+            )
         if frame_taken:
             client.send_photo(snapshot, caption)
         else:
@@ -1295,6 +1335,7 @@ def _persist_after_segment_close(
     settings: Settings,
     request: AutomaticEventRequest,
     journal: DetectionJournal,
+    best_frame: Any = None,
 ) -> None:
     time.sleep(settings.ring_segment_seconds + 1)
     try:
@@ -1313,7 +1354,7 @@ def _persist_after_segment_close(
         )
         return
     journal.write("event_published", event_id=event.id, status=event.status)
-    _notify_about_pass(settings, request, event, journal)
+    _notify_about_pass(settings, request, event, journal, best_frame)
 
 
 def run(*, once: bool = False, probe_seconds: float | None = None) -> None:
