@@ -123,6 +123,22 @@ def test_a_node_without_frigate_cameras_still_gets_a_valid_config() -> None:
     assert parsed["detectors"]["openvino"]["device"] == "CPU"
 
 
+def test_frigate_detector_device_is_a_setting_and_defaults_to_the_processor() -> None:
+    """Устройство детектора Frigate раньше было зашито и стоило узлу пяти ядер.
+
+    Умолчание остаётся прежним нарочно: очередь у видеоядра одна, и там уже
+    считает детектор котов. Переключение должно быть решением с замером, а не
+    побочным следствием обновления.
+    """
+    circuits = NodeCircuits(cats=True, gate=True)
+
+    default = yaml.safe_load(build_config(registry(), circuits))
+    moved = yaml.safe_load(build_config(registry(), circuits, detector_device="GPU"))
+
+    assert default["detectors"]["openvino"]["device"] == "CPU"
+    assert moved["detectors"]["openvino"]["device"] == "GPU"
+
+
 def test_camera_names_are_made_acceptable_to_frigate() -> None:
     """Frigate не принимает дефисы, а инвентарь ими полон."""
     assert frigate_camera_name("nobelic-4mp") == "nobelic_4mp"

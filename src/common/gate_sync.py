@@ -90,7 +90,12 @@ def apply_frigate_config(settings: Settings) -> bool:
     # Frigate и живут в том же файле. Пересобирая его из инвентаря, эти разделы
     # переносим как есть: иначе правка камеры в админке молча стирала бы чужую
     # настройку, а узнавалось бы это через неделю без имён в событиях.
-    config = build_config(registry, circuits, preserved=_foreign_config(settings))
+    config = build_config(
+        registry,
+        circuits,
+        preserved=_foreign_config(settings),
+        detector_device=settings.gate_detector_device,
+    )
     env = build_env(frigate_cameras(registry, circuits), settings.display_timezone)
     if _unchanged(settings.gate_applied_config_path, config) and _unchanged(
         settings.gate_env_path, env
