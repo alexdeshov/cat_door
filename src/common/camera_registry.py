@@ -90,6 +90,12 @@ class CameraRecord(BaseModel):
     role: CameraRole | None = None
     rotate_180: bool = False
     enabled: bool = True
+    # Принудительно программное декодирование в Frigate — для камеры, чей поток
+    # аппаратный путь не переваривает. У nvr-2 VA-API падал на «Failed to sync
+    # surface» примерно раз в минуту (2026-08-09), и watchdog Frigate бесконечно
+    # перезапускал ffmpeg; смена устройства детектора замером исключена — дело
+    # в самом потоке. Цена программного пути — около трети ядра на камеру.
+    software_decode: bool = False
     note: str = ""
 
     @field_validator("id")
