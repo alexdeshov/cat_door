@@ -3,8 +3,15 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
+
+if TYPE_CHECKING:  # pragma: no cover - только для подсказок типов
+    from src.common.settings import Settings
+
+
+def recorder_status_path(settings: Settings) -> Path:
+    return settings.data_dir / "runtime" / "recorder-status.json"
 
 
 def write_recorder_status(path: Path, **values: Any) -> None:

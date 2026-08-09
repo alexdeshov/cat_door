@@ -1561,6 +1561,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             str(settings.identity_confidence_threshold),
             "--run-kind",
             payload.run_kind,
+            "--detector-device",
+            settings.evaluation_detector_device,
         ]
         # Замер на настоящем проходе: вырезание кадров стоит 20 секунд
         # процессорного времени на камеру, инференс по ним — полторы. Значит

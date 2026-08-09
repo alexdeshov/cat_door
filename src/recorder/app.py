@@ -67,7 +67,7 @@ from src.recorder.events import (
 from src.recorder.ffmpeg import extract_frame, probe_stream
 from src.recorder.frames import active_hwaccel, rgb_frame_stream
 from src.recorder.preview import annotate_detections, preview_path, publish_preview
-from src.recorder.status import write_recorder_status
+from src.recorder.status import recorder_status_path, write_recorder_status
 
 DATABASE_STARTUP_ATTEMPTS = 3
 DATABASE_STARTUP_RETRY_SECONDS = 1.0
@@ -280,10 +280,6 @@ def _watchdog_during_startup(notifier: Notifier | None) -> Iterator[None]:
     finally:
         finished.set()
         pinger.join(timeout=1)
-
-
-def recorder_status_path(settings: Settings) -> Path:
-    return settings.data_dir / "runtime" / "recorder-status.json"
 
 
 def publish_status(

@@ -202,6 +202,7 @@ def run_evaluation(
     status_path: Path,
     expected_run_kind: str | None = None,
     vaapi_device: Path | None = None,
+    detector_device: str = "CPU",
 ) -> None:
     factory = create_session_factory(database_path)
     temporary_root = data_dir / "runtime" / "evaluations" / f"{run_id:08d}"
@@ -232,7 +233,10 @@ def run_evaluation(
             raise ValueError(f"unsupported evaluation run kind: {run_kind}")
         if detector_model_version_id is None:
             raise ValueError("evaluation run has no detector model version")
-        detector = OpenVinoCatDetector(detector_model, "CPU")
+        detector = OpenVinoCatDetector(detector_model, detector_device)
+        # Опознание остаётся на процессоре независимо от детектора: у видеоядра
+        # одна очередь, и мерить детектор, пока по ней же идёт опознание, —
+        # значит получить два испорченных числа вместо одного полезного.
         identities = {
             role: OpenVinoCatIdentity(path, "CPU")
             for role, path in identity_models.items()
@@ -388,6 +392,10 @@ def run_evaluation(
                 },
                 identity_threshold=identity_threshold,
             )
+        # `mean_detector_inference_ms` хранится и сравнивается между запусками.
+        # Как только оно может приехать с двух разных устройств, строка обязана
+        # говорить, с какого именно, — иначе прошлые числа тихо меняют смысл.
+        metrics["detector_device"] = detector.device
         with factory() as session:
             run = session.get(EvaluationRun, run_id)
             assert run is not None
@@ -426,7 +434,7 @@ def run_evaluation(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Replay saved CatDoor events on OpenVINO CPU")
+    parser = argparse.ArgumentParser(description="Replay saved CatDoor events through OpenVINO")
     parser.add_argument("database_path", type=Path)
     parser.add_argument("data_dir", type=Path)
     parser.add_argument("ffmpeg_path")
@@ -440,6 +448,15 @@ def main() -> None:
     # Декодирование записей — главный расход оценки: 20 секунд процессорного
     # времени на камеру против полутора на инференс по её кадрам.
     parser.add_argument("--vaapi-device", type=Path)
+    parser.add_argument(
+        "--detector-device",
+        default="CPU",
+        help=(
+            "OpenVINO device for the detector. Kept separate from the recorder's "
+            "device on purpose: an evaluation sharing the iGPU with the live "
+            "detector corrupts both timings."
+        ),
+    )
     args = parser.parse_args()
     identities = {
         role: path
@@ -460,6 +477,7 @@ def main() -> None:
         status_path=args.status_path,
         expected_run_kind=args.run_kind,
         vaapi_device=args.vaapi_device,
+        detector_device=args.detector_device,
     )
 
 
