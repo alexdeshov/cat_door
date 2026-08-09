@@ -164,6 +164,8 @@ def test_yolo26_candidates_reach_the_yolo_exporter(monkeypatch, tmp_path):
     прилетал уже после argparse, который кандидатов как раз знал.
     """
     import hashlib
+    import sys
+    from pathlib import Path
 
     from scripts import prepare_detector_candidate as pdc
 
@@ -183,6 +185,8 @@ def test_yolo26_candidates_reach_the_yolo_exporter(monkeypatch, tmp_path):
         weights,
         hashlib.sha256(b"weights").hexdigest(),
         tmp_path / "yolo26n-416.onnx",
+        python=Path(sys.executable),
+        source_root=None,
     )
 
     assert called["size"] == 416
