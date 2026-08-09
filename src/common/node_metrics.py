@@ -163,17 +163,28 @@ def read_gpu_frequency_mhz(root: Path = Path("/")) -> tuple[int | None, int | No
 
 
 def read_disks(paths: list[Path]) -> tuple[DiskUsage, ...]:
-    """Место на томах. Пути, которых нет, молча пропускаются.
+    """Место на томах, по одному разу на том.
 
-    Молча — потому что состав томов зависит от узла: внешний архив может быть
-    не подключён, и это отдельный разговор, а не повод ломать страницу.
+    Пути, которых нет, молча пропускаются: состав томов зависит от узла, и
+    неподключённый внешний архив — отдельный разговор, а не повод ломать
+    страницу.
+
+    Одинаковые тома схлопываются по номеру устройства. На узле `/var/lib/catdoor`
+    подставлен bind-монтированием в `/srv/data`, и без этого страница показывала
+    один и тот же том дважды с одинаковыми числами — шум ровно там, где всё
+    затевалось ради сигнала.
     """
     usages: list[DiskUsage] = []
+    seen: set[int] = set()
     for path in paths:
         try:
+            device = path.stat().st_dev
             usage = shutil.disk_usage(path)
         except OSError:
             continue
+        if device in seen:
+            continue
+        seen.add(device)
         usages.append(
             DiskUsage(
                 path=str(path),
