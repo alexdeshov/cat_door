@@ -96,6 +96,35 @@ def test_nested_legacy_config_gets_new_camera_defaults(runtime_path) -> None:
     assert loaded.side.sample_fps == 3.0
 
 
+def test_door_camera_starts_at_the_same_threshold_as_the_approach(runtime_path) -> None:
+    """Дверце долго доставался порог мягче подхода — 0.30 против 0.55.
+
+    Расчёт был на то, что камера смотрит в упор и кот занимает половину кадра.
+    2026-08-09 владелец показал обратное: оставленная у двери посылка стабильно
+    проходила как кот. Порог дверцы поднят до 0.50.
+    """
+    defaults = DetectionConfig.from_settings(Settings(data_dir=runtime_path))
+
+    assert defaults.face.confidence_threshold == 0.50
+
+
+def test_flat_legacy_config_caps_the_door_camera_at_its_own_default(runtime_path) -> None:
+    """Плоский файл писался, когда порог был один на обе камеры.
+
+    По смыслу это был порог подхода, и дверце он годится только как потолок:
+    поднять её выше собственного умолчания он не вправе, опустить — вправе.
+    """
+    path = detection_config_path(runtime_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"confidence_threshold": 0.80}), encoding="utf-8")
+    defaults = DetectionConfig.from_settings(Settings(data_dir=runtime_path))
+
+    loaded = load_detection_config(path, defaults)
+
+    assert loaded.face.confidence_threshold == defaults.face.confidence_threshold
+    assert loaded.side.confidence_threshold == 0.80
+
+
 def test_roi_outside_frame_falls_back_to_defaults(runtime_path) -> None:
     path = runtime_path / "runtime" / "detection-settings.json"
     config = make_config()

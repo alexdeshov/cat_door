@@ -364,6 +364,28 @@ def _detector_device_status(
     }
 
 
+def _detection_profile_status(config: DetectionConfig) -> dict[str, object]:
+    """Пороги и частота, по которым конвейер работает **сейчас**.
+
+    Из того же урока, что `hwaccel_actual` и `detector_device_actual`: разница
+    между «настройка записана» и «настройка применена» ничем снаружи не видна.
+    2026-08-08 recorder молча оставил прежнюю частоту, потому что знал потолок
+    пониже, — отказ с тех пор громкий, но виден он только в журнале детекции, а
+    журнал лежит под правами службы и без пароля не читается. Здесь то же самое
+    отвечает `GET /api/recorder/status`, то есть тому, кто спрашивает.
+    """
+    return {
+        "detection_profile": {
+            role: {
+                "confidence_threshold": camera.confidence_threshold,
+                "box_min_confidence": camera.box_min_confidence,
+                "sample_fps": camera.sample_fps,
+            }
+            for role, camera in (("face", config.face), ("side", config.side))
+        }
+    }
+
+
 def _hwaccel_status(settings: Settings) -> dict[str, str | None]:
     """Что попросили и что декодирует кадры на самом деле.
 
@@ -993,6 +1015,7 @@ def monitor_automatic(
                     cameras=_camera_status(stream_targets),
             **_disk_status(settings),
             **_detector_device_status(settings, detector),
+            **_detection_profile_status(runtime_config),
             **_hwaccel_status(settings),
                 )
                 continue
@@ -1188,6 +1211,7 @@ def monitor_automatic(
                 cameras=_camera_status(stream_targets),
             **_disk_status(settings),
             **_detector_device_status(settings, detector),
+            **_detection_profile_status(runtime_config),
             **_hwaccel_status(settings),
             )
             last_status_at = now

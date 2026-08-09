@@ -18,7 +18,7 @@ from src.common.camera_registry import (
     save_registry,
 )
 from src.common.capture_mode import CaptureMode, capture_mode_path, save_capture_mode
-from src.common.detection_config import CameraDetectionConfig
+from src.common.detection_config import CameraDetectionConfig, DetectionConfig
 from src.common.sd_notify import Notifier
 from src.common.settings import Settings
 from src.inference.cat_detector import CatDetection, CatDetectionResult
@@ -27,6 +27,7 @@ from src.recorder.app import (
     CameraConfirmationTracker,
     StreamState,
     StreamTarget,
+    _detection_profile_status,
     _frame_worker,
     _get_fair_frame,
     _predict_identity_if_detected,
@@ -125,6 +126,21 @@ def test_camera_confirmation_tracker_uses_own_threshold_and_window() -> None:
     assert tracker.observe(0.31) is False
     assert tracker.observe(0.10) is False
     assert tracker.observe(0.40) is True
+
+
+def test_status_reports_the_thresholds_the_pipeline_actually_uses() -> None:
+    """«Записано» и «применено» обязаны различаться снаружи.
+
+    Журнал детекции, где живёт `config_updated`, лежит под правами службы: без
+    пароля его не прочитать даже с узла. Статус читает кто угодно, поэтому
+    действующий профиль отвечает именно он.
+    """
+    config = DetectionConfig.from_settings(Settings())
+
+    profile = _detection_profile_status(config)["detection_profile"]
+
+    assert profile["face"]["confidence_threshold"] == config.face.confidence_threshold
+    assert profile["side"]["sample_fps"] == config.side.sample_fps
 
 
 class RecordingIdentityModel:
