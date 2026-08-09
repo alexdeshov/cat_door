@@ -397,3 +397,25 @@ def test_a_camera_without_hand_settings_is_unchanged() -> None:
     with_empty = build_config(inventory, circuits, preserved_cameras={})
 
     assert without == with_empty
+
+
+def test_a_camera_can_be_forced_to_software_decoding() -> None:
+    """У nvr-2 VA-API падал на её потоке примерно раз в минуту.
+
+    «Failed to sync surface», watchdog Frigate бесконечно перезапускал ffmpeg —
+    детекция теряла поток на каждом круге. Смена устройства детектора замером
+    исключена: дело в самом потоке. Пустая `hwaccel_args` выключает аппаратный
+    путь одной камере, не трогая остальных.
+    """
+    inventory = registry(
+        camera("nvr-2", "nvr"),
+        camera("yard", "nvr"),
+    )
+    inventory.cameras[0].software_decode = True
+
+    parsed = yaml.safe_load(
+        build_config(inventory, NodeCircuits(cats=False, nvr=True))
+    )
+
+    assert parsed["cameras"]["nvr_2"]["ffmpeg"]["hwaccel_args"] == ""
+    assert "hwaccel_args" not in parsed["cameras"]["yard"]["ffmpeg"]

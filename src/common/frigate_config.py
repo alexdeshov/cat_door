@@ -160,6 +160,11 @@ def _camera_block(
         lines += ["            - record"]
     lines += [
         "      input_args: preset-rtsp-generic",
+        # Пустая строка выключает автоопределение VA-API для одной камеры,
+        # остальные продолжают декодироваться видеоядром. Ключ подтверждён
+        # справочником конфигурации Frigate: hwaccel_args наследуется камерой
+        # и переопределяется на её уровне.
+        *(['      hwaccel_args: ""'] if camera.software_decode else []),
         "      output_args:",
         "        record: preset-record-generic-audio-copy",
         "    detect:",

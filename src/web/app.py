@@ -299,6 +299,7 @@ class CameraPayload(BaseModel):
     role: CameraRole | None = None
     rotate_180: bool = False
     enabled: bool = True
+    software_decode: bool = False
     note: str = ""
     rtsp_url: str = ""
 
