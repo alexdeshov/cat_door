@@ -217,6 +217,7 @@ def build_config(
     registry: CameraRegistry,
     circuits: NodeCircuits,
     preserved: str = "",
+    detector_device: str = "CPU",
 ) -> str:
     """Текст `config.yml`. Без камер — валидный конфиг без единой камеры."""
     cameras = frigate_cameras(registry, circuits)
@@ -233,7 +234,7 @@ def build_config(
         "detectors:",
         "  openvino:",
         "    type: openvino",
-        "    device: CPU",
+        f"    device: {detector_device}",
         "",
         "model:",
         "  width: 300",
