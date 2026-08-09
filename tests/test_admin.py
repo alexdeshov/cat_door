@@ -378,6 +378,10 @@ def test_starts_detached_offline_evaluation_on_cpu(
     assert isinstance(command, list)
     assert "training.evaluation_job" in command
     assert "--face-model" in command
+    # Оценка идёт на процессоре, даже когда recorder работает на видеоядре: у
+    # видеоядра одна очередь, и общий с ним замер портит оба числа. Поэтому
+    # здесь стоит собственная настройка, а не `detector_device`.
+    assert command[command.index("--detector-device") + 1] == "CPU"
     assert "GPU" not in command
     factory = create_session_factory(runtime_path / "test.sqlite3")
     with factory() as session:
@@ -387,6 +391,54 @@ def test_starts_detached_offline_evaluation_on_cpu(
         assert run.detector_model_version_id is not None
         assert run.face_model_version_id is not None
         assert run.side_model_version_id is None
+
+
+def test_evaluation_does_not_inherit_the_recorder_device(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    """Рабочее устройство и устройство оценки — разные настройки нарочно.
+
+    Подстановка `detector_device` тихо переключила бы все будущие оценки в тот
+    день, когда recorder переехал на видеоядро, и прежние отчёты стали бы
+    несравнимы задним числом. Плюс оценка на том же видеоядре, где считает
+    живой детектор, портит оба замера сразу.
+    """
+    models = runtime_path / "models"
+    models.mkdir()
+    detector = models / "detector.onnx"
+    detector.write_bytes(b"detector")
+    detector.with_suffix(".json").write_text(
+        '{"architecture":"test","cat_class_id":17}',
+        encoding="utf-8",
+    )
+    launched: dict[str, object] = {}
+
+    class FakeProcess:
+        pid = 4321
+
+    monkeypatch.setattr(
+        "src.web.app.subprocess.Popen",
+        lambda command, **kwargs: (launched.update(command=command), FakeProcess())[1],
+    )
+    settings = Settings(
+        data_dir=runtime_path,
+        database_path=runtime_path / "test.sqlite3",
+        detector_model_path=detector,
+        detector_device="GPU",
+    )
+    client = TestClient(create_app(settings))
+
+    response = client.post(
+        "/api/evaluations",
+        json={"labels": ["known_cat"], "run_kind": "detector"},
+    )
+
+    assert response.status_code == 202
+    command = launched["command"]
+    assert isinstance(command, list)
+    assert command[command.index("--detector-device") + 1] == "CPU"
+    assert "GPU" not in command
 
 
 def test_starts_detector_only_evaluation_without_identity_models(
