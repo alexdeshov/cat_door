@@ -110,6 +110,7 @@ def compare(
     limit: int | None,
     workers: int,
     false_rates: list[float],
+    vaapi_device: Path | None = None,
 ) -> dict[str, Any]:
     runtime_config = load_detection_config(
         detection_config_path(data_dir),
@@ -148,7 +149,12 @@ def compare(
                     source = (root / relative).resolve()
                     if root in source.parents and source.is_file():
                         # Декодируем один раз — дальше кадры идут во все модели.
-                        frames = load_frames(ffmpeg, source, scratch / f"{event.id:08d}" / role)
+                        frames = load_frames(
+                            ffmpeg,
+                            source,
+                            scratch / f"{event.id:08d}" / role,
+                            vaapi_device,
+                        )
                 camera_config = getattr(runtime_config, role)
                 for name, detector in detectors.items():
                     views[name][role] = evaluate_detector_frames(frames, detector, camera_config)
@@ -260,6 +266,11 @@ def main() -> int:
     parser.add_argument("--limit", type=int)
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument(
+        "--vaapi-device",
+        type=Path,
+        help="декодирование медиадвижком; вырезание кадров дороже инференса вдесятеро",
+    )
+    parser.add_argument(
         "--false-rate",
         type=float,
         action="append",
@@ -279,6 +290,7 @@ def main() -> int:
         limit=arguments.limit,
         workers=max(1, arguments.workers),
         false_rates=arguments.false_rates or [0.05, 0.10, 0.20],
+        vaapi_device=arguments.vaapi_device,
     )
     print_summary(payload)
     if arguments.output:
