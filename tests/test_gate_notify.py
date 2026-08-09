@@ -553,3 +553,27 @@ def test_the_watchdog_is_fed_on_every_event(runtime_path: Path, monkeypatch) -> 
     )
 
     assert len(beats) == 4
+
+
+def test_the_api_address_can_be_redirected(runtime_path: Path, monkeypatch) -> None:
+    """Провайдер закрывает прямые адреса дата-центров Телеграма.
+
+    2026-08-09 у владельца `web.telegram.org` отвечал, а `149.154.166.110:443`
+    молчал до таймаута: уведомления встали при работающем интернете. Обойти это
+    можно только своим обратным прокси, а для этого адрес должен настраиваться.
+    """
+    asked: list[str] = []
+
+    def capture(request, timeout):  # noqa: ANN001 - подмена urlopen
+        asked.append(request.full_url)
+        raise TelegramUnreachable("не важно")
+
+    monkeypatch.setattr("src.common.telegram.urllib.request.urlopen", capture)
+    client = TelegramClient("8999303876:test", "12345", api_base="https://tg.example.org")
+
+    try:
+        client.send_message("проверка")
+    except Exception:  # noqa: BLE001 - интересен только адрес
+        pass
+
+    assert asked and asked[0].startswith("https://tg.example.org/bot")

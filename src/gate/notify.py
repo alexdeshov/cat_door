@@ -287,7 +287,11 @@ def run(*, once: bool = False) -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
     settings = Settings()
     validate_runtime_paths(settings)
-    client = TelegramClient(settings.telegram_bot_token, settings.telegram_chat_id)
+    client = TelegramClient(
+        settings.telegram_bot_token,
+        settings.telegram_chat_id,
+        api_base=settings.telegram_api_base,
+    )
     if not client.configured:
         raise ConfigurationError(
             "Уведомления калитки включены, но бот не настроен: нет токена или адреса чата"

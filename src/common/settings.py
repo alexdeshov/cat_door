@@ -6,6 +6,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from src.common.telegram import TELEGRAM_API
+
 
 class ConfigurationError(RuntimeError):
     """The configured paths cannot be used, so starting up would be pointless."""
@@ -163,6 +165,11 @@ class Settings(BaseSettings):
     # и не должен попадать ни в журнал, ни в инвентарь камер, ни в снимки
     # состояния. Роли по умолчанию — только дверца: на подходе детектор пока
     # не отличает кота от тени, и телефон звонил бы листвой.
+    # Адрес API Телеграма. Меняется на свой обратный прокси там, где провайдер
+    # закрывает прямые адреса дата-центров: 2026-08-09 у владельца
+    # `web.telegram.org` отвечал, а `149.154.166.110:443` молчал до таймаута —
+    # уведомления встали, хотя интернет работал.
+    telegram_api_base: str = TELEGRAM_API
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
     notify_roles: list[str] = Field(default_factory=lambda: ["face"])
