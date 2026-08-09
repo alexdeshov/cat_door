@@ -167,8 +167,8 @@ python -m scripts.benchmark_detector_model models/yolo11n-416.onnx \
 
 ```
 python -m scripts.collect_calibration_frames \
-  --database /var/lib/catdoor/data/catdoor.sqlite3 --data-dir /var/lib/catdoor/data \
-  --model /var/lib/catdoor/models/cat-detector.onnx \
+  --database /var/lib/catdoor/catdoor.sqlite3 --data-dir /var/lib/catdoor \
+  --model /var/lib/catdoor/models/yolo11n-416.onnx \
   --frames 256 --per-event 4 --min-negative-fraction 0.3 --seed 20260809 \
   --output /var/lib/catdoor/models/calibration/20260809-yolo11n-416.npz
 ```
