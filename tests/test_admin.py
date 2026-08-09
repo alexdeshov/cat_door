@@ -2206,3 +2206,13 @@ def test_health_survives_a_node_without_a_recorder(runtime_path: Path, monkeypat
 
     assert page.status_code == 200
     assert payload["status"] in {"fail", "unknown"}
+
+
+def test_camera_card_shows_the_decode_mode(runtime_path: Path, monkeypatch) -> None:
+    """Настройка, которой не видно в API, обнаруживается только раскопками."""
+    client = make_client(runtime_path, monkeypatch)
+
+    updated = client.put("/api/cameras/face", json={"decode": "qsv"})
+
+    assert updated.status_code == 200
+    assert updated.json()["decode"] == "qsv"

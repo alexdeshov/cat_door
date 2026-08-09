@@ -390,6 +390,10 @@ def _camera_view(camera: CameraRecord) -> dict[str, object]:
         "role": camera.role,
         "rotate_180": camera.rotate_180,
         "enabled": camera.enabled,
+        # Путь декодирования обязан быть виден: настройка, которую нельзя
+        # прочитать из API, обнаруживается только раскопками в собранной
+        # конфигурации Frigate — заметили при переводе камер на QSV.
+        "decode": camera.decode,
         "note": camera.note,
         "configured": bool(camera.rtsp_url()),
     }
