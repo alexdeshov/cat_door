@@ -236,3 +236,24 @@ def test_acceptance_without_an_env_file_does_not_crash(tmp_path: Path) -> None:
     from scripts.acceptance import load_env_file
 
     assert load_env_file(tmp_path / "нет-такого") == 0
+
+
+def test_an_unreadable_environment_is_a_refusal_not_an_absence(tmp_path: Path) -> None:
+    """Файл есть, но не читается — это не «окружения нет».
+
+    Молча приняв одно за другое, приёмка сверяла бы эталон с умолчаниями и
+    печатала таблицу прочерков с одним выдуманным провалом. Так и вышло на узле
+    2026-08-09: `alex` не читает root-овский /etc/catdoor/catdoor.env.
+    """
+    import pytest as _pytest
+
+    from scripts.acceptance import EnvironmentUnreadable, load_env_file
+
+    env = tmp_path / "catdoor.env"
+    env.write_text("CATDOOR_DATA_DIR=/var/lib/catdoor\n", encoding="utf-8")
+    env.chmod(0o000)
+    try:
+        with _pytest.raises(EnvironmentUnreadable, match="не читается"):
+            load_env_file(env)
+    finally:
+        env.chmod(0o644)
