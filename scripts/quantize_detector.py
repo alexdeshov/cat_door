@@ -35,6 +35,10 @@ from src.inference.detector_adapters import create_output_adapter
 # `NonMaxSuppression` — имя операции ONNX и стабильно.
 IGNORED_TYPES = ("NonMaxSuppression", "TopK", "RoiAlign")
 
+# Сколько отложенных кадров с найденным котом нужно, чтобы самопроверке было
+# на чём сработать. Меньше — проверка проходит на пустом месте.
+MIN_INFORMATIVE_FRAMES = 5
+
 # Проверенные параметры препроцессинга. Набор, собранный для 640-й модели, на
 # 416-й «сработает» и даст мусорные диапазоны, поэтому расхождение — отказ.
 CHECKED_KEYS = (
@@ -191,16 +195,22 @@ def quantize(
         before = confidences_of(model_path, manifest, holdout_frames)
         after = confidences_of(output, manifest, holdout_frames)
         deltas = [abs(first - second) for first, second in zip(before, after, strict=True)]
-        # Самопроверка смотрит уверенность класса «кот». Если ни на одном
-        # отложенном кадре исходная модель кота не нашла, все расхождения
-        # окажутся нулями — и отчёт будет выглядеть безупречно, не проверив
-        # ничего. Это тот самый молчаливый ноль, который дороже явного отказа.
-        informative = sum(1 for value in before if value > 0.0)
-        if not informative:
+        # Самопроверка смотрит уверенность класса «кот», и планка «больше нуля»
+        # оказалась бесполезной: 2026-08-09 она пропустила полностью слепую
+        # модель. На отложенных кадрах у исходной модели было семь ненулевых
+        # уверенностей — все около 0.03, — среднее расхождение вышло 0.007, ноль
+        # перевёрнутых вердиктов, и отчёт выглядел безупречно. При этом там, где
+        # fp32 давала 0.55–0.80, int8 давала 0.000–0.017.
+        #
+        # Информативен кадр, на котором исходная модель кота **нашла**, то есть
+        # перешла рабочий порог. Их должно быть достаточно, чтобы расхождение
+        # вообще могло проявиться.
+        informative = sum(1 for value in before if value >= verdict_threshold)
+        if informative < MIN_INFORMATIVE_FRAMES:
             raise ValueError(
-                "the source model found no cat on any holdout frame, so the "
-                "self-check proves nothing: include frames with cats in the "
-                "calibration set"
+                f"the source model found a cat on {informative} holdout frames, "
+                f"fewer than {MIN_INFORMATIVE_FRAMES}: the self-check would prove "
+                f"nothing. Collect calibration frames with more confident cats."
             )
         self_check = {
             "holdout_frames": len(deltas),

@@ -120,7 +120,7 @@ def quantization_stack(monkeypatch) -> tuple[FakeNncf, list[list[float]]]:
     nncf = FakeNncf()
     monkeypatch.setitem(sys.modules, "nncf", nncf)
     monkeypatch.setitem(sys.modules, "onnx", FakeOnnx())
-    scored: list[list[float]] = [[0.9] * 8, [0.9] * 8]
+    scored: list[list[float]] = [[0.9] * 8, [0.9] * 8]  # уверенные коты у обеих
 
     def fake_confidences(model_path, manifest, frames):
         return scored.pop(0)
@@ -157,25 +157,48 @@ def test_quantization_writes_a_manifest_that_keeps_the_contract(
     assert manifest["quantization"]["self_check"]["frames_with_a_cat"] == 8
 
 
-def test_a_holdout_without_cats_is_refused(
+def test_a_holdout_without_confident_cats_is_refused(
     runtime_path: Path,
     monkeypatch,
     quantization_stack: tuple[FakeNncf, list[list[float]]],
 ) -> None:
-    """Ноль расхождения на кадрах без котов — не успех, а пустая проверка.
+    """Планка «больше нуля» пропустила полностью слепую модель.
 
-    Отчёт при этом выглядит безупречно: среднее отклонение 0.0, перевёрнутых
-    вердиктов ноль. Ровно тот молчаливый ноль, который дороже явного отказа.
+    2026-08-09: на отложенных кадрах у исходной модели было семь ненулевых
+    уверенностей, все около 0.03. Среднее расхождение вышло 0.007, перевёрнутых
+    вердиктов ноль, отчёт безупречен — а там, где fp32 давала 0.55–0.80, int8
+    давала 0.000–0.017. Информативен кадр, на котором кот **найден**.
     """
     model = write_model(runtime_path / "source.onnx", MANIFEST)
     calibration = write_calibration(runtime_path / "calib.npz", model)
     monkeypatch.setattr(
         "scripts.quantize_detector.confidences_of",
-        lambda path, manifest, frames: [0.0] * 8,
+        lambda path, manifest, frames: [0.03] * 8,
     )
 
-    with pytest.raises(ValueError, match="proves nothing"):
+    with pytest.raises(ValueError, match="fewer than"):
         quantize(model, calibration, runtime_path / "out.onnx", holdout=8)
+
+
+def test_a_blind_quantized_model_is_caught(
+    runtime_path: Path,
+    monkeypatch,
+    quantization_stack: tuple[FakeNncf, list[list[float]]],
+) -> None:
+    """Тот самый случай: исходная модель видит котов, квантованная — нет."""
+    model = write_model(runtime_path / "source.onnx", MANIFEST)
+    calibration = write_calibration(runtime_path / "calib.npz", model)
+    scored = [[0.7] * 8, [0.001] * 8]
+    monkeypatch.setattr(
+        "scripts.quantize_detector.confidences_of",
+        lambda path, manifest, frames: scored.pop(0),
+    )
+    output = runtime_path / "out.onnx"
+
+    with pytest.raises(ValueError, match="drifted"):
+        quantize(model, calibration, output, holdout=8)
+
+    assert not output.exists()
 
 
 def test_postprocessing_is_excluded_from_quantization(

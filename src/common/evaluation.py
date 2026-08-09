@@ -321,11 +321,19 @@ def build_detector_evaluation_report(
     }
     sweep_thresholds = [round(value / 100, 2) for value in range(5, 96, 5)]
     threshold_sweep: dict[str, list[dict[str, float | int | None]]] = {}
-    clean_events = sections["clean"]
+    # Развёртка строится по ВСЕМ проходам, а не по «чистым». `training_contaminated`
+    # помечает события, ушедшие в обучение **модели опознания**; детектор же —
+    # сток YOLO11 на COCO, он нашего материала не видел никогда, и исключать эти
+    # события из его оценки незачем.
+    #
+    # Цена ошибки измерена 2026-08-09: из 189 проходов с котами «чистыми» были
+    # два. Развёртка честно считалась по ним, и таблица «пропуски на равной доле
+    # ложных» выглядела осмысленно, будучи одним котом из двух. Такое не
+    # проявляется ничем, кроме подозрительно круглых 50% и 0%.
     for view in evaluated_views:
         valid = [
             event
-            for event in clean_events
+            for event in events
             if view in event.views and event.views[view].frames_seen > 0
         ]
         cat_confidences = [
@@ -367,7 +375,7 @@ def build_detector_evaluation_report(
         "not_visible_events": sum(
             event.label == "not_visible" for event in events
         ),
-        "clean_events": len(clean_events),
+        "clean_events": len(sections["clean"]),
         "night_events": len(sections["night"]),
         "sections": section_metrics,
         "threshold_sweep": threshold_sweep,
