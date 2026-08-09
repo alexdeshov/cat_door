@@ -3,16 +3,23 @@
 Контур калитки — это служба systemd, которая поднимает Frigate в Docker.
 Пульту нужно две вещи: знать, работает ли она, и уметь её включить и выключить.
 
-Состояние берётся у systemd, а не по HTTP у самого Frigate, и это осознанно.
-Ходить к нему за статистикой значило бы держать здесь ещё одни учётные данные,
-то есть ухудшить защиту ради цифр, которые и так видны в его интерфейсе. Вопрос
-«работает ли контур» systemd отвечает точнее и бесплатно.
+Состояние берётся у systemd, а не по HTTP у самого Frigate, и это осознанно:
+вопрос «работает ли контур» systemd отвечает точнее и бесплатно.
 
-Исключение одно, и оно вынужденное: **safe mode**. Frigate, забраковавший
-конфигурацию, поднимается вообще без камер — и для systemd это здоровая живая
-служба. 2026-08-08 узел простоял так час: камера, названная цифрой, сделала
-конфигурацию негодной, а пульт показывал «работает». Это и спрашивается по
-HTTP — на внутреннем порту, где аутентификации нет и учётных данных не нужно.
+Два вопроса он ответить не может, и за ними приходится ходить по HTTP — на
+внутренний порт, где аутентификации нет и учётных данных не требуется.
+
+**Safe mode.** Frigate, забраковавший конфигурацию, поднимается вообще без
+камер — и для systemd это здоровая живая служба. 2026-08-08 узел простоял так
+час: камера, названная цифрой, сделала конфигурацию негодной, а пульт показывал
+«работает».
+
+**Статистика.** Изначально здесь стояло правило «за цифрами не ходить: они и так
+видны в интерфейсе Frigate». Оно продержалось до 2026-08-09, когда выяснилось,
+что именно эти цифры отвечают на вопрос «стало ли хуже»: пропуск кадров на
+камере калитки вырос до 0.3 в секунду, и увидеть это можно было только у
+Frigate. Довод про учётные данные к внутреннему порту не относился с самого
+начала — там их нет.
 
 Запускать и останавливать службу веб-процесс не может и не должен: в его юните
 стоит `NoNewPrivileges=true`, и это правильно — у админки нет аутентификации,
@@ -28,7 +35,7 @@ import subprocess
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 GateState = Literal[
     "running",
@@ -101,6 +108,23 @@ def frigate_safe_mode(api_url: str, *, timeout: float = 2.0) -> bool | None:
     except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError):
         return None
     return bool(payload.get("safe_mode")) if isinstance(payload, dict) else None
+
+
+def frigate_stats(api_url: str, *, timeout: float = 2.0) -> dict[str, Any] | None:
+    """Статистика Frigate: детекторы, камеры, пропуск кадров. `None` — не спросили.
+
+    Та же осторожность, что и у `frigate_safe_mode`: неотвеченный запрос — это
+    «неизвестно», а не «плохо». Страница состояния обязана различать сломанный
+    контур и недоступный.
+    """
+    if not api_url:
+        return None
+    try:
+        with urllib.request.urlopen(f"{api_url.rstrip('/')}/api/stats", timeout=timeout) as answer:
+            payload = json.loads(answer.read().decode("utf-8", "replace"))
+    except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
 
 
 def gate_status(unit: str, api_url: str = "") -> GateStatus:

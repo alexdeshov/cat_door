@@ -2152,3 +2152,57 @@ def test_notification_test_refuses_when_the_bot_is_not_configured(runtime_path: 
 
     assert response.status_code == 422
     assert "не настроен" in response.json()["detail"]
+
+
+def test_health_page_shows_the_reference_next_to_the_fact(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    """Страница состояния отвечает на вопрос «всё ли как в эталоне».
+
+    Настройки на этом узле умышленно отличаются от принятых: клиент поднят на
+    умолчаниях, где детектор на процессоре. Страница обязана назвать это
+    расхождением, а не промолчать.
+    """
+    client = make_client(runtime_path, monkeypatch)
+    write_recorder_status(
+        runtime_path / "runtime" / "recorder-status.json",
+        detector_device_actual="CPU",
+        detector_model="yolo11n-416.onnx",
+        hwaccel_actual="none",
+        frames_per_second={"face": 12.0, "side": 6.0},
+        inference_ms=13.5,
+    )
+
+    page = client.get("/health")
+    api = client.get("/api/health")
+
+    assert page.status_code == 200
+    assert "Кошачий контур" in page.text
+    assert "Контур калитки" in page.text
+    assert "Железо узла" in page.text
+    assert api.status_code == 200
+    payload = api.json()
+    assert payload["status"] == "fail"
+    checks = {
+        check["key"]: check
+        for group in payload["groups"]
+        for check in group["checks"]
+    }
+    assert checks["detector_device"]["status"] == "fail"
+    assert checks["detector_device"]["actual"] == "CPU"
+    assert checks["detector_device"]["expected"] == "GPU"
+    assert checks["hwaccel"]["status"] == "fail"
+    # Frigate в тестах не поднят, и это «недоступен», а не «сломан».
+    assert checks["gate_reachable"]["status"] == "fail"
+
+
+def test_health_survives_a_node_without_a_recorder(runtime_path: Path, monkeypatch) -> None:
+    """Ни статуса, ни датчиков — страница обязана открыться и сказать честно."""
+    client = make_client(runtime_path, monkeypatch)
+
+    page = client.get("/health")
+    payload = client.get("/api/health").json()
+
+    assert page.status_code == 200
+    assert payload["status"] in {"fail", "unknown"}

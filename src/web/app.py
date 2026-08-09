@@ -7,6 +7,7 @@ import sys
 from collections.abc import AsyncIterator, Callable, Generator, Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import asynccontextmanager, suppress
+from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from math import ceil
@@ -88,8 +89,10 @@ from src.common.detection_config import (
 )
 from src.common.detection_stats import read_detection_stats
 from src.common.frigate_config import RECORDING_RETENTION
-from src.common.gate_service import GateStatus, gate_status
+from src.common.gate_service import GateStatus, frigate_stats, gate_status
+from src.common.health import build_health, gpu_occupancy_percent, overall_status
 from src.common.model_registry import register_model_version
+from src.common.node_metrics import read_node_metrics
 from src.common.online_metrics import build_online_metrics
 from src.common.process import spawn_detached
 from src.common.sd_notify import Notifier
@@ -104,7 +107,7 @@ from src.common.telegram import TelegramClient, TelegramError, hint_for
 from src.recorder.detection_journal import frame_journal_path
 from src.recorder.ffmpeg import RecorderError, mjpeg_stream, probe_stream, record_clip
 from src.recorder.preview import local_mjpeg_stream, preview_is_fresh, preview_path
-from src.recorder.status import read_recorder_status
+from src.recorder.status import read_recorder_status, recorder_status_path
 from src.web.live_stream import resilient_mjpeg_stream, until
 from training.workflow import create_macbook_export, write_status
 
@@ -1110,6 +1113,65 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "load": load,
             "cpu_temperature_c": read_cpu_temperature(),
         }
+
+    def current_health() -> dict[str, object]:
+        """Сверка факта с эталоном — одним местом для страницы и для API.
+
+        Эталон живёт в `src/common/health.py` вместе с причиной каждого числа:
+        расхождение без причины через месяц не даёт решить, чинить факт или
+        править эталон.
+        """
+        status = read_recorder_status(recorder_status_path(settings)) or {}
+        stats = frigate_stats(settings.gate_api_url)
+        metrics = read_node_metrics(
+            [settings.data_dir, Path("/srv/data"), settings.gate_recordings_path]
+        )
+        groups = build_health(
+            recorder_status=status,
+            detection_config=current_detection_config().model_dump(mode="json"),
+            frigate_stats=stats,
+            gate_detector_device=settings.gate_detector_device,
+            metrics=metrics,
+            gpu_name=str(status.get("detector_device_name") or "") or None,
+        )
+        return {
+            "status": overall_status(groups),
+            "groups": [
+                {
+                    "title": group.title,
+                    "status": group.status,
+                    "checks": [asdict(check) for check in group.checks],
+                }
+                for group in groups
+            ],
+            "metrics": {
+                "load_average": metrics.load_average,
+                "load_per_core": metrics.load_per_core,
+                "cpu_count": metrics.cpu_count,
+                "cpu_temperature_c": metrics.cpu_temperature_c,
+                "disk_temperature_c": metrics.disk_temperature_c,
+                "memory_used_percent": metrics.memory_used_percent,
+                "memory_total_gb": metrics.memory_total_gb,
+                "gpu_frequency_mhz": metrics.gpu_frequency_mhz,
+                "gpu_frequency_max_mhz": metrics.gpu_frequency_max_mhz,
+                "gpu_frequency_percent": metrics.gpu_frequency_percent,
+                "gpu_occupancy_percent": gpu_occupancy_percent(status, stats),
+                "uptime_seconds": metrics.uptime_seconds,
+                "disks": [asdict(disk) for disk in metrics.disks],
+            },
+        }
+
+    @app.get("/api/health")
+    def health_api() -> dict[str, object]:
+        return current_health()
+
+    @app.get("/health", response_class=HTMLResponse)
+    def health_page(request: Request) -> HTMLResponse:
+        return templates.TemplateResponse(
+            request,
+            "health.html",
+            {"circuit": "health", "health": current_health()},
+        )
 
     @app.get("/api/recorder/status")
     def recorder_status() -> dict[str, object]:

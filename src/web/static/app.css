@@ -918,3 +918,59 @@ body:not(.previews-on) .preview-queued { display: none; }
 
 /* Перегрев в шапке: порог 85°C задаёт скрипт. */
 .chip-hot { color: #f87171; border-color: #f87171; }
+
+/* ── Состояние узла: эталон против факта ──────────────────────────────── */
+
+/* Три колонки, а не таблица: строка обязана переноситься на телефоне, где
+   ширина экрана 390 точек, а «эталон» и «сейчас» рядом читать необязательно —
+   важнее не потерять, какой показатель разошёлся. */
+.health-table { display: grid; }
+
+.health-row {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+  padding: 11px 18px;
+  border-top: 1px solid var(--line);
+  align-items: baseline;
+}
+
+.health-row:first-child { border-top: 0; }
+
+.health-head {
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
+
+.health-title { display: grid; gap: 3px; }
+
+.health-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.35;
+}
+
+.health-expected { color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.health-actual { font-variant-numeric: tabular-nums; font-weight: 600; }
+
+/* Цветом красится вся строка, а не только значение: взгляд ищет отклонение
+   сверху вниз по краю, и подсветка одного числа в середине строки теряется. */
+.health-fail { background: var(--bad-bg); }
+.health-fail .health-actual { color: var(--bad); }
+.health-warn { background: var(--signal-bg); }
+.health-warn .health-actual { color: var(--signal); }
+.health-unknown .health-actual { color: var(--text-faint); font-weight: 500; }
+
+.beacon-warn { background: var(--signal); }
+
+@media (max-width: 640px) {
+  .health-row { grid-template-columns: 1fr auto; row-gap: 4px; }
+  /* Заголовок колонок на узком экране врёт: колонок уже две. */
+  .health-head { display: none; }
+  .health-title { grid-column: 1 / -1; }
+  .health-expected::before { content: "эталон: "; }
+}

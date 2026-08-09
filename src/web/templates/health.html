@@ -1,0 +1,115 @@
+{% extends "_base.html" %}
+{% set circuit = "health" %}
+{% block title %}CatDoor — состояние узла{% endblock %}
+
+{% block content %}
+{% set tone = {"ok": "beacon-ok", "warn": "beacon-warn", "fail": "beacon-bad", "unknown": ""} %}
+{% set verdicts = {
+  "ok": "всё как в эталоне",
+  "warn": "есть отклонения",
+  "fail": "расхождение с эталоном",
+  "unknown": "часть показателей не прочиталась"
+} %}
+{% set metrics = health.metrics %}
+
+{# Итог наверху и одной строкой: страницу открывают с вопросом «всё ли в
+   порядке», и ответ на него не должен требовать чтения тридцати строк. #}
+<section class="statusbar">
+  <div class="statusbar-state">
+    <span class="beacon {{ tone[health.status] }}" aria-hidden="true"></span>
+    <span class="statusbar-label">{{ verdicts[health.status] }}</span>
+  </div>
+  <div class="readouts">
+    <div class="readout">
+      <span class="readout-key">нагрузка на ядро</span>
+      <span class="readout-value">
+        {{ metrics.load_per_core if metrics.load_per_core is not none else "—" }}
+        {%- if metrics.cpu_count %} <span class="muted">из {{ metrics.cpu_count }} ядер</span>{% endif %}
+      </span>
+    </div>
+    <div class="readout">
+      <span class="readout-key">процессор</span>
+      <span class="readout-value">
+        {{ (metrics.cpu_temperature_c ~ " °C") if metrics.cpu_temperature_c is not none else "—" }}
+      </span>
+    </div>
+    <div class="readout">
+      <span class="readout-key">память</span>
+      <span class="readout-value">
+        {%- if metrics.memory_used_percent is not none -%}
+          {{ metrics.memory_used_percent }}%
+          <span class="muted">из {{ metrics.memory_total_gb }} ГБ</span>
+        {%- else -%}—{%- endif -%}
+      </span>
+    </div>
+    {# Занятость видеоядра вычислена, а не измерена: настоящую утилизацию даёт
+       только intel_gpu_top через PMU ядра, а прав на него у веб-службы нет.
+       Подпись обязана об этом говорить, иначе число будут читать как точное. #}
+    <div class="readout">
+      <span class="readout-key">видеоядро, оценка</span>
+      <span class="readout-value">
+        {{ (metrics.gpu_occupancy_percent ~ "%") if metrics.gpu_occupancy_percent is not none else "—" }}
+        {%- if metrics.gpu_frequency_mhz %}
+          <span class="muted">{{ metrics.gpu_frequency_mhz }} МГц</span>
+        {%- endif %}
+      </span>
+    </div>
+    <div class="readout">
+      <span class="readout-key">диск</span>
+      <span class="readout-value">
+        {{ (metrics.disk_temperature_c ~ " °C") if metrics.disk_temperature_c is not none else "—" }}
+      </span>
+    </div>
+    <div class="readout">
+      <span class="readout-key">аптайм</span>
+      <span class="readout-value">
+        {%- if metrics.uptime_seconds -%}
+          {{ (metrics.uptime_seconds // 3600) | int }} ч {{ ((metrics.uptime_seconds % 3600) // 60) | int }} мин
+        {%- else -%}—{%- endif -%}
+      </span>
+    </div>
+  </div>
+</section>
+
+{% for group in health.groups %}
+  <section class="panel">
+    <div class="panel-head">
+      <span class="beacon {{ tone[group.status] }}" aria-hidden="true"></span>
+      <h2>{{ group.title }}</h2>
+    </div>
+    <div class="health-table">
+      <div class="health-row health-head" aria-hidden="true">
+        <span>показатель</span><span>эталон</span><span>сейчас</span>
+      </div>
+      {% for check in group.checks %}
+        <div class="health-row health-{{ check.status }}">
+          <span class="health-title">
+            {{ check.title }}
+            {% if check.hint and check.status != "ok" %}
+              <span class="health-hint">{{ check.hint }}</span>
+            {% endif %}
+          </span>
+          <span class="health-expected">{{ check.expected }}</span>
+          <span class="health-actual">{{ check.actual }}</span>
+        </div>
+      {% endfor %}
+    </div>
+  </section>
+{% endfor %}
+
+<section class="panel padded">
+  <h2>Откуда взялся эталон</h2>
+  <p class="muted">
+    Числа — измеренные значения конфигурации, принятой 2026-08-09: приёмка
+    прошла 24 проверки из 24. Каждое сопровождается причиной в
+    <code>src/common/health.py</code> — эталон без причины через месяц читается
+    как суеверие, и первый же увидевший расхождение не сможет решить, чинить
+    факт или править эталон.
+  </p>
+  <p class="muted">
+    Тяжёлые проверки сюда не вынесены: тесты проекта на узле и совпадение кода
+    с <code>origin/main</code> живут в <code>scripts/acceptance.py</code>, потому
+    что стоят секунд, а страница обновляется на каждом открытии.
+  </p>
+</section>
+{% endblock %}
