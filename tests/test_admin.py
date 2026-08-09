@@ -117,7 +117,7 @@ def test_capture_and_label_known_cat(runtime_path: Path, monkeypatch) -> None:
     # Настройки детекции переехали на вкладку камер: там же список камер и их
     # роли, поэтому редактировать их в двух местах больше не нужно.
     assert 'id="detection-face-confirmation-frames"' not in page.text
-    assert '<video preload="metadata"' in page.text
+    assert '<video preload="none"' in page.text
     assert "<video controls" not in page.text
     assert 'class="player-bar"' in page.text
     assert 'class="video-seek"' in page.text
@@ -2216,3 +2216,67 @@ def test_camera_card_shows_the_decode_mode(runtime_path: Path, monkeypatch) -> N
 
     assert updated.status_code == 200
     assert updated.json()["decode"] == "qsv"
+
+
+def test_poster_is_generated_once_and_cached_forever(runtime_path: Path, monkeypatch) -> None:
+    """Страница проходов тянула метаданные двадцати роликов разом.
+
+    По каналу до админки в 1.7 МБ/с — при роликах по полсотни мегабайт — превью
+    появлялись через секунды, а нажатый play ждал очереди соединений. Постер в
+    ~30 КБ отдаёт то же самое одним запросом, и второй раз даже не спрашивается:
+    запись прохода неизменяема.
+    """
+    client = make_client(runtime_path, monkeypatch)
+    capture = client.post("/api/events", json={"duration_seconds": 5})
+    event_id = capture.json()["id"]
+    calls: list[float] = []
+
+    def fake_extract(ffmpeg, video, destination, *, at_seconds=1.0, **kwargs):
+        calls.append(at_seconds)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(b"\xff\xd8jpeg")
+        return True
+
+    monkeypatch.setattr("src.web.app.extract_frame", fake_extract)
+
+    first = client.get(f"/media/{event_id}/face/poster")
+    second = client.get(f"/media/{event_id}/face/poster")
+
+    assert first.status_code == 200
+    assert first.headers["content-type"] == "image/jpeg"
+    assert "immutable" in first.headers["cache-control"]
+    assert second.status_code == 200
+    assert len(calls) == 1, "кадр вынимается один раз, дальше кэш"
+
+
+def test_poster_extraction_failure_is_a_clean_404(runtime_path: Path, monkeypatch) -> None:
+    client = make_client(runtime_path, monkeypatch)
+    event_id = client.post("/api/events", json={"duration_seconds": 5}).json()["id"]
+    monkeypatch.setattr("src.web.app.extract_frame", lambda *a, **k: False)
+
+    assert client.get(f"/media/{event_id}/face/poster").status_code == 404
+
+
+def test_deleting_an_event_removes_its_posters(runtime_path: Path, monkeypatch) -> None:
+    from src.web.app import poster_path
+
+    client = make_client(runtime_path, monkeypatch)
+    event_id = client.post("/api/events", json={"duration_seconds": 5}).json()["id"]
+    poster = poster_path(runtime_path, event_id, "face")
+    poster.parent.mkdir(parents=True, exist_ok=True)
+    poster.write_bytes(b"jpeg")
+
+    assert client.delete(f"/api/events/{event_id}").status_code == 204
+    assert not poster.exists()
+
+
+def test_pass_videos_do_not_preload(runtime_path: Path, monkeypatch) -> None:
+    """`preload="metadata"` на двадцати роликах — это и была вся беда."""
+    client = make_client(runtime_path, monkeypatch)
+    client.post("/api/events", json={"duration_seconds": 5})
+
+    page = client.get("/")
+
+    assert 'preload="none"' in page.text
+    assert 'preload="metadata"' not in page.text
+    assert "/poster" in page.text
