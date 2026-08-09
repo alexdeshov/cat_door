@@ -564,7 +564,7 @@ def test_the_api_address_can_be_redirected(runtime_path: Path, monkeypatch) -> N
     """
     asked: list[str] = []
 
-    def capture(request, timeout):  # noqa: ANN001 - подмена urlopen
+    def capture(request, timeout):
         asked.append(request.full_url)
         raise TelegramUnreachable("не важно")
 
