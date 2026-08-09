@@ -54,6 +54,19 @@ inference = [
     "numpy>=2.0",
     "pillow>=11.0",
 ]
+# Квантование живёт на маке, а не на узле: сбор статистики бэкендом `onnx` идёт
+# через onnxruntime, и тащить его вместе с NNCF на боевую машину незачем.
+# Отдельным extra, а не в `dev`: `tests/test_packaging.py` требует, чтобы суита
+# запускалась от одного `.[dev]`, а тесты квантования работают на поддельном
+# `nncf` в `sys.modules`.
+quantization = [
+    "nncf>=2.14",
+    "onnx>=1.17",
+    "onnxruntime>=1.20",
+    "openvino>=2025.0,<2027",
+    "numpy>=2.0",
+    "pillow>=11.0",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -68,5 +81,5 @@ line-length = 100
 target-version = "py311"
 
 [[tool.mypy.overrides]]
-module = ["onnxruntime", "openvino", "torchvision", "torchvision.*"]
+module = ["nncf", "nncf.*", "onnx", "onnxruntime", "openvino", "torchvision", "torchvision.*"]
 ignore_missing_imports = true

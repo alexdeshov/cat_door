@@ -7,7 +7,11 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from src.inference.cat_detector import DetectorError, OpenVinoCatDetector
+from src.inference.cat_detector import (
+    DetectorError,
+    OpenVinoCatDetector,
+    build_detector_tensor,
+)
 from src.inference.detector_adapters import SsdLiteOutputAdapter
 
 
@@ -107,6 +111,51 @@ def test_detector_returns_cat_boxes_and_maximum_confidence() -> None:
     assert result.confidence == pytest.approx(0.8)
     assert len(result.detections) == 2
     assert result.detections[0].box == (10.0, 20.0, 100.0, 120.0)
+
+
+@pytest.mark.parametrize("channel_order", ["rgb", "bgr"])
+def test_calibration_tensor_is_the_one_inference_feeds_the_model(channel_order: str) -> None:
+    """Что `detect()` кладёт в модель, тем и калибруется квантование.
+
+    Отдельная функция появилась ради этого: если бы калибровка строила тензор
+    своим способом, диапазоны активаций снялись бы не с тех чисел. Ошибка не
+    проявилась бы ничем — ни исключением, ни предупреждением, только качеством
+    квантованной модели.
+    """
+    detector = object.__new__(OpenVinoCatDetector)
+    detector.cat_class_id = 17
+    detector.input_size = 4
+    detector.channel_order = channel_order
+    detector.input_scale = 1.0 / 255.0
+    detector.input_mean = np.asarray([0.485, 0.456, 0.406], dtype=np.float32)
+    detector.input_std = np.asarray([0.229, 0.224, 0.225], dtype=np.float32)
+    detector._input = "images"
+    detector._outputs = {"boxes": "boxes", "labels": "labels", "scores": "scores"}
+    detector._adapter = SsdLiteOutputAdapter(17, 4, ("boxes", "labels", "scores"), 0.01)
+    seen: list[np.ndarray] = []
+
+    def spy(inputs: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+        seen.append(inputs["images"])
+        return {
+            "boxes": np.zeros((0, 4)),
+            "labels": np.zeros((0,)),
+            "scores": np.zeros((0,)),
+        }
+
+    detector._compiled = spy
+    frame = np.arange(4 * 4 * 3, dtype=np.uint8).reshape(4, 4, 3)
+
+    detector.detect(frame)
+
+    expected = build_detector_tensor(
+        frame,
+        channel_order=channel_order,
+        scale=detector.input_scale,
+        mean=detector.input_mean,
+        std=detector.input_std,
+    )
+    assert np.array_equal(seen[0], expected)
+    assert seen[0].dtype == np.float32
 
 
 def test_detector_reports_actual_openvino_execution_device(
