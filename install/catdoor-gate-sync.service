@@ -4,6 +4,12 @@ Documentation=https://github.com/alexdeshov/cat_door/blob/main/docs/two-circuits
 After=docker.service
 Wants=docker.service
 
+# Примиритель читает инвентарь камер из каталога данных и пишет конфигурацию
+# Frigate в его каталог — оба на отдельных томах, о которых юнит сам не знает.
+# 2026-08-09 такая же незаявленная зависимость у Frigate стоила четырёх часов
+# записи не на тот диск и мёртвого распознавания лиц.
+RequiresMountsFor=/var/lib/catdoor /var/lib/frigate
+
 [Service]
 # От root, потому что исполняет systemctl. Веб-служба остаётся без привилегий:
 # она только записывает желаемое состояние в runtime/circuits.json.
