@@ -157,7 +157,7 @@
           <div class="event-media stack">
             <div class="event-recording" data-camera-role="face">
               <div class="event-player">
-                <video preload="metadata" src="/media/{{ event.id }}/face"
+                <video preload="none" poster="/media/{{ event.id }}/face/poster" src="/media/{{ event.id }}/face"
                   {% if event.preview_offset_seconds %}data-start="{{ event.preview_offset_seconds }}"{% endif %}></video>
                 <div class="player-bar">
                   <button class="video-play" type="button" aria-label="Воспроизвести">▶</button>
@@ -172,7 +172,7 @@
             {% if event.side_media_path %}
               <div class="event-recording" data-camera-role="side">
                 <div class="event-player">
-                  <video preload="metadata" src="/media/{{ event.id }}/side"
+                  <video preload="none" poster="/media/{{ event.id }}/side/poster" src="/media/{{ event.id }}/side"
                     {% if event.preview_offset_seconds %}data-start="{{ event.preview_offset_seconds }}"{% endif %}></video>
                   <div class="player-bar">
                     <button class="video-play" type="button" aria-label="Воспроизвести">▶</button>

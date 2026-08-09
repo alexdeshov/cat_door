@@ -105,7 +105,13 @@ from src.common.system_stats import (
 )
 from src.common.telegram import TelegramClient, TelegramError, hint_for
 from src.recorder.detection_journal import frame_journal_path
-from src.recorder.ffmpeg import RecorderError, mjpeg_stream, probe_stream, record_clip
+from src.recorder.ffmpeg import (
+    RecorderError,
+    extract_frame,
+    mjpeg_stream,
+    probe_stream,
+    record_clip,
+)
 from src.recorder.preview import local_mjpeg_stream, preview_is_fresh, preview_path
 from src.recorder.status import read_recorder_status, recorder_status_path
 from src.web.live_stream import resilient_mjpeg_stream, until
@@ -143,6 +149,14 @@ GATE_STATE_TITLES = {
 ACTIVE_EVALUATION_STATES = {"starting", "running"}
 ACTIVE_TRAINING_STATES = {"starting", "preparing", "training"}
 HEARTBEAT_STALE_AFTER = timedelta(minutes=10)
+
+# Ширина кадра-постера. Карточка на странице проходов рисуется ~300 точек,
+# 480 оставляет запас под плотные экраны и весит ~30 КБ.
+POSTER_WIDTH = 480
+
+
+def poster_path(data_dir: Path, event_id: int, view: str) -> Path:
+    return data_dir / "runtime" / "posters" / f"{event_id:08d}-{view}.jpg"
 # Подбор пути потока держит запрос открытым, а администратор ждёт ответ
 # страницы. Ограничения переводят «поиск завис» в «часть устройств не
 # проверена», о чём в ответе сказано прямым текстом.
@@ -1428,6 +1442,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 shutil.rmtree(event_dir)
             except OSError as exc:
                 raise HTTPException(500, "Не удалось удалить файлы события") from exc
+        for view in ("face", "side"):
+            poster_path(settings.data_dir, event.id, view).unlink(missing_ok=True)
 
         session.delete(event)
         session.commit()
@@ -1831,6 +1847,56 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             path,
             media_type="video/mp4",
             filename=f"event-{event.id}-{view}.mp4",
+        )
+
+    @app.get("/media/{event_id}/{view}/poster")
+    def media_poster(
+        event_id: int,
+        view: str,
+        session: Annotated[Session, Depends(get_session)],
+    ) -> FileResponse:
+        """Кадр-постер прохода: страница проходов вместо метаданных видео.
+
+        До этого страница вешала на каждый проход `<video preload="metadata">`,
+        и браузер при открытии тянул метаданные двадцати роликов разом. По
+        каналу до админки в 1.7 МБ/с — при том что сами ролики ночного прохода
+        весят по полсотни мегабайт — превью появлялись через несколько секунд,
+        а нажатый play ждал, пока освободятся соединения. Постер в ~30 КБ
+        решает то же самое одним маленьким запросом.
+
+        Кадр берётся на секунде лучшей уверенности детектора — той же, с
+        которой открывается ролик, — и кэшируется навсегда: запись прохода
+        неизменяема.
+        """
+        if view not in {"face", "side"}:
+            raise HTTPException(404, "Неизвестная камера")
+        event = session.get(Event, event_id)
+        media_path = (
+            event.media_path if event and view == "face" else event.side_media_path if event else None
+        )
+        if not event or not media_path:
+            raise HTTPException(404, "Видео не найдено")
+        root = settings.data_dir.resolve()
+        source = (root / media_path).resolve()
+        if root not in source.parents or not source.is_file():
+            raise HTTPException(404, "Видео не найдено")
+        poster = poster_path(settings.data_dir, event.id, view)
+        if not poster.is_file():
+            extracted = extract_frame(
+                settings.ffmpeg_path,
+                source,
+                poster,
+                at_seconds=event.preview_offset_seconds or 1.0,
+                max_width=POSTER_WIDTH,
+            )
+            if not extracted:
+                raise HTTPException(404, "Кадр не вынулся")
+        return FileResponse(
+            poster,
+            media_type="image/jpeg",
+            # Запись неизменяема, значит и кадр из неё вечен: браузер больше не
+            # должен спрашивать про него никогда.
+            headers={"Cache-Control": "public, max-age=31536000, immutable"},
         )
 
     return app
