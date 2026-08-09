@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -41,6 +42,34 @@ from src.recorder.status import read_recorder_status, recorder_status_path
 REQUIRED_UNITS = ("catdoor-recorder", "catdoor-web", "docker", "dnsmasq", "chrony")
 REQUIRED_TIMERS = ("catdoor-gate-sync.timer", "catdoor-gate-sync.path", "catdoor-backup.timer")
 RECONCILER_OWNED = ("frigate",)
+
+
+def load_env_file(path: Path) -> int:
+    """Подложить окружение узла до создания `Settings`.
+
+    Службам его подсовывает systemd (`EnvironmentFile=`), а запущенному руками
+    скрипту — никто. Без этого `Settings()` поднимается на умолчаниях, каталог
+    данных становится относительным `data`, и приёмка честно сверяет эталон с
+    пустотой. Первый же прогон на узле так и сделал.
+
+    Уже заданные переменные не трогаются: явный запуск с другим окружением
+    должен побеждать файл.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return 0
+    loaded = 0
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key, value = key.strip(), value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+            loaded += 1
+    return loaded
 
 
 def _run(command: list[str]) -> tuple[int, str]:
@@ -282,9 +311,17 @@ def main() -> int:
     parser.add_argument("--api", default="http://127.0.0.1:8080")
     parser.add_argument("--rate-seconds", type=float, default=20.0)
     parser.add_argument("--skip-tests", action="store_true")
+    parser.add_argument(
+        "--env-file",
+        type=Path,
+        default=Path("/etc/catdoor/catdoor.env"),
+        help="окружение узла; без него Settings поднимется на умолчаниях",
+    )
     arguments = parser.parse_args()
 
+    loaded = load_env_file(arguments.env_file)
     settings = Settings()
+    print(f"окружение: {arguments.env_file} ({loaded} переменных), данные: {settings.data_dir}")
     status = read_recorder_status(recorder_status_path(settings)) or {}
     stats = _api(f"{settings.gate_api_url.rstrip('/')}/api/stats")
     metrics = read_node_metrics(

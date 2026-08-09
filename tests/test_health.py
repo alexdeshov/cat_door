@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import pytest
@@ -198,3 +199,40 @@ def test_a_missing_volume_is_skipped_without_breaking_the_rest(tmp_path: Path) -
     disks = read_disks([tmp_path / "нет-такого", tmp_path])
 
     assert [disk.path for disk in disks] == [str(tmp_path)]
+
+
+def test_acceptance_loads_the_node_environment_before_settings(tmp_path: Path, monkeypatch) -> None:
+    """Службам окружение подсовывает systemd, запущенному руками скрипту — никто.
+
+    Без этого `Settings()` поднимался на умолчаниях, каталог данных становился
+    относительным `data`, и приёмка честно сверяла эталон с пустотой. Первый же
+    прогон на узле так и сделал.
+    """
+    from scripts.acceptance import load_env_file
+
+    env = tmp_path / "catdoor.env"
+    env.write_text(
+        "# комментарий\n"
+        "CATDOOR_DATA_DIR=/var/lib/catdoor\n"
+        'CATDOOR_GATE_DETECTOR_DEVICE="GPU"\n'
+        "\n"
+        "CATDOOR_ALREADY_SET=из-файла\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CATDOOR_ALREADY_SET", "из-оболочки")
+    monkeypatch.delenv("CATDOOR_DATA_DIR", raising=False)
+    monkeypatch.delenv("CATDOOR_GATE_DETECTOR_DEVICE", raising=False)
+
+    loaded = load_env_file(env)
+
+    assert loaded == 2
+    assert os.environ["CATDOOR_DATA_DIR"] == "/var/lib/catdoor"
+    assert os.environ["CATDOOR_GATE_DETECTOR_DEVICE"] == "GPU"
+    # Явный запуск с другим окружением должен побеждать файл.
+    assert os.environ["CATDOOR_ALREADY_SET"] == "из-оболочки"
+
+
+def test_acceptance_without_an_env_file_does_not_crash(tmp_path: Path) -> None:
+    from scripts.acceptance import load_env_file
+
+    assert load_env_file(tmp_path / "нет-такого") == 0
