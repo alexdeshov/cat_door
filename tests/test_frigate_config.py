@@ -8,6 +8,7 @@ from src.common.frigate_config import (
     _camera_block,
     build_config,
     build_env,
+    foreign_camera_settings,
     foreign_sections,
     frigate_camera_name,
     frigate_cameras,
@@ -305,3 +306,94 @@ def test_ordinary_names_stay_without_quotes() -> None:
     )
 
     assert _camera_block(camera, 0, 7).startswith("  ursa_minor:")
+
+
+EXISTING_WITH_MASK = """\
+mqtt:
+  enabled: false
+
+cameras:
+  test_cam:
+    ffmpeg:
+      inputs:
+        - path: rtsp://old
+          roles:
+            - detect
+    detect:
+      enabled: true
+      fps: 5
+    # кусты справа: качаются от ветра, интереса не представляют
+    motion:
+      contour_area: 40
+      mask:
+        - 0.7,0,1,0,1,1,0.7,1
+    zones:
+      gate:
+        coordinates: 0,0,0.5,0,0.5,1,0,1
+  "3":
+    detect:
+      enabled: true
+    motion:
+      threshold: 40
+
+face_recognition:
+  enabled: true
+"""
+
+
+def test_hand_drawn_camera_settings_survive_a_rebuild() -> None:
+    """Маску рисуют в интерфейсе Frigate, а конфигурацию пересобираем мы.
+
+    До 2026-08-09 раздел `cameras` пересобирался целиком, и нарисованная маска
+    жила до первой правки камеры в админке. Узнать об этом можно было только по
+    вернувшимся ложным срабатываниям.
+    """
+    kept = foreign_camera_settings(EXISTING_WITH_MASK)
+
+    assert set(kept) == {"test_cam", "3"}
+    text = "\n".join(kept["test_cam"])
+    assert "motion:" in text
+    assert "contour_area: 40" in text
+    assert "0.7,0,1,0,1,1,0.7,1" in text
+    assert "zones:" in text
+    assert "качаются от ветра" in text, "комментарий человека принадлежит его настройке"
+    # Наше собственное мы не переносим: оно будет собрано заново.
+    assert "ffmpeg:" not in text
+    assert "fps: 5" not in text
+
+
+def test_a_numeric_camera_name_keeps_its_settings() -> None:
+    """Камеру, названную цифрой, YAML отдаёт в кавычках — ключ надо очистить."""
+    kept = foreign_camera_settings(EXISTING_WITH_MASK)
+
+    assert "threshold: 40" in "\n".join(kept["3"])
+
+
+def test_rebuilt_config_carries_the_mask_into_the_camera() -> None:
+    inventory = registry(camera("test_cam", "gate"))
+    circuits = NodeCircuits(cats=True, gate=True)
+
+    config = build_config(
+        inventory,
+        circuits,
+        preserved_cameras=foreign_camera_settings(EXISTING_WITH_MASK),
+    )
+    parsed = yaml.safe_load(config)
+
+    built = parsed["cameras"]["test_cam"]
+    assert built["motion"]["contour_area"] == 40
+    assert built["motion"]["mask"] == ["0.7,0,1,0,1,1,0.7,1"]
+    assert built["zones"]["gate"]["coordinates"] == "0,0,0.5,0,0.5,1,0,1"
+    # Наше при этом на месте и не потеряно.
+    assert built["detect"]["fps"] == 5
+    assert "ffmpeg" in built
+
+
+def test_a_camera_without_hand_settings_is_unchanged() -> None:
+    inventory = registry(camera("test_cam", "gate"))
+    circuits = NodeCircuits(cats=True, gate=True)
+
+    without = build_config(inventory, circuits)
+    with_empty = build_config(inventory, circuits, preserved_cameras={})
+
+    assert without == with_empty

@@ -125,7 +125,12 @@ def _record_block(indent: str, continuous_days: int, motion_days: int) -> list[s
     ]
 
 
-def _camera_block(camera: CameraRecord, continuous_days: int, motion_days: int) -> str:
+def _camera_block(
+    camera: CameraRecord,
+    continuous_days: int,
+    motion_days: int,
+    preserved: list[str] | None = None,
+) -> str:
     prefix = _env_prefix(camera)
     name = frigate_camera_key(camera.id)
     address = f"{{{prefix}_USER}}:{{{prefix}_PASSWORD}}@{{{prefix}_HOST}}:{camera.port}"
@@ -164,6 +169,9 @@ def _camera_block(camera: CameraRecord, continuous_days: int, motion_days: int) 
         "      track:",
         tracked,
         *_record_block("    ", continuous_days, motion_days),
+        # Маски движения, зоны и прочее, поставленное человеком в интерфейсе
+        # Frigate. Мы их не сочиняем и не понимаем — просто переносим как есть.
+        *(preserved or []),
     ]
     return "\n".join(lines)
 
@@ -171,6 +179,66 @@ def _camera_block(camera: CameraRecord, continuous_days: int, motion_days: int) 
 # Разделы верхнего уровня, которые собираются из инвентаря. Всё остальное в
 # `config.yml` поставлено человеком или самим Frigate, и наше дело — не потерять.
 MANAGED_SECTIONS = ("mqtt", "detectors", "model", "record", "snapshots", "cameras")
+
+# Ключи камеры, которые собираем мы. Всё остальное под камерой поставил человек
+# в интерфейсе Frigate — маски движения, зоны, пороги чувствительности — и наше
+# дело перенести это нетронутым.
+#
+# Раздел `cameras` числится управляемым целиком, и до 2026-08-09 это означало,
+# что нарисованная маска жила до первой правки камеры в админке. Узнать об этом
+# можно было только по вернувшимся ложным срабатываниям.
+GENERATED_CAMERA_KEYS = ("ffmpeg", "detect", "objects", "record")
+
+
+def foreign_camera_settings(config_text: str) -> dict[str, list[str]]:
+    """Ручные настройки камер из существующего `config.yml`, по именам камер.
+
+    Тот же разбор по отступам, что и у `foreign_sections`, только на два уровня
+    глубже: камеры лежат с отступом в два пробела, их ключи — в четыре.
+
+    Возвращаются строки как есть, вместе с отступами и комментариями: наше дело
+    перенести чужое, а не понять его. Маска — это список координат многоугольника,
+    и разбирать его нам незачем.
+    """
+    result: dict[str, list[str]] = {}
+    in_cameras = False
+    camera: str | None = None
+    keeping = False
+    pending: list[str] = []
+    for raw in config_text.splitlines():
+        line = raw.rstrip()
+        if not line:
+            continue
+        indent = len(line) - len(line.lstrip())
+        stripped = line.strip()
+        if indent == 0 and not stripped.startswith("#"):
+            in_cameras = stripped.split(":", 1)[0].strip() == "cameras"
+            camera, keeping, pending = None, False, []
+            continue
+        if not in_cameras:
+            continue
+        if stripped.startswith("#"):
+            pending.append(line)
+            continue
+        if indent == 2 and stripped.endswith(":"):
+            # Имя камеры. В конфигурации оно в кавычках, если это число: YAML
+            # иначе принял бы `3` за целое, и Frigate забраковал бы файл целиком.
+            camera = stripped[:-1].strip().strip('"').strip("'")
+            keeping, pending = False, []
+            continue
+        if camera is None:
+            continue
+        if indent == 4 and ":" in stripped:
+            key = stripped.split(":", 1)[0].strip()
+            keeping = key not in GENERATED_CAMERA_KEYS
+            if keeping:
+                result.setdefault(camera, []).extend([*pending, line])
+            pending = []
+            continue
+        if keeping:
+            result.setdefault(camera, []).extend([*pending, line])
+        pending = []
+    return result
 
 
 def foreign_sections(config_text: str) -> str:
@@ -218,6 +286,7 @@ def build_config(
     circuits: NodeCircuits,
     preserved: str = "",
     detector_device: str = "CPU",
+    preserved_cameras: dict[str, list[str]] | None = None,
 ) -> str:
     """Текст `config.yml`. Без камер — валидный конфиг без единой камеры."""
     cameras = frigate_cameras(registry, circuits)
@@ -268,8 +337,15 @@ def build_config(
             "",
         ]
         return "\n".join([*header, *tail])
+    kept = preserved_cameras or {}
     blocks = [
-        _camera_block(camera, continuous_days, motion_days) for camera in cameras
+        _camera_block(
+            camera,
+            continuous_days,
+            motion_days,
+            kept.get(frigate_camera_key(camera.id).strip('"')),
+        )
+        for camera in cameras
     ]
     return "\n".join([*header, "cameras:", *blocks, "", *tail])
 
