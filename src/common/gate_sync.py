@@ -28,6 +28,7 @@ from src.common.durable_write import write_text_durably
 from src.common.frigate_config import (
     build_config,
     build_env,
+    foreign_camera_settings,
     foreign_sections,
     frigate_cameras,
 )
@@ -61,12 +62,17 @@ def _unchanged(path: Path, text: str) -> bool:
         return False
 
 
-def _foreign_config(settings: Settings) -> str:
-    """Чужие разделы из живого файла. Нечитаемый файл — просто нечего переносить."""
+def _read_text(path: Path) -> str:
+    """Живой файл Frigate. Нечитаемый — просто нечего переносить."""
     try:
-        return foreign_sections(settings.gate_config_path.read_text(encoding="utf-8"))
+        return path.read_text(encoding="utf-8")
     except OSError:
         return ""
+
+
+def _foreign_config(settings: Settings) -> str:
+    """Чужие разделы верхнего уровня из живого файла."""
+    return foreign_sections(_read_text(settings.gate_config_path))
 
 
 def apply_frigate_config(settings: Settings) -> bool:
@@ -90,11 +96,17 @@ def apply_frigate_config(settings: Settings) -> bool:
     # Frigate и живут в том же файле. Пересобирая его из инвентаря, эти разделы
     # переносим как есть: иначе правка камеры в админке молча стирала бы чужую
     # настройку, а узнавалось бы это через неделю без имён в событиях.
+    # Ручные настройки камер читаются из рабочего файла, а не из копии
+    # применённого: маску человек рисует в интерфейсе Frigate, и она попадает
+    # именно туда. Копия нужна для сравнения «менялось ли», а источником правды
+    # о чужих настройках она быть не может.
+    current = _read_text(settings.gate_config_path)
     config = build_config(
         registry,
         circuits,
         preserved=_foreign_config(settings),
         detector_device=settings.gate_detector_device,
+        preserved_cameras=foreign_camera_settings(current),
     )
     env = build_env(frigate_cameras(registry, circuits), settings.display_timezone)
     if _unchanged(settings.gate_applied_config_path, config) and _unchanged(
