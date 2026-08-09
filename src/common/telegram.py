@@ -26,6 +26,18 @@ class TelegramError(RuntimeError):
     """Сообщение не ушло. Текст уже без токена."""
 
 
+class TelegramUnreachable(TelegramError):
+    """До Телеграма не достучаться: сеть, блокировка, обрыв.
+
+    Отдельный тип нужен не ради красоты. Отказ по одному сообщению — частное
+    дело этого сообщения, и следующее может уйти. Недоступность — общая беда:
+    следующая попытка займёт те же пятнадцать секунд и кончится тем же. Кто
+    рассылает пачкой, обязан различать эти два случая, иначе на каждой пачке
+    тратит `число событий × таймаут`.
+    """
+
+
+
 # Отказы Телеграма формально точны и совершенно непонятны тому, кто настраивает
 # бота впервые. Каждая подсказка здесь — из реальной попытки, а не из
 # документации.
@@ -130,7 +142,7 @@ class TelegramClient:
             detail = exc.read().decode("utf-8", "replace")[:300]
             raise TelegramError(self.mask(f"Телеграм отказал ({exc.code}): {detail}")) from exc
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            raise TelegramError(self.mask(f"Телеграм недоступен: {exc}")) from exc
+            raise TelegramUnreachable(self.mask(f"Телеграм недоступен: {exc}")) from exc
         except json.JSONDecodeError as exc:
             raise TelegramError("Телеграм ответил не JSON") from exc
         if not payload.get("ok"):

@@ -1363,7 +1363,11 @@ def _notify_about_pass(
     if reason is not None:
         journal.write("notification_skipped", event_id=event.id, reason=reason)
         return
-    client = TelegramClient(settings.telegram_bot_token, settings.telegram_chat_id)
+    client = TelegramClient(
+        settings.telegram_bot_token,
+        settings.telegram_chat_id,
+        api_base=settings.telegram_api_base,
+    )
     identity = next(
         (
             prediction.predicted_name

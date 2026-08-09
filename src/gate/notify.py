@@ -20,6 +20,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -31,7 +32,7 @@ from src.common.frigate_config import frigate_camera_name
 from src.common.notifications import NotificationGate, notification_snapshot_path
 from src.common.sd_notify import Notifier
 from src.common.settings import ConfigurationError, Settings, validate_runtime_paths
-from src.common.telegram import TelegramClient, TelegramError
+from src.common.telegram import TelegramClient, TelegramError, TelegramUnreachable
 
 logger = logging.getLogger("catdoor.gate-notify")
 
@@ -196,6 +197,7 @@ def notify_about_events(
     wall_now: float,
     unknown_gate: NotificationGate | None = None,
     already_sent: dict[str, float] | None = None,
+    heartbeat: Callable[[], None] | None = None,
     cameras: dict[str, str] | None = None,
 ) -> int:
     """Разобрать пачку событий. Возвращает число отправленных сообщений."""
@@ -208,12 +210,17 @@ def notify_about_events(
         else (cameras if cameras is not None else gate_cameras(data_dir))
     )
     seen = already_sent if already_sent is not None else {}
+    beat = heartbeat or (lambda: None)
     if events and not allowed:
         # Молчание из-за нечитаемого инвентаря выглядело бы как «ничего не
         # происходит», а это разные вещи.
         logger.warning("Ни одной камеры контура калитки — сообщать не о чем")
     sent = 0
     for event in events:
+        # Сторож кормится на каждом событии, а не после всей пачки: одна
+        # отправка стоит до пятнадцати секунд, и четырёх хватало, чтобы
+        # перевалить за минуту и быть убитым посреди работы.
+        beat()
         if event.id in seen:
             continue
         if labels and event.label not in labels:
@@ -251,7 +258,21 @@ def notify_about_events(
                 client.send_photo(snapshot, caption)
             else:
                 client.send_message(caption)
+        except TelegramUnreachable as exc:
+            # Разбор пачки прекращается целиком. Следующее событие уйдёт в тот
+            # же обрыв и потратит те же пятнадцать секунд таймаута, а служба
+            # обязана вернуться к сторожевому таймеру за минуту.
+            #
+            # 2026-08-09 этого не было, и вышла смертельная петля: Телеграм стал
+            # недоступен, неотправленные события копились и пробовались заново
+            # каждый цикл, цикл перевалил за минуту, systemd убивал службу по
+            # сторожевому таймеру, она поднималась и повторяла всё сначала.
+            logger.warning("Разбор прерван, Телеграм недоступен: %s", exc)
+            snapshot.unlink(missing_ok=True)
+            break
         except TelegramError as exc:
+            # Отказ по конкретному сообщению — частное дело этого сообщения:
+            # остальные могут уйти.
             logger.warning("Событие %s не отправилось: %s", event.id, exc)
             continue
         finally:
@@ -266,7 +287,11 @@ def run(*, once: bool = False) -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
     settings = Settings()
     validate_runtime_paths(settings)
-    client = TelegramClient(settings.telegram_bot_token, settings.telegram_chat_id)
+    client = TelegramClient(
+        settings.telegram_bot_token,
+        settings.telegram_chat_id,
+        api_base=settings.telegram_api_base,
+    )
     if not client.configured:
         raise ConfigurationError(
             "Уведомления калитки включены, но бот не настроен: нет токена или адреса чата"
@@ -306,6 +331,7 @@ def run(*, once: bool = False) -> None:
                 wall_now=time.time(),
                 unknown_gate=unknown_gate,
                 already_sent=sent,
+                heartbeat=notifier.watchdog,
             )
             if delivered:
                 sent = forget_old(sent, older_than=window_start)

@@ -1001,7 +1001,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         проявляется молчанием: неверный токен, чужой чат и остановленный бот
         выглядят одинаково никак. Кнопка превращает это в ответ Телеграма.
         """
-        client = TelegramClient(settings.telegram_bot_token, settings.telegram_chat_id)
+        client = TelegramClient(
+        settings.telegram_bot_token,
+        settings.telegram_chat_id,
+        api_base=settings.telegram_api_base,
+    )
         if not client.configured:
             raise HTTPException(422, "Бот не настроен: нет токена или адреса чата")
         try:

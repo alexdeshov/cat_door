@@ -4,10 +4,12 @@ import json
 from pathlib import Path
 from typing import Self
 
+import pytest
+
 from src.common.camera_registry import camera_registry_path
 from src.common.notifications import NotificationGate
 from src.common.settings import Settings
-from src.common.telegram import TelegramClient, TelegramError
+from src.common.telegram import TelegramClient, TelegramError, TelegramUnreachable
 from src.gate.notify import (
     GATE_ROLE,
     GateEvent,
@@ -460,3 +462,118 @@ def test_a_skipped_event_is_forgotten_not_postponed(runtime_path: Path, monkeypa
 
     assert sent == []
     assert "гость" in already
+
+
+def test_an_unreachable_telegram_stops_the_batch(runtime_path: Path, monkeypatch) -> None:
+    """Смертельная петля 2026-08-09.
+
+    Телеграм стал недоступен, неотправленные события копились и пробовались
+    заново каждый цикл. Отправка стоит до пятнадцати секунд таймаута, сторожевой
+    таймер юнита — минута: на четвёртом событии systemd убивал службу, она
+    поднималась и повторяла всё сначала.
+
+    Недоступность — беда общая: следующее событие уйдёт в тот же обрыв. Разбор
+    пачки обязан прекратиться на первом же таком отказе.
+    """
+    attempts: list[str] = []
+
+    def refuse(self: TelegramClient, text: str) -> None:
+        attempts.append(text)
+        raise TelegramUnreachable("Телеграм недоступен: сеть недоступна")
+
+    monkeypatch.setattr("src.gate.notify.fetch_snapshot", lambda *args, **kwargs: False)
+    monkeypatch.setattr("src.common.telegram.TelegramClient.send_message", refuse)
+    gate = NotificationGate(roles=frozenset({GATE_ROLE}), cooldown_seconds=0.0)
+
+    delivered = notify_about_events(
+        _settings(),
+        TelegramClient("8999303876:test", "12345"),
+        gate,
+        [_event(id=f"e{i}", camera="gate") for i in range(5)],
+        data_dir=runtime_path,
+        now=10.0,
+        wall_now=_event().started_at + 60,
+        cameras={"gate": "Калитка"},
+    )
+
+    assert delivered == 0
+    assert len(attempts) == 1, "пробовать остальные — терять по таймауту на каждом"
+
+
+def test_a_refused_message_does_not_stop_the_rest(runtime_path: Path, monkeypatch) -> None:
+    """Отказ по одному сообщению — частное дело этого сообщения."""
+    attempts: list[str] = []
+
+    def refuse_first(self: TelegramClient, text: str) -> None:
+        attempts.append(text)
+        if len(attempts) == 1:
+            raise TelegramError("Телеграм отказал (400): картинка не принята")
+
+    monkeypatch.setattr("src.gate.notify.fetch_snapshot", lambda *args, **kwargs: False)
+    monkeypatch.setattr("src.common.telegram.TelegramClient.send_message", refuse_first)
+    gate = NotificationGate(roles=frozenset({GATE_ROLE}), cooldown_seconds=0.0)
+
+    delivered = notify_about_events(
+        _settings(),
+        TelegramClient("8999303876:test", "12345"),
+        gate,
+        [_event(id="first", camera="gate"), _event(id="second", camera="gate")],
+        data_dir=runtime_path,
+        now=10.0,
+        wall_now=_event().started_at + 60,
+        cameras={"gate": "Калитка"},
+    )
+
+    assert len(attempts) == 2
+    assert delivered == 1
+
+
+def test_the_watchdog_is_fed_on_every_event(runtime_path: Path, monkeypatch) -> None:
+    """Сторож кормится по событию, а не после пачки.
+
+    Одна отправка стоит до пятнадцати секунд, сторожевой таймер — минута.
+    Кормление только в конце означает смерть на четвёртом событии.
+    """
+    beats: list[int] = []
+    monkeypatch.setattr("src.gate.notify.fetch_snapshot", lambda *args, **kwargs: False)
+    monkeypatch.setattr(
+        "src.common.telegram.TelegramClient.send_message",
+        lambda self, text: None,
+    )
+    gate = NotificationGate(roles=frozenset({GATE_ROLE}), cooldown_seconds=0.0)
+
+    notify_about_events(
+        _settings(),
+        TelegramClient("8999303876:test", "12345"),
+        gate,
+        [_event(id=f"e{i}", camera="gate") for i in range(4)],
+        data_dir=runtime_path,
+        now=10.0,
+        wall_now=_event().started_at + 60,
+        cameras={"gate": "Калитка"},
+        heartbeat=lambda: beats.append(1),
+    )
+
+    assert len(beats) == 4
+
+
+def test_the_api_address_can_be_redirected(runtime_path: Path, monkeypatch) -> None:
+    """Провайдер закрывает прямые адреса дата-центров Телеграма.
+
+    2026-08-09 у владельца `web.telegram.org` отвечал, а `149.154.166.110:443`
+    молчал до таймаута: уведомления встали при работающем интернете. Обойти это
+    можно только своим обратным прокси, а для этого адрес должен настраиваться.
+    """
+    asked: list[str] = []
+
+    def capture(request, timeout):
+        asked.append(request.full_url)
+        raise TelegramUnreachable("не важно")
+
+    monkeypatch.setattr("src.common.telegram.urllib.request.urlopen", capture)
+    client = TelegramClient("8999303876:test", "12345", api_base="https://tg.example.org")
+
+    with pytest.raises(TelegramUnreachable):
+        client.send_message("проверка")
+
+    assert asked and asked[0].startswith("https://tg.example.org/bot")
