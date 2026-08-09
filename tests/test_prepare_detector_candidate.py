@@ -155,3 +155,35 @@ def test_export_refuses_a_model_of_the_wrong_input_size(
 
     assert not output.exists()
     assert not output.with_suffix(".json").exists()
+
+
+def test_yolo26_candidates_reach_the_yolo_exporter(monkeypatch, tmp_path):
+    """Диспетчер экспорта знал только yolo11 — кандидаты были, экспорт падал.
+
+    Список CANDIDATES и диспетчер жили отдельно, и «unknown detector candidate»
+    прилетал уже после argparse, который кандидатов как раз знал.
+    """
+    import hashlib
+
+    from scripts import prepare_detector_candidate as pdc
+
+    weights = tmp_path / "yolo26n.pt"
+    weights.write_bytes(b"weights")
+    called = {}
+
+    def fake_export(w, output, size):
+        called["size"] = size
+        output.write_bytes(b"onnx")
+
+    monkeypatch.setattr(pdc, "_export_yolo11", fake_export)
+    monkeypatch.setattr(pdc, "_onnx_contract", lambda p: ("images", ["output0"], [1, 3, 416, 416]))
+
+    result = pdc.export_candidate(
+        "yolo26n-416",
+        weights,
+        hashlib.sha256(b"weights").hexdigest(),
+        tmp_path / "yolo26n-416.onnx",
+    )
+
+    assert called["size"] == 416
+    assert result.with_suffix(".json").is_file()

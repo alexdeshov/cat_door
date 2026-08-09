@@ -309,7 +309,10 @@ def export_candidate(
             if source_root is None:
                 raise ValueError("YOLOX export requires --source-root")
             _export_yolox(python, weights, output, source_root)
-        elif architecture.startswith("yolo11"):
+        elif architecture.startswith(("yolo11", "yolo26")):
+            # Экспортёр общий: ultralytics ведёт оба семейства одним API, а у
+            # YOLO26 сквозная голова по рождению — флаг nms просто не меняет
+            # ничего.
             _export_yolo11(weights, output, int(expected_shape[2]))
         else:
             raise ValueError(f"unknown detector candidate: {candidate}")
