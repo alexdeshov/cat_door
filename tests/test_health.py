@@ -173,3 +173,28 @@ def test_metrics_survive_a_machine_without_proc(tmp_path: Path) -> None:
     assert read_load_average(tmp_path) is None
     assert read_gpu_frequency_mhz(tmp_path) == (None, None)
     assert read_disk_temperature_c(tmp_path) is None
+
+
+def test_the_same_volume_is_listed_once(tmp_path: Path) -> None:
+    """На узле /var/lib/catdoor подставлен bind-монтированием в /srv/data.
+
+    Без схлопывания по устройству страница показывала один том дважды с
+    одинаковыми числами — шум ровно там, где всё затевалось ради сигнала.
+    """
+    from src.common.node_metrics import read_disks
+
+    nested = tmp_path / "bind"
+    nested.mkdir()
+
+    disks = read_disks([tmp_path, nested])
+
+    assert len(disks) == 1
+    assert disks[0].path == str(tmp_path)
+
+
+def test_a_missing_volume_is_skipped_without_breaking_the_rest(tmp_path: Path) -> None:
+    from src.common.node_metrics import read_disks
+
+    disks = read_disks([tmp_path / "нет-такого", tmp_path])
+
+    assert [disk.path for disk in disks] == [str(tmp_path)]
