@@ -90,13 +90,38 @@ class CameraRecord(BaseModel):
     role: CameraRole | None = None
     rotate_180: bool = False
     enabled: bool = True
-    # Принудительно программное декодирование в Frigate — для камеры, чей поток
-    # аппаратный путь не переваривает. У nvr-2 VA-API падал на «Failed to sync
-    # surface» примерно раз в минуту (2026-08-09), и watchdog Frigate бесконечно
-    # перезапускал ffmpeg; смена устройства детектора замером исключена — дело
-    # в самом потоке. Цена программного пути — около трети ядра на камеру.
-    software_decode: bool = False
+    # Путь декодирования камеры в Frigate. `auto` — автоопределение Frigate
+    # (на этом узле VA-API); `qsv` — явный QuickSync; `software` — процессор.
+    #
+    # Поле появилось из-за «Failed to sync surface»: автоопределённый VA-API на
+    # Gen12 (Iris Xe) ломается в известном месте драйвера, ffmpeg детекции
+    # падал раз в 1–3 минуты. Это подтверждено и сообществом Frigate
+    # (обсуждение №23319: та же пара ошибок, сопровождающий прямо называет
+    # автоопределение «догадкой»), и нашим экспериментом 2026-08-09: камера,
+    # переведённая с VA-API, перестала падать, оставшиеся продолжили. QSV —
+    # рекомендованное там лекарство: то же видеоядро другим путём, ноль падений
+    # у автора за 9.5 часа. Программный путь — запасной, треть ядра на камеру.
+    decode: str = "auto"
     note: str = ""
+
+    @field_validator("decode")
+    @classmethod
+    def _check_decode(cls, value: str) -> str:
+        if value not in {"auto", "qsv", "software"}:
+            raise ValueError(
+                f"путь декодирования бывает auto, qsv или software, задано: {value!r}"
+            )
+        return value
+
+    @model_validator(mode="before")
+    @classmethod
+    def _legacy_software_decode(cls, values: object) -> object:
+        # Однодневное поле `software_decode` (2026-08-09) уже записано в
+        # инвентаре узла; молча потерять его значило бы вернуть камеру на
+        # сломанный путь при первом же чтении.
+        if isinstance(values, dict) and values.pop("software_decode", False):
+            values.setdefault("decode", "software")
+        return values
 
     @field_validator("id")
     @classmethod

@@ -409,13 +409,16 @@ def test_a_camera_can_be_forced_to_software_decoding() -> None:
     """
     inventory = registry(
         camera("nvr-2", "nvr"),
+        camera("cam-3", "nvr"),
         camera("yard", "nvr"),
     )
-    inventory.cameras[0].software_decode = True
+    inventory.cameras[0].decode = "software"
+    inventory.cameras[1].decode = "qsv"
 
     parsed = yaml.safe_load(
         build_config(inventory, NodeCircuits(cats=False, nvr=True))
     )
 
     assert parsed["cameras"]["nvr_2"]["ffmpeg"]["hwaccel_args"] == ""
+    assert parsed["cameras"]["cam_3"]["ffmpeg"]["hwaccel_args"] == "preset-intel-qsv-h264"
     assert "hwaccel_args" not in parsed["cameras"]["yard"]["ffmpeg"]
