@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 from typing import Self
 
+import pytest
+
 from src.common.camera_registry import camera_registry_path
 from src.common.notifications import NotificationGate
 from src.common.settings import Settings
@@ -571,9 +573,7 @@ def test_the_api_address_can_be_redirected(runtime_path: Path, monkeypatch) -> N
     monkeypatch.setattr("src.common.telegram.urllib.request.urlopen", capture)
     client = TelegramClient("8999303876:test", "12345", api_base="https://tg.example.org")
 
-    try:
+    with pytest.raises(TelegramUnreachable):
         client.send_message("проверка")
-    except Exception:  # noqa: BLE001 - интересен только адрес
-        pass
 
     assert asked and asked[0].startswith("https://tg.example.org/bot")
