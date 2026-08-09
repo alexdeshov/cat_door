@@ -70,8 +70,12 @@ class DetectionConfig(BaseModel):
             sample_fps=settings.detector_sample_fps,
         )
         return cls(
+            # Дверца долго держала порог 0.30: камера смотрит в упор, кот
+            # занимает половину кадра, и слабых срабатываний там не ждали.
+            # 2026-08-09 владелец показал обратное — оставленная у двери посылка
+            # стабильно проходила как кот. Порог поднят до 0.50, как у подхода.
             face=CameraDetectionConfig(
-                confidence_threshold=0.30,
+                confidence_threshold=0.50,
                 box_min_confidence=0.15,
                 confirmation_frames=2,
                 window_frames=5,
@@ -131,12 +135,22 @@ def load_detection_config(path: Path, defaults: DetectionConfig) -> DetectionCon
             )
             if key in payload
         }
+        # Плоский файл писался, когда порог был один на обе камеры, и по смыслу
+        # это был порог подхода. Дверце он годится только как потолок: её
+        # собственное умолчание мягче. Потолок берём из самих умолчаний, чтобы
+        # цифра жила в одном месте — в `from_settings`.
         payload = {
             "face": {
                 **defaults.face.model_dump(),
                 **camera,
-                "confidence_threshold": min(float(camera.get("confidence_threshold", 0.30)), 0.30),
-                "box_min_confidence": min(float(camera.get("box_min_confidence", 0.15)), 0.15),
+                "confidence_threshold": min(
+                    float(camera.get("confidence_threshold", defaults.face.confidence_threshold)),
+                    defaults.face.confidence_threshold,
+                ),
+                "box_min_confidence": min(
+                    float(camera.get("box_min_confidence", defaults.face.box_min_confidence)),
+                    defaults.face.box_min_confidence,
+                ),
             },
             "side": {**defaults.side.model_dump(), **camera},
             **{
