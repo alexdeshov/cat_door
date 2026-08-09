@@ -101,6 +101,10 @@ CANDIDATES.update(
         "yolo11n-416": _yolo11("yolo11n", 416),
         "yolo11n-640": _yolo11("yolo11n", 640),
         "yolo11s-640": _yolo11("yolo11s", 640),
+        # YOLO26 сквозной по рождению: NMS в графе нет вовсе, выход тот же
+        # [300 × (xyxy, conf, cls)] — адаптер и манифест совпадают с yolo11.
+        "yolo26n-416": _yolo11("yolo26n", 416),
+        "yolo26n-640": _yolo11("yolo26n", 640),
     }
 )
 
