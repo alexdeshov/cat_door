@@ -4,6 +4,7 @@ import numpy as np
 
 from src.common.detection_config import CameraDetectionConfig
 from src.common.evaluation import (
+    DetectorViewEvaluation,
     EvaluatedDetectorEvent,
     EvaluatedEvent,
     build_detector_evaluation_report,
@@ -177,3 +178,39 @@ def test_detector_report_separates_misses_false_triggers_and_night() -> None:
     assert all_metrics["confidence_distribution"]["cat"]["median"] == 0.5
     assert night_metrics["miss_rate"] == 1.0
     assert report["threshold_sweep"]["face"][5]["threshold"] == 0.3
+
+
+def test_detector_sweep_counts_every_pass_not_only_the_clean_ones() -> None:
+    """Развёртка порогов детектора строится по всем проходам.
+
+    `training_contaminated` помечает события, ушедшие в обучение **модели
+    опознания**; детектор — сток YOLO11 на COCO, нашего материала не видел.
+    Цена ошибки измерена 2026-08-09: из 189 проходов с котами «чистыми» были
+    два, и таблица «пропуски на равной доле ложных» держалась на одном коте.
+    """
+    events = [
+        EvaluatedDetectorEvent(
+            event_id=index,
+            label="known_cat" if index % 2 else "not_visible",
+            # Почти всё ушло в обучение опознания — как на живом узле.
+            training_target="macbook" if index > 1 else "excluded",
+            created_at=datetime(2026, 8, 9, 12, tzinfo=UTC),
+            views={
+                "face": DetectorViewEvaluation(
+                    frame_confidences=(0.9,),
+                    frames_seen=1,
+                    max_detector_confidence=0.9 if index % 2 else 0.1,
+                    mean_detector_inference_ms=10.0,
+                )
+            },
+        )
+        for index in range(20)
+    ]
+
+    report = build_detector_evaluation_report(events, ["face"], {"face": 0.5})
+
+    point = report["threshold_sweep"]["face"][0]
+    assert point["cat_events"] == 10
+    assert point["not_visible_events"] == 10
+    # «Чистых» всего два — если бы развёртка считалась по ним, было бы 1 и 1.
+    assert report["clean_events"] == 2
