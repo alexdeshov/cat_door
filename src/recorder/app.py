@@ -13,6 +13,7 @@ from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
+from statistics import median
 from typing import Any, Protocol
 
 from sqlalchemy.exc import SQLAlchemyError
@@ -357,7 +358,39 @@ def _detector_device_status(
         "detector_model": detector.model_name if detector is not None else None,
         "detector_input_size": str(detector.input_size) if detector is not None else None,
         "detector_sha256": detector.model_sha256[:12] if detector is not None else None,
+        "detector_device_name": getattr(detector, "gpu_name", None) if detector else None,
     }
+
+
+class FrameRateWindow:
+    """Фактический темп кадров по ролям — скользящим окном.
+
+    Мгновенная разность счётчиков между двумя публикациями статуса шумит:
+    интервал плавает, и на полусекунде один пропущенный кадр даёт минус два в
+    секунду. Окно в двадцать секунд сглаживает это и совпадает по смыслу с тем,
+    что человек видит на странице.
+    """
+
+    def __init__(self, window_seconds: float = 20.0) -> None:
+        self._window_seconds = window_seconds
+        self._samples: deque[tuple[float, dict[str, int]]] = deque()
+
+    def observe(self, now: float, counters: dict[str, int]) -> dict[str, float] | None:
+        self._samples.append((now, dict(counters)))
+        while len(self._samples) > 1 and now - self._samples[0][0] > self._window_seconds:
+            self._samples.popleft()
+        if len(self._samples) < 2:
+            return None
+        first_at, first = self._samples[0]
+        elapsed = now - first_at
+        # Меньше двух секунд — ещё не измерение, а разность двух соседних
+        # публикаций со всем её шумом.
+        if elapsed < 2.0:
+            return None
+        return {
+            role: round((counters.get(role, 0) - first.get(role, 0)) / elapsed, 1)
+            for role in counters
+        }
 
 
 def _detection_profile_status(config: DetectionConfig) -> dict[str, object]:
@@ -818,6 +851,13 @@ def monitor_automatic(
     frames_processed = {"face": 0, "side": 0}
     last_action: str | None = None
     last_status_at = 0.0
+    # Фактический темп и цена кадра — то, чего не видно ни в одной настройке.
+    # Настройка говорит «двенадцать кадров в секунду», а камера отдаёт
+    # одиннадцать с половиной, и узнать об этом можно было только вычитанием
+    # счётчиков вручную. Считаем здесь: счётчики и время публикации всё равно
+    # рядом.
+    rate_window = FrameRateWindow()
+    inference_window: deque[float] = deque(maxlen=200)
     active_started_at: float | None = None
     active_initiating_camera: str | None = None
     active_confidences = {"face": 0.0, "side": 0.0}
@@ -1018,6 +1058,7 @@ def monitor_automatic(
             inference_started_at = time.monotonic()
             detection = detector.detect(frame)
             inference_ms = (time.monotonic() - inference_started_at) * 1000
+            inference_window.append(inference_ms)
             frame_age_ms = (time.monotonic() - captured_at) * 1000
             confidence = detection.confidence
             camera_confirmed = trackers[role].observe(confidence)
@@ -1184,6 +1225,7 @@ def monitor_automatic(
                 active_identity_scores = {"face": [], "side": []}
                 active_identity_timings = {"face": [], "side": []}
             now = time.monotonic()
+            measured_rates = rate_window.observe(now, frames_processed)
             if update.action is None and now - last_status_at < 0.5:
                 continue
             publish_status(
@@ -1200,6 +1242,10 @@ def monitor_automatic(
                 dry_run=runtime_mode.dry_run,
                 detector_connected=True,
                 frames_processed=frames_processed,
+                frames_per_second=measured_rates,
+                inference_ms=(
+                    round(median(inference_window), 1) if inference_window else None
+                ),
                 confidences=confidences,
                 identity=identity_predictions,
                 last_action=last_action,

@@ -163,6 +163,18 @@ class OpenVinoCatDetector:
             if not self.execution_devices:
                 raise RuntimeError("OpenVINO returned no execution devices")
             self.device = ",".join(self.execution_devices)
+            # Полное имя видеоядра — признак, который дороже, чем кажется: то же
+            # ядро зовётся `Iris Xe` при двухканальной памяти и `UHD` при
+            # одноканальной. Мы полторы недели считали это особенностью
+            # именования, а это был индикатор вдвое урезанной полосы. Спрашиваем
+            # именно про GPU, даже когда считаем на процессоре: вопрос про
+            # железо, а не про то, чем сейчас занят детектор.
+            # Узел без видеоядра — обычное дело, а не отказ: спрашиваем мягко и
+            # довольствуемся `None`, не мешая детектору подняться на процессоре.
+            try:
+                self.gpu_name: str | None = str(core.get_property("GPU", "FULL_DEVICE_NAME"))
+            except (RuntimeError, AttributeError, TypeError, KeyError):
+                self.gpu_name = None
         except Exception as exc:
             raise DetectorError("detector_compile_failed") from exc
         self._input = self._compiled.input(self.input_name)
