@@ -44,6 +44,17 @@ REQUIRED_TIMERS = ("catdoor-gate-sync.timer", "catdoor-gate-sync.path", "catdoor
 RECONCILER_OWNED = ("frigate",)
 
 
+class EnvironmentUnreadable(RuntimeError):
+    """Окружение узла есть, но недоступно — приёмке нечего сверять."""
+
+    def __init__(self, path: Path) -> None:
+        super().__init__(
+            f"{path} существует, но не читается. Приёмка сверяла бы эталон с "
+            f"умолчаниями и врала бы обоими направлениями. Запустите от "
+            f"пользователя, который читает этот файл: sudo {sys.executable} -m scripts.acceptance"
+        )
+
+
 def load_env_file(path: Path) -> int:
     """Подложить окружение узла до создания `Settings`.
 
@@ -57,6 +68,13 @@ def load_env_file(path: Path) -> int:
     """
     try:
         text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return 0
+    except PermissionError as exc:
+        # Файл есть, но не читается — это не «окружения нет». Молча приняв это
+        # за отсутствие, приёмка сверяла бы эталон с умолчаниями и печатала
+        # таблицу прочерков с одним выдуманным провалом. Так и вышло 09-08.
+        raise EnvironmentUnreadable(path) from exc
     except OSError:
         return 0
     loaded = 0
@@ -319,9 +337,21 @@ def main() -> int:
     )
     arguments = parser.parse_args()
 
-    loaded = load_env_file(arguments.env_file)
+    try:
+        loaded = load_env_file(arguments.env_file)
+    except EnvironmentUnreadable as exc:
+        print(f"ОТКАЗ: {exc}")
+        return 2
     settings = Settings()
     print(f"окружение: {arguments.env_file} ({loaded} переменных), данные: {settings.data_dir}")
+    if not settings.data_dir.is_absolute():
+        # Относительный каталог данных означает, что окружение так и не
+        # доехало: на узле он всегда абсолютный. Сверять после этого нечего.
+        print(
+            f"ОТКАЗ: каталог данных {settings.data_dir} относительный — окружение узла не "
+            f"подхватилось. Проверять было бы нечего."
+        )
+        return 2
     status = read_recorder_status(recorder_status_path(settings)) or {}
     stats = _api(f"{settings.gate_api_url.rstrip('/')}/api/stats")
     metrics = read_node_metrics(
