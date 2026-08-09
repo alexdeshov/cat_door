@@ -339,3 +339,29 @@ def test_preview_falls_back_to_the_detect_stream() -> None:
 
     assert with_detect.preview_rtsp_url().endswith("/sub")
     assert bare.preview_rtsp_url().endswith("/main")
+
+
+def test_legacy_software_decode_field_becomes_decode_mode() -> None:
+    """Однодневное поле уже записано в инвентаре узла 2026-08-09.
+
+    Молча потерять его значило бы вернуть камеру на сломанный путь VA-API при
+    первом же чтении инвентаря.
+    """
+    from src.common.camera_registry import CameraRecord
+
+    migrated = CameraRecord.model_validate(
+        {"id": "nvr-2", "software_decode": True}
+    )
+    untouched = CameraRecord.model_validate({"id": "yard"})
+
+    assert migrated.decode == "software"
+    assert untouched.decode == "auto"
+
+
+def test_an_unknown_decode_mode_is_rejected_loudly() -> None:
+    import pytest
+
+    from src.common.camera_registry import CameraRecord
+
+    with pytest.raises(ValueError, match="auto, qsv"):
+        CameraRecord.model_validate({"id": "cam", "decode": "vulkan"})

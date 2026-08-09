@@ -125,6 +125,14 @@ def _record_block(indent: str, continuous_days: int, motion_days: int) -> list[s
     ]
 
 
+# Строки `hwaccel_args` по пути декодирования; `auto` не пишет ничего и
+# оставляет решение автоопределению Frigate.
+DECODE_ARGS = {
+    "qsv": ["      hwaccel_args: preset-intel-qsv-h264"],
+    "software": ['      hwaccel_args: ""'],
+}
+
+
 def _camera_block(
     camera: CameraRecord,
     continuous_days: int,
@@ -160,11 +168,11 @@ def _camera_block(
         lines += ["            - record"]
     lines += [
         "      input_args: preset-rtsp-generic",
-        # Пустая строка выключает автоопределение VA-API для одной камеры,
-        # остальные продолжают декодироваться видеоядром. Ключ подтверждён
-        # справочником конфигурации Frigate: hwaccel_args наследуется камерой
-        # и переопределяется на её уровне.
-        *(['      hwaccel_args: ""'] if camera.software_decode else []),
+        # Поканальный путь декодирования: `hwaccel_args` наследуется камерой и
+        # переопределяется на её уровне (справочник Frigate). Пустая строка —
+        # программный путь; пресет QSV — то же видеоядро в обход сломанного на
+        # Gen12 пути VA-API.
+        *DECODE_ARGS.get(camera.decode, []),
         "      output_args:",
         "        record: preset-record-generic-audio-copy",
         "    detect:",
