@@ -172,3 +172,35 @@ def test_dhcp_pool_avoids_the_factory_addresses() -> None:
 
     assert int(start.rsplit(".", 1)[1]) > 108
     assert int(end.rsplit(".", 1)[1]) < 255
+
+
+DATA_UNITS = (
+    "catdoor-recorder.service",
+    "catdoor-web.service",
+    "catdoor-gate-notify.service",
+    "catdoor-gate-sync.service",
+    "catdoor-backup.service",
+)
+
+
+@pytest.mark.parametrize("name", DATA_UNITS)
+def test_unit_waits_for_the_data_volume(name: str) -> None:
+    """Каталог данных лежит на отдельном томе, и systemd про него не знает.
+
+    Путь приходит из окружения, а не из юнита, поэтому неявной зависимости
+    systemd не выводит. Служба, стартовавшая раньше монтирования, пишет в
+    пустой каталог под точкой монтирования — и делает это молча.
+
+    2026-08-09 ровно это случилось с Frigate: контейнер поднялся на 2.3 секунды
+    раньше тома, четыре часа писал записи не на тот диск и не видел библиотеки
+    лиц. Гонка проигрывалась и при чистой загрузке — её маскировали перезапуски
+    по другим поводам.
+    """
+    text = (INSTALL_DIR / name).read_text(encoding="utf-8")
+
+    line = next(
+        (l for l in text.splitlines() if l.startswith("RequiresMountsFor=")),
+        None,
+    )
+    assert line is not None, f"{name} не ждёт своего тома"
+    assert "/var/lib/catdoor" in line
