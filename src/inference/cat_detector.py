@@ -31,6 +31,27 @@ class CatDetectionResult:
     detections: tuple[CatDetection, ...]
 
 
+def build_detector_tensor(
+    rgb_frame: np.ndarray,
+    *,
+    channel_order: str,
+    scale: float,
+    mean: np.ndarray,
+    std: np.ndarray,
+) -> np.ndarray:
+    """Кадр в тензор входа — единственным способом на весь проект.
+
+    Отдельной функцией она стала ради квантования: калибровка обязана видеть
+    ровно то же, что видит инференс, иначе диапазоны активаций снимаются не с
+    тех чисел, и модель получается тихо неправильной. Расхождение здесь ничем
+    не проявилось бы — ни исключением, ни предупреждением, только качеством.
+    """
+    ordered_frame = rgb_frame if channel_order == "rgb" else rgb_frame[:, :, ::-1]
+    tensor = np.transpose(ordered_frame, (2, 0, 1))[None].astype(np.float32)
+    tensor = tensor * scale
+    return ((tensor - mean.reshape(1, 3, 1, 1)) / std.reshape(1, 3, 1, 1)).astype(np.float32)
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as source:
@@ -150,20 +171,21 @@ class OpenVinoCatDetector:
             for name in manifest["outputs"]
         }
 
+    def build_tensor(self, rgb_frame: np.ndarray) -> np.ndarray:
+        """Тензор входа по параметрам **этой** модели из её манифеста."""
+        return build_detector_tensor(
+            rgb_frame,
+            channel_order=self.channel_order,
+            scale=self.input_scale,
+            mean=self.input_mean,
+            std=self.input_std,
+        )
+
     def detect(self, rgb_frame: np.ndarray) -> CatDetectionResult:
         expected_shape = (self.input_size, self.input_size, 3)
         if rgb_frame.shape != expected_shape:
             raise ValueError(f"detector frame must have shape {expected_shape}")
-        ordered_frame = (
-            rgb_frame
-            if self.channel_order == "rgb"
-            else rgb_frame[:, :, ::-1]
-        )
-        tensor = np.transpose(ordered_frame, (2, 0, 1))[None].astype(np.float32)
-        tensor = tensor * self.input_scale
-        tensor = (
-            tensor - self.input_mean.reshape(1, 3, 1, 1)
-        ) / self.input_std.reshape(1, 3, 1, 1)
+        tensor = self.build_tensor(rgb_frame)
         result = self._compiled({self._input: tensor})
         parsed = self._adapter.parse(
             {

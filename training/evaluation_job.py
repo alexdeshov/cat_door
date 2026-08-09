@@ -53,7 +53,7 @@ def _load_filter(raw: str) -> dict[str, Any]:
     return value
 
 
-def _event_query(filter_value: dict[str, Any]) -> Any:
+def event_query(filter_value: dict[str, Any]) -> Any:
     query = select(Event).order_by(Event.created_at)
     labels = filter_value.get("labels")
     if labels:
@@ -74,7 +74,7 @@ def _event_query(filter_value: dict[str, Any]) -> Any:
     return query
 
 
-def _load_frames(
+def load_frames(
     ffmpeg_path: str,
     source: Path,
     destination: Path,
@@ -216,7 +216,7 @@ def run_evaluation(
             run.status = "running"
             session.commit()
             filter_value = _load_filter(run.filter_json)
-            events = session.scalars(_event_query(filter_value)).all()
+            events = session.scalars(event_query(filter_value)).all()
             model_version_ids = {
                 "face": run.face_model_version_id,
                 "side": run.side_model_version_id,
@@ -278,7 +278,7 @@ def run_evaluation(
                                     "unsafe or missing media for "
                                     f"event {event.id}, view {role}"
                                 )
-                            frames = _load_frames(
+                            frames = load_frames(
                                 ffmpeg_path,
                                 source,
                                 event_directory / role,
@@ -325,7 +325,7 @@ def run_evaluation(
                                     "unsafe or missing media for "
                                     f"event {event.id}, view {role}"
                                 )
-                            frames = _load_frames(
+                            frames = load_frames(
                                 ffmpeg_path,
                                 source,
                                 event_directory / role,
