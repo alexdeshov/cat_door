@@ -169,16 +169,28 @@ DISCOVERY_PROBE_SECONDS = 6.0
 INTERRUPTED_MESSAGE = "Прерван без завершения: heartbeat не обновлялся более 10 минут"
 
 
-def _asset_version(path: Path) -> str:
-    """Короткая контрольная сумма файла стилей для адреса.
+def _asset_version(path: Path):
+    """Короткая контрольная сумма файла стилей для адреса — на каждый запрос.
 
-    Время изменения не годится: `git pull` на сервере переписывает файл, но
-    может сохранить прежнюю метку, и браузер оставит старые стили.
+    Контрольная сумма, а не время изменения: `git pull` может сохранить
+    прежнюю метку файла. И заново при каждом обращении, а не раз при старте:
+    служба переживает деплой без перезапуска, и посчитанная на старте версия
+    держала браузеры на старых стилях до следующей перезагрузки. Пересчёт
+    закеширован по mtime — хешировать файл на каждый запрос незачем.
     """
-    try:
-        return sha256(path.read_bytes()).hexdigest()[:12]
-    except OSError:
-        return "dev"
+    cache: dict[str, object] = {"mtime": None, "value": "dev"}
+
+    def version() -> str:
+        try:
+            mtime = path.stat().st_mtime_ns
+            if cache["mtime"] != mtime:
+                cache["value"] = sha256(path.read_bytes()).hexdigest()[:12]
+                cache["mtime"] = mtime
+        except OSError:
+            return "dev"
+        return str(cache["value"])
+
+    return version
 
 
 def _read_status(path: Path) -> dict[str, object] | None:
