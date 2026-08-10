@@ -65,8 +65,18 @@
           <p class="muted" style="font-size: 13px">
             Модель узнала:
             {% for view, prediction in predictions.items() %}
-              {{ view }} —
-              {% if prediction.decision.startswith("known:") %}
+              {{ "дверца" if view == "face" else "подход" }} —
+              {# Служебные ярлыки классов отказа переводятся на язык людей:
+                 «__foreign__» на экране означал бы вопрос, а не ответ. Для
+                 модели «чужой» — любой кот, кроме целевых (в том числе свои
+                 без модели: Бася, Джун, Кира, Ксюша). #}
+              {% if prediction.predicted_name == "__foreign__" %}
+                не Яся и не Черныш
+                <span class="data">{{ "%.2f"|format(prediction.confidence) }}</span>
+              {% elif prediction.predicted_name == "__nocat__" %}
+                кота не видит
+                <span class="data">{{ "%.2f"|format(prediction.confidence) }}</span>
+              {% elif prediction.decision.startswith("known:") %}
                 <strong>{{ prediction.predicted_name }}</strong>
                 <span class="data">{{ "%.2f"|format(prediction.confidence) }}</span>
               {% elif prediction.decision == "uncertain" %}
