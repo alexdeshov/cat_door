@@ -39,8 +39,8 @@ REFERENCE_STATUS = {
 }
 
 REFERENCE_CONFIG = {
-    "face": {"confidence_threshold": 0.5, "sample_fps": 12.0},
-    "side": {"confidence_threshold": 0.5, "sample_fps": 6.0},
+    "face": {"confidence_threshold": 0.65, "sample_fps": 12.0},
+    "side": {"confidence_threshold": 0.65, "sample_fps": 6.0},
 }
 
 REFERENCE_STATS = {
