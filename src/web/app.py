@@ -1449,7 +1449,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         session.commit()
 
     @app.get("/api/training/macbook/export")
-    def export_for_macbook() -> FileResponse:
+    def export_for_macbook(scope: str = "macbook") -> FileResponse:
+        if scope not in {"macbook", "all"}:
+            raise HTTPException(422, "scope должен быть macbook или all")
         try:
             archive = create_macbook_export(
                 settings.resolved_database_path,
@@ -1458,6 +1460,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 settings.detector_model_path,
                 settings.detector_device,
                 DetectionConfig.from_settings(settings),
+                scope=scope,
             )
         except (OSError, RuntimeError, ValueError) as exc:
             raise HTTPException(422, str(exc)) from exc

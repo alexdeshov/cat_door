@@ -836,15 +836,25 @@ def test_macbook_export_download(runtime_path: Path, monkeypatch) -> None:
     archive = runtime_path / "exports" / "dataset.zip"
     archive.parent.mkdir(parents=True)
     archive.write_bytes(b"zip")
-    monkeypatch.setattr(
-        "src.web.app.create_macbook_export",
-        lambda *_args: archive,
-    )
+    seen_scopes: list[str] = []
+
+    def fake_export(*_args, scope="macbook"):
+        seen_scopes.append(scope)
+        return archive
+
+    monkeypatch.setattr("src.web.app.create_macbook_export", fake_export)
 
     response = client.get("/api/training/macbook/export")
 
     assert response.status_code == 200
     assert response.content == b"zip"
+    assert seen_scopes == ["macbook"]
+
+    assert client.get("/api/training/macbook/export?scope=all").status_code == 200
+    assert seen_scopes == ["macbook", "all"]
+
+    # Опечатка в scope — отказ, а не молчаливый экспорт не того набора.
+    assert client.get("/api/training/macbook/export?scope=everything").status_code == 422
 
 
 def test_start_local_training_is_detached(runtime_path: Path, monkeypatch) -> None:

@@ -187,6 +187,70 @@ def test_build_dataset_uses_selected_events_only(runtime_path: Path, monkeypatch
         assert crop.size == (224, 126)
 
 
+def test_build_dataset_scope_all_ignores_training_target(
+    runtime_path: Path, monkeypatch
+) -> None:
+    """«all» берёт все размеченные проходы, включая «не для обучения».
+
+    Разметка по умолчанию уходит в excluded, и набор «только macbook»
+    отставал от реального архива в разы.
+    """
+    database_path = runtime_path / "catdoor.sqlite3"
+    factory = create_session_factory(database_path)
+    with factory() as session:
+        for index, target in enumerate(("excluded", "local", "macbook"), start=1):
+            event_dir = runtime_path / "events" / f"{index:08d}"
+            event_dir.mkdir(parents=True)
+            (event_dir / "face.mp4").write_bytes(b"video")
+            session.add(
+                Event(
+                    created_at=datetime.now(UTC),
+                    status="ready",
+                    duration_seconds=5,
+                    media_path=f"events/{index:08d}/face.mp4",
+                    label="known_cat",
+                    cat_name="Барсик",
+                    training_target=target,
+                )
+            )
+        session.commit()
+
+    def fake_extract(
+        ffmpeg_path: str,
+        source: Path,
+        destination_pattern: Path,
+        *,
+        rotate_180: bool,
+    ) -> list[Path]:
+        destination = destination_pattern.parent / "frame-01.jpg"
+        destination.parent.mkdir(parents=True)
+        Image.fromarray(
+            np.full((360, 640, 3), 100, dtype=np.uint8),
+            mode="RGB",
+        ).save(destination)
+        return [destination]
+
+    monkeypatch.setattr("training.workflow.extract_frames", fake_extract)
+    detector = FixedDetector(
+        (CatDetection(box=(80, 115, 240, 205), confidence=0.80),)
+    )
+
+    _, report = build_dataset(
+        database_path,
+        runtime_path,
+        "ffmpeg",
+        "all",
+        runtime_path / "training" / "dataset",
+        detector_model_path=Path("unused.onnx"),
+        detector_device="CPU",
+        detector=detector,
+        default_detection_config=detection_config(),
+    )
+
+    assert report["events"] == 3
+    assert report["events_per_label"] == {"Барсик": 3}
+
+
 def test_build_dataset_reports_and_excludes_frames_without_cat_box(
     runtime_path: Path,
     monkeypatch,

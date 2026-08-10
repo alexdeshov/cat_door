@@ -50,13 +50,13 @@ def run(command: Sequence[str], *, cwd: Path | None = None) -> None:
         raise PipelineError(f"команда завершилась с кодом {result.returncode}")
 
 
-def fetch(root: Path, admin: str) -> Path:
+def fetch(root: Path, admin: str, scope: str = "macbook") -> Path:
     """Забрать с узла свежий экспорт размеченных проходов."""
     stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
     incoming = root / "incoming"
     incoming.mkdir(parents=True, exist_ok=True)
     archive = incoming / f"macbook-{stamp}.zip"
-    url = f"{admin.rstrip('/')}/api/training/macbook/export"
+    url = f"{admin.rstrip('/')}/api/training/macbook/export?scope={scope}"
     print(f"Забираю набор: {url}")
     try:
         with urllib.request.urlopen(url, timeout=3600) as response:
@@ -322,6 +322,17 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--scope",
+        choices=("macbook", "all"),
+        default="macbook",
+        help=(
+            "какие проходы забирать: macbook — только помеченные точкой "
+            "обучения «макбук» (по умолчанию), all — все размеченные без "
+            "разбора точки. Разметка по умолчанию идёт в «не для обучения», "
+            "поэтому «all» обычно в разы больше"
+        ),
+    )
+    parser.add_argument(
         "--allow-experimental",
         action="store_true",
         help=(
@@ -335,7 +346,7 @@ def main() -> None:
     try:
         dataset = args.root / "datasets" / "export"
         if args.stage in ("fetch", "all"):
-            dataset = fetch(args.root, args.admin)
+            dataset = fetch(args.root, args.admin, args.scope)
         report = read_report(dataset)
         describe(report)
 
