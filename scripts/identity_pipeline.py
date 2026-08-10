@@ -24,7 +24,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
-from src.common.metrics import REJECT_LABELS
+from src.common.metrics import FOREIGN_LABEL, REJECT_LABELS
 
 VIEWS = ("face", "side")
 DEFAULT_ROOT = Path.home() / "CatDoorTraining"
@@ -118,6 +118,35 @@ def usable_for_production(report: dict[str, object]) -> bool:
     return len(home) >= MIN_CATS and all(count >= MIN_EVENTS_PER_CAT for count in home.values())
 
 
+def restrict_to_cats(source: Path, cats: Sequence[str], destination: Path) -> None:
+    """Оставить классами только целевых котов, остальных — в отрицательные.
+
+    Прочие именованные коты переезжают в `__foreign__`: это лучшие
+    отрицательные примеры из возможных — настоящие коты не того имени.
+    Первый прогон на шести классах, где у четырёх было по 10–18 проходов,
+    дал 69% принятых чужих: крошечные классы не учат, а размывают.
+    """
+    targets = set(cats)
+    unknown = targets - {
+        json.loads(line)["label"]
+        for line in source.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    }
+    if unknown:
+        raise PipelineError(
+            f"в наборе нет проходов котов: {', '.join(sorted(unknown))}"
+        )
+    lines = []
+    for line in source.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        item = json.loads(line)
+        if item["label"] not in targets and item["label"] not in REJECT_LABELS:
+            item["label"] = FOREIGN_LABEL
+        lines.append(json.dumps(item, ensure_ascii=False))
+    destination.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def train(
     root: Path,
     dataset: Path,
@@ -125,15 +154,21 @@ def train(
     epochs: int,
     image_size: int,
     views: Sequence[str],
+    cats: Sequence[str] = (),
 ) -> Path:
     """Обучить выбранные ракурсы и собрать пакет. Вернуть каталог релиза."""
     work = root / "work"
     work.mkdir(parents=True, exist_ok=True)
+    manifest = manifest_path(dataset)
+    if cats:
+        restricted = work / "manifest.cats.jsonl"
+        restrict_to_cats(manifest, cats, restricted)
+        manifest = restricted
     split = work / "manifest.split.jsonl"
     run(
         [
             sys.executable, "-m", "training.dataset",
-            str(manifest_path(dataset)),
+            str(manifest),
             "--dataset-root", str(dataset),
             "--assign-splits", str(split),
         ]
@@ -322,6 +357,16 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--cats",
+        nargs="+",
+        default=(),
+        metavar="ИМЯ",
+        help=(
+            "обучать только этих котов; остальные именованные переезжают в "
+            "отрицательные примеры. Без флага обучаются все имена набора"
+        ),
+    )
+    parser.add_argument(
         "--scope",
         choices=("macbook", "all"),
         default="macbook",
@@ -357,6 +402,7 @@ def main() -> None:
                 epochs=args.epochs,
                 image_size=args.image_size,
                 views=args.views,
+                cats=args.cats,
             )
 
         if args.stage in ("install", "all"):
