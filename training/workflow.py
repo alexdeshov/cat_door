@@ -462,18 +462,19 @@ def build_dataset(
     detector: CatDetector | None = None,
     default_detection_config: DetectionConfig | None = None,
 ) -> tuple[Path, dict[str, object]]:
-    if target not in {"local", "macbook"}:
+    # «all» — все размеченные проходы без разбора точки обучения. Появился,
+    # когда точек стало мало: разметка по умолчанию идёт в «не для обучения»,
+    # и набор «только macbook» отставал от реального архива в разы.
+    if target not in {"local", "macbook", "all"}:
         raise ValueError("unsupported training target")
     destination.mkdir(parents=True, exist_ok=False)
     images_root = destination / "images"
     factory = create_session_factory(database_path)
     with factory() as session:
-        events = session.scalars(
-            select(Event)
-            .where(Event.training_target == target)
-            .where(Event.label.in_(USABLE_LABELS))
-            .order_by(Event.created_at)
-        ).all()
+        query = select(Event).where(Event.label.in_(USABLE_LABELS))
+        if target != "all":
+            query = query.where(Event.training_target == target)
+        events = session.scalars(query.order_by(Event.created_at)).all()
 
     if not events:
         raise ValueError(f"no events selected for {target} training")
@@ -620,7 +621,10 @@ def create_macbook_export(
     detector_model_path: Path,
     detector_device: str,
     default_detection_config: DetectionConfig,
+    scope: str = "macbook",
 ) -> Path:
+    if scope not in {"macbook", "all"}:
+        raise ValueError("unsupported export scope")
     exports_root = data_dir / "exports"
     exports_root.mkdir(parents=True, exist_ok=True)
     name = f"macbook-{datetime.now(UTC):%Y%m%d-%H%M%S}-{uuid4().hex[:8]}"
@@ -629,7 +633,7 @@ def create_macbook_export(
         database_path,
         data_dir,
         ffmpeg_path,
-        "macbook",
+        scope,
         work_dir,
         detector_model_path=detector_model_path,
         detector_device=detector_device,
