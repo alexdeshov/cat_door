@@ -70,6 +70,7 @@ python -m scripts.identity_pipeline all
 | Обучение идентификации | `docs/identity-training.md` |
 | Метрики моделей | `docs/metrics.md` |
 | Контуры узла | `docs/two-circuits-plan.md` |
+| Открытие калитки по лицу | `docs/gate-access-plan.md` |
 | История решений | `docs/session-history.md` |
 
 Windows-эпоха проекта заморожена на теге `windows-runtime-final`;
