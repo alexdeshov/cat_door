@@ -36,7 +36,12 @@ from src.common.detection_config import (
     detection_config_path,
     load_detection_config,
 )
-from src.common.metrics import ScoredPrediction, aggregate_frame_predictions, mean_or_none
+from src.common.metrics import (
+    REJECT_LABELS,
+    ScoredPrediction,
+    aggregate_frame_predictions,
+    mean_or_none,
+)
 from src.common.model_registry import register_model_version
 from src.common.notifications import (
     NotificationGate,
@@ -1368,11 +1373,17 @@ def _notify_about_pass(
         settings.telegram_chat_id,
         api_base=settings.telegram_api_base,
     )
+    # Решение агрегатора имеет вид «known:Имя», а не голое «known» — сравнение
+    # с последним не пропускало имя в сообщение никогда. Классы отказа
+    # (`__foreign__`, `__nocat__`) именем не являются: для человека это
+    # «просто кот», и подпись остаётся безымянной.
     identity = next(
         (
             prediction.predicted_name
             for prediction in request.predictions
-            if prediction.decision == "known" and prediction.predicted_name
+            if prediction.decision.startswith("known:")
+            and prediction.predicted_name
+            and prediction.predicted_name not in REJECT_LABELS
         ),
         None,
     )

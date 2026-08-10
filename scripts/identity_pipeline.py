@@ -155,6 +155,7 @@ def train(
     image_size: int,
     views: Sequence[str],
     cats: Sequence[str] = (),
+    train_foreign: bool = False,
 ) -> Path:
     """Обучить выбранные ракурсы и собрать пакет. Вернуть каталог релиза."""
     work = root / "work"
@@ -190,6 +191,7 @@ def train(
                     "--view", view,
                     "--epochs", str(epochs),
                     "--image-size", str(image_size),
+                    *(["--train-foreign"] if train_foreign else []),
                 ]
             )
         except PipelineError:
@@ -357,6 +359,14 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--train-foreign",
+        action="store_true",
+        help=(
+            "обучать класс отказа «чужой» явно; включать вместе с --cats, "
+            "когда пул не-целевых котов богат"
+        ),
+    )
+    parser.add_argument(
         "--cats",
         nargs="+",
         default=(),
@@ -403,6 +413,7 @@ def main() -> None:
                 image_size=args.image_size,
                 views=args.views,
                 cats=args.cats,
+                train_foreign=args.train_foreign,
             )
 
         if args.stage in ("install", "all"):

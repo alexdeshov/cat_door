@@ -364,3 +364,86 @@ def test_uncertain_pass_is_recorded_but_not_announced() -> None:
     assert gate.blocked_reason("face", now=1.0, confidence=0.81) is None
     # Без переданной уверенности порог не проверяется: калитка судит иначе.
     assert gate.blocked_reason("face", now=1.0) is None
+
+def test_caption_takes_the_name_from_aggregated_decision(
+    runtime_path: Path, monkeypatch
+) -> None:
+    """Решение агрегатора — «known:Имя», и классы отказа именем не являются.
+
+    Сравнение с голым «known» не пропускало имя в сообщение никогда, а
+    «known:__nocat__» подписал бы прохода служебным ярлыком.
+    """
+    import numpy as np
+
+    from src.common.settings import Settings
+    from src.recorder import app as recorder_app
+    from src.recorder.detection_journal import DetectionJournal
+    from src.recorder.events import AutomaticEventPrediction, AutomaticEventRequest
+
+    recorder_app.reset_notification_gate()
+    settings = Settings.model_construct(
+        data_dir=runtime_path,
+        database_path=runtime_path / "catdoor.sqlite3",
+        ffmpeg_path="ffmpeg",
+        display_timezone="Europe/Moscow",
+        telegram_bot_token=TOKEN,
+        telegram_chat_id="12345",
+        telegram_api_base="https://api.telegram.org",
+        notify_roles=["face"],
+        notify_cooldown_seconds=0.0,
+        notify_min_confidence=0.0,
+    )
+    event = type(
+        "StoredEvent",
+        (),
+        {
+            "id": 10,
+            "created_at": datetime(2026, 8, 10, 16, 40),  # noqa: DTZ001
+            "media_path": "events/00000010/face.mp4",
+            "side_media_path": None,
+        },
+    )()
+    captions: list[str] = []
+    monkeypatch.setattr(
+        "src.common.telegram.TelegramClient.send_photo",
+        lambda self, photo, caption: captions.append(caption),
+    )
+    journal = DetectionJournal(
+        runtime_path / "runtime" / "detection.jsonl",
+        max_bytes=100_000,
+        backup_count=1,
+    )
+
+    def prediction(view: str, decision: str, name: str | None):
+        return AutomaticEventPrediction(
+            model_version_id=1,
+            view=view,
+            decision=decision,
+            predicted_name=name,
+            confidence=0.9,
+            frames_used=3,
+            max_detector_confidence=0.9,
+            mean_inference_ms=1.0,
+            raw_scores=(),
+        )
+
+    recorder_app._notify_about_pass(  # type: ignore[arg-type]
+        settings,
+        AutomaticEventRequest(
+            started_at=1.0,
+            ended_at=9.0,
+            initiating_camera="face",
+            confidence_face=0.98,
+            confidence_side=0.0,
+            predictions=(
+                prediction("face", "known:__nocat__", "__nocat__"),
+                prediction("side", "known:Черныш", "Черныш"),
+            ),
+        ),
+        event,
+        journal,
+        np.full((540, 960, 3), 42, dtype=np.uint8),
+    )
+    journal.close()
+
+    assert captions and captions[0].startswith("Черныш: проход")

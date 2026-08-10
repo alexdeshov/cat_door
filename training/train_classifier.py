@@ -100,16 +100,26 @@ def train(
     image_size: int,
     progress: Callable[[int, int, float], None] | None = None,
     weights_path: Path | None = None,
+    include_foreign: bool = False,
 ) -> dict[str, object]:
     import torch
     from PIL import Image
     from torch.utils.data import DataLoader, Dataset
 
     items = [item for item in load_manifest(manifest_path) if item.view == view]
-    # `__foreign__` не обучается — чужих котов всего горстка, и они нужны для
-    # честной open-set проверки. `__nocat__` обучается наравне с котами: это
-    # полноценный класс с собственным видом, и ради него всё и затевалось.
-    labels = sorted({item.label for item in items if item.label != FOREIGN_LABEL})
+    # `__foreign__` по умолчанию не обучается — когда чужих котов горстка, они
+    # нужнее для честной open-set проверки. Но когда пул отказа богат (флаг
+    # `--cats` конвейера ссыпает туда не-целевых именованных котов), явный
+    # класс отказа обязателен: двухклассовый softmax на приёмке 2026-08-10
+    # принял 84% чужих — модели без класса «не тот кот» некуда их деть.
+    # `__nocat__` обучается наравне с котами всегда.
+    labels = sorted(
+        {
+            item.label
+            for item in items
+            if include_foreign or item.label != FOREIGN_LABEL
+        }
+    )
     label_to_index = {label: index for index, label in enumerate(labels)}
     if len(labels) < 2:
         raise ValueError("training requires at least two known cat labels")
@@ -199,6 +209,14 @@ def main() -> None:
         type=Path,
         help="local MobileNetV3 ImageNet state dict for offline training",
     )
+    parser.add_argument(
+        "--train-foreign",
+        action="store_true",
+        help=(
+            "обучать __foreign__ как явный класс отказа; включать, когда пул "
+            "чужих богат (иначе он нужнее для open-set проверки)"
+        ),
+    )
     args = parser.parse_args()
     train(
         args.manifest,
@@ -208,6 +226,7 @@ def main() -> None:
         args.epochs,
         args.image_size,
         weights_path=args.weights_path,
+        include_foreign=args.train_foreign,
     )
 
 
