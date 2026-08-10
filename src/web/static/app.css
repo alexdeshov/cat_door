@@ -432,9 +432,10 @@ a.tally:hover { background: var(--surface-sunken); }
 
 /* Фишки фильтра опознанных: ряд пилюль по содержимому, а не сетка на всю
  * ширину — их десяток (имена котов растут), и растянутые они читаются как
- * шапка таблицы, а не как фильтр. */
-.chips { display: flex; flex-wrap: wrap; gap: 8px; }
-.chip {
+ * шапка таблицы, а не как фильтр. Имя нарочно не `.chip`: оно занято плашками
+ * шапки, и общие правила переодевали бы обоих. */
+.filter-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.filter-chip {
   padding: 5px 13px;
   border: 1px solid var(--line);
   border-radius: 999px;
@@ -444,8 +445,8 @@ a.tally:hover { background: var(--surface-sunken); }
   background: var(--surface);
   cursor: pointer;
 }
-a.chip:hover { background: var(--surface-sunken); }
-.chip-active { border-color: var(--signal); box-shadow: inset 0 0 0 1px var(--signal); }
+a.filter-chip:hover { background: var(--surface-sunken); }
+.filter-chip-active { border-color: var(--signal); box-shadow: inset 0 0 0 1px var(--signal); }
 
 /* ── Управление ───────────────────────────────────────────────────────── */
 

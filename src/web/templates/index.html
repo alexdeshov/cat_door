@@ -207,16 +207,16 @@
       {%- endif -%}
     </span>
   </div>
-  <div class="chips" style="margin: 0 0 12px">
+  <div class="filter-chips" style="margin: 0 0 12px">
     {% for name in known_cat_names %}
-      <a class="chip{{ ' chip-active' if labeled_cat == name }}"
+      <a class="filter-chip{{ ' filter-chip-active' if labeled_cat == name }}"
         href="?cat={{ name | urlencode }}#recognized">{{ name }}</a>
     {% endfor %}
     {% for key, title in [
       ("named", "все свои"), ("foreign", "чужие"),
       ("nocat", "кота не видно"), ("multi", "несколько"), ("all", "все размеченные"),
     ] %}
-      <a class="chip{{ ' chip-active' if labeled_who == key and not labeled_cat }}"
+      <a class="filter-chip{{ ' filter-chip-active' if labeled_who == key and not labeled_cat }}"
         href="?who={{ key }}#recognized">{{ title }}</a>
     {% endfor %}
   </div>
