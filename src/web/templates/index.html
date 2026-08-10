@@ -207,21 +207,17 @@
       {%- endif -%}
     </span>
   </div>
-  <div class="tallies" style="margin: 0 0 10px">
+  <div class="chips" style="margin: 0 0 12px">
     {% for name in known_cat_names %}
-      <a class="tally{{ ' tally-active' if labeled_cat == name }}"
-        href="?cat={{ name | urlencode }}#recognized">
-        <span class="tally-key">{{ name }}</span>
-      </a>
+      <a class="chip{{ ' chip-active' if labeled_cat == name }}"
+        href="?cat={{ name | urlencode }}#recognized">{{ name }}</a>
     {% endfor %}
     {% for key, title in [
       ("named", "все свои"), ("foreign", "чужие"),
       ("nocat", "кота не видно"), ("multi", "несколько"), ("all", "все размеченные"),
     ] %}
-      <a class="tally{{ ' tally-active' if labeled_who == key and not labeled_cat }}"
-        href="?who={{ key }}#recognized">
-        <span class="tally-key">{{ title }}</span>
-      </a>
+      <a class="chip{{ ' chip-active' if labeled_who == key and not labeled_cat }}"
+        href="?who={{ key }}#recognized">{{ title }}</a>
     {% endfor %}
   </div>
   <div class="passes">
