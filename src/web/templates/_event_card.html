@@ -1,0 +1,107 @@
+{# Карточка одного прохода. Используется и разделом разметки, и разделом
+   опознанных: управление меткой и именем едино — переразметить можно
+   откуда угодно. Контекст: event, event_predictions. #}
+    <article class="pass" data-event="{{ event.id }}">
+      <div class="pass-media">
+        {% if event.status in ["ready", "partial"] and event.media_path %}
+          <div class="event-media stack">
+            <div class="event-recording" data-camera-role="face">
+              <div class="event-player">
+                <video preload="none" poster="/media/{{ event.id }}/face/poster" src="/media/{{ event.id }}/face"
+                  {% if event.preview_offset_seconds %}data-start="{{ event.preview_offset_seconds }}"{% endif %}></video>
+                <div class="player-bar">
+                  <button class="video-play" type="button" aria-label="Воспроизвести">▶</button>
+                  <input class="video-seek" type="range" min="0" max="1000" value="0"
+                    aria-label="Позиция видео">
+                  <span class="player-time video-time">0:00 / 0:00</span>
+                  <button class="video-fullscreen" type="button" aria-label="На весь экран">⛶</button>
+                </div>
+              </div>
+              <span class="faint event-camera-title data">основная</span>
+            </div>
+            {% if event.side_media_path %}
+              <div class="event-recording" data-camera-role="side">
+                <div class="event-player">
+                  <video preload="none" poster="/media/{{ event.id }}/side/poster" src="/media/{{ event.id }}/side"
+                    {% if event.preview_offset_seconds %}data-start="{{ event.preview_offset_seconds }}"{% endif %}></video>
+                  <div class="player-bar">
+                    <button class="video-play" type="button" aria-label="Воспроизвести">▶</button>
+                    <input class="video-seek" type="range" min="0" max="1000" value="0"
+                      aria-label="Позиция видео">
+                    <span class="player-time video-time">0:00 / 0:00</span>
+                    <button class="video-fullscreen" type="button" aria-label="На весь экран">⛶</button>
+                  </div>
+                </div>
+                <span class="faint event-camera-title data">дополнительная</span>
+              </div>
+            {% endif %}
+          </div>
+        {% else %}
+          <div class="viewport viewport-empty">
+            Запись не получилась<br>
+            <span class="data">{{ event.error_code or event.status }}</span>
+          </div>
+        {% endif %}
+      </div>
+      <div class="pass-body">
+        <div class="pass-head">
+          <span class="pass-time">{{ event.created_at | local_time("%H:%M:%S") }}</span>
+          <span>{{ event.created_at | local_time("%d.%m") }}</span>
+          <span>#{{ event.id }}</span>
+          <span>{{ event.duration_seconds }} с</span>
+          <span>{{ "детектор" if event.trigger_source == "automatic" else "вручную" }}</span>
+          {% if event.detector_confidence_face is not none %}
+            <span title="Уверенность детектора: основная / дополнительная">
+              {{ "%.2f"|format(event.detector_confidence_face) }} /
+              {{ "%.2f"|format(event.detector_confidence_side or 0) }}
+            </span>
+          {% endif %}
+          {% if event.initiating_camera %}
+            <span class="signal">начала {{ event.initiating_camera }}</span>
+          {% endif %}
+        </div>
+        {% set predictions = event_predictions.get(event.id, {}) %}
+        {% if predictions %}
+          <p class="muted" style="font-size: 13px">
+            Модель узнала:
+            {% for view, prediction in predictions.items() %}
+              {{ view }} —
+              {% if prediction.decision.startswith("known:") %}
+                <strong>{{ prediction.predicted_name }}</strong>
+                <span class="data">{{ "%.2f"|format(prediction.confidence) }}</span>
+              {% elif prediction.decision == "uncertain" %}
+                не уверена{% if prediction.confidence is not none %}
+                  <span class="data">({{ "%.2f"|format(prediction.confidence) }})</span>{% endif %}
+              {% else %}
+                не запускалась
+              {% endif %}{{ "; " if not loop.last }}
+            {% endfor %}
+          </p>
+        {% endif %}
+        <div class="segmented" role="group" aria-label="Кто на записи">
+          <button type="button" class="label-choice" data-label="known_cat"
+            aria-pressed="{{ 'true' if event.label == 'known_cat' else 'false' }}">свой</button>
+          <button type="button" class="label-choice" data-label="foreign_cat"
+            aria-pressed="{{ 'true' if event.label == 'foreign_cat' else 'false' }}">чужой</button>
+          <button type="button" class="label-choice" data-label="not_visible"
+            aria-pressed="{{ 'true' if event.label == 'not_visible' else 'false' }}">кота не видно</button>
+          <button type="button" class="label-choice" data-label="multiple_cats"
+            aria-pressed="{{ 'true' if event.label == 'multiple_cats' else 'false' }}">несколько</button>
+        </div>
+        <div class="pass-actions">
+          <input class="cat-name" placeholder="Имя кота" value="{{ event.cat_name or '' }}"
+            list="known-cat-names" style="width: 9.5em"
+            {{ "hidden" if event.label != "known_cat" }}>
+          <select class="training-target" aria-label="Назначение для обучения">
+            <option value="excluded" {{ "selected" if event.training_target == "excluded" }}>не для обучения</option>
+            <option value="macbook" {{ "selected" if event.training_target == "macbook" }}>на MacBook</option>
+            <option value="local" {{ "selected" if event.training_target == "local" }}>обучать здесь</option>
+          </select>
+          <label class="row" style="font-size: 13px">
+            <input class="event-selector" type="checkbox"> тот же кот
+          </label>
+          <span class="label-status muted data" style="font-size: 12px"></span>
+          <button class="delete-event danger" type="button" style="margin-left: auto">Удалить</button>
+        </div>
+      </div>
+    </article>
