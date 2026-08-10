@@ -430,6 +430,23 @@ a.tally:hover { background: var(--surface-sunken); }
 .tally-key { font-size: 12px; color: var(--text-muted); }
 .tally-alert .tally-value { color: var(--bad); }
 
+/* Фишки фильтра опознанных: ряд пилюль по содержимому, а не сетка на всю
+ * ширину — их десяток (имена котов растут), и растянутые они читаются как
+ * шапка таблицы, а не как фильтр. */
+.chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip {
+  padding: 5px 13px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 13px;
+  color: inherit;
+  text-decoration: none;
+  background: var(--surface);
+  cursor: pointer;
+}
+a.chip:hover { background: var(--surface-sunken); }
+.chip-active { border-color: var(--signal); box-shadow: inset 0 0 0 1px var(--signal); }
+
 /* ── Управление ───────────────────────────────────────────────────────── */
 
 .controls { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
