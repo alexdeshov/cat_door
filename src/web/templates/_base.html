@@ -148,6 +148,44 @@
     });
   });
 
+  // Клип и превью делят один канал до браузера, и превью — бесконечные
+  // потоки: при включённых картинках клипу остаётся меньше его собственного
+  // битрейта, и после «плей» человек 3–4 секунды смотрит на буферизацию
+  // (замерено 2026-08-10: свободных ~300 КБ/с при битрейте ролика ~830).
+  // На время проигрывания превью отпускаются тем же способом, что у фоновой
+  // вкладки, и возвращаются через пару секунд после остановки.
+  let previewResumeTimer = null;
+
+  function anyVideoPlaying() {
+    return [...document.querySelectorAll("video")].some(
+      video => !video.paused && !video.ended,
+    );
+  }
+
+  // Медиасобытия не всплывают — ловим на фазе захвата.
+  document.addEventListener("play", event => {
+    if (event.target.tagName !== "VIDEO") return;
+    clearTimeout(previewResumeTimer);
+    liveStreams().forEach(image => {
+      if (image.getAttribute("src")) {
+        image.removeAttribute("src");
+        liveStreamAttempts.delete(image);
+      }
+    });
+  }, true);
+
+  ["pause", "ended"].forEach(kind => {
+    document.addEventListener(kind, event => {
+      if (event.target.tagName !== "VIDEO") return;
+      clearTimeout(previewResumeTimer);
+      previewResumeTimer = setTimeout(() => {
+        if (!anyVideoPlaying() && document.visibilityState === "visible") {
+          applyPreviewState();
+        }
+      }, 2500);
+    }, true);
+  });
+
   // Превью показываются сразу, а кнопка в шапке их прячет. Прежде было
   // наоборот: каждая живая картинка — отдельный ffmpeg, 10–35% ядра, и на
   // двухъядерном узле открытая «на всякий случай» админка съедала заметную его
