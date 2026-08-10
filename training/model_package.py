@@ -9,8 +9,17 @@ REQUIRED_METADATA = {"model_info.json", "thresholds.json", "checksums.sha256"}
 
 
 def _unexpected_package_files(names: set[str]) -> list[str]:
+    # `<ракурс>_model.json` — пер-ракурсные метаданные рядом с одноимённым
+    # ONNX: их ищет рекордер, и с 2026-08-10 конвейер кладёт их в релиз.
     return sorted(
-        name for name in names if name not in REQUIRED_METADATA and not name.endswith(".onnx")
+        name
+        for name in names
+        if name not in REQUIRED_METADATA
+        and not name.endswith(".onnx")
+        and not (
+            name.endswith("_model.json")
+            and name.replace("_model.json", "_model.onnx") in names
+        )
     )
 
 
