@@ -214,10 +214,13 @@ def train(
         raise PipelineError("ни один ракурс не обучился — смотрите отчёт набора выше")
 
     # Пакет требует ровно одного model_info.json; берём первый обученный ракурс
-    # как основной, остальные едут рядом отдельными файлами.
+    # как основной. Пер-ракурсные метаданные НЕ удаляются, а переименовываются
+    # в `<ракурс>_model.json` — ровно так их ищет рекордер рядом с моделью
+    # (`model_path.with_suffix(".json")`). Первая боевая установка 2026-08-10
+    # уехала без них, и recorder не смог бы поднять ни одну модель.
     shutil.copy(release / f"{trained[0]}-model-info.json", release / "model_info.json")
     for view in trained:
-        (release / f"{view}-model-info.json").unlink()
+        (release / f"{view}-model-info.json").rename(release / f"{view}_model.json")
     thresholds = Path(__file__).resolve().parents[1] / "model-manifests" / "thresholds.example.json"
     shutil.copy(thresholds, release / "thresholds.json")
 
@@ -303,8 +306,18 @@ def acceptance_passed(root: Path, views: Sequence[str]) -> bool:
 def install(root: Path, node: str, *, views: Sequence[str]) -> None:
     """Отвезти модели на узел. Прежние остаются рядом с суффиксом .bak."""
     release = root / "release"
-    files = [release / f"{view}_model.onnx" for view in views]
-    files = [path for path in files if path.is_file()]
+    files: list[Path] = []
+    for view in views:
+        model = release / f"{view}_model.onnx"
+        metadata = release / f"{view}_model.json"
+        if not model.is_file():
+            continue
+        if not metadata.is_file():
+            raise PipelineError(
+                f"у модели {model.name} нет метаданных {metadata.name} — "
+                "рекордер без них её не поднимет"
+            )
+        files.extend([model, metadata])
     if not files:
         raise PipelineError("в релизе нет ни одной модели")
 
