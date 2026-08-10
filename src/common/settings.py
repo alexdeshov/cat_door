@@ -169,6 +169,16 @@ class Settings(BaseSettings):
     # закрывает прямые адреса дата-центров: 2026-08-09 у владельца
     # `web.telegram.org` отвечал, а `149.154.166.110:443` молчал до таймаута —
     # уведомления встали, хотя интернет работал.
+    # Реле-контроллер дверцы (Waveshare Modbus POE ETH Relay (B)) в камерной
+    # сети. Пустой host — панель дверцы и опрос выключены целиком: контроллер
+    # есть не на каждой установке, и админка без него обязана жить как раньше.
+    door_controller_host: str = ""
+    door_controller_port: int = Field(default=4196, ge=1, le=65535)
+    door_reed_input: int = Field(default=1, ge=1, le=8)
+    door_lock_relay: int = Field(default=1, ge=1, le=8)
+    # «Геркон замкнут 2–3 секунды — дверца закрыта» — требование владельца;
+    # берём середину. Разомкнутый или дребезжащий геркон — открыта сразу.
+    door_position_stable_seconds: float = Field(default=2.5, ge=0.5, le=60.0)
     telegram_api_base: str = TELEGRAM_API
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""

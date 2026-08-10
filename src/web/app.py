@@ -114,6 +114,7 @@ from src.recorder.ffmpeg import (
 )
 from src.recorder.preview import local_mjpeg_stream, preview_is_fresh, preview_path
 from src.recorder.status import read_recorder_status, recorder_status_path
+from src.web.door_monitor import DoorMonitor
 from src.web.live_stream import resilient_mjpeg_stream, until
 from training.workflow import create_macbook_export, write_status
 
@@ -125,12 +126,15 @@ TRAINING_TARGETS = {"excluded", "macbook", "local"}
 EVENTS_PER_PAGE = 10
 # Счётчики в шапке — они же фильтры списка проходов: ключ приходит в `?show=`
 # и превращается в условие. Ключи совпадают с полями `event_summary`.
-EVENT_FILTERS = {
-    "automatic": Event.trigger_source == "automatic",
-    "pending": Event.label == "pending",
-    "known": Event.label == "known_cat",
+# Раздел «Опознанные»: фильтры по размеченным проходам. Ключ «named» — все
+# свои коты с именем — умолчание раздела; конкретное имя приходит отдельным
+# параметром cat и проверяется по базе, а не по этому словарю.
+LABELED_FILTERS = {
+    "named": (Event.label == "known_cat") & Event.cat_name.is_not(None),
     "foreign": Event.label == "foreign_cat",
-    "failed": Event.status == "failed",
+    "nocat": Event.label == "not_visible",
+    "multi": Event.label == "multiple_cats",
+    "all": Event.label != "pending",
 }
 # Состояние службы Frigate показывается в шапке каждой страницы, а узнаётся
 # запуском systemctl. Короткая память избавляет от процесса на отрисовку, не
@@ -503,6 +507,9 @@ async def _notify_systemd(app: FastAPI) -> AsyncIterator[None]:
     """
     notifier = Notifier.from_environment()
     notifier.ready(f"Админка слушает {app.state.settings.web_host}")
+    door_monitor = getattr(app.state, "door_monitor", None)
+    if door_monitor is not None:
+        door_monitor.start()
     interval = notifier.watchdog_interval_seconds
     task = (
         asyncio.create_task(_ping_watchdog(notifier, interval))
@@ -518,6 +525,8 @@ async def _notify_systemd(app: FastAPI) -> AsyncIterator[None]:
         # принудительного убийства по таймауту: полторы минуты на каждый
         # перезапуск, и не там, где ждёшь.
         app.state.shutting_down.set()
+        if door_monitor is not None:
+            door_monitor.stop()
         if task is not None:
             task.cancel()
             with suppress(asyncio.CancelledError):
@@ -543,6 +552,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.mount("/static", StaticFiles(directory=static_dir), name="static")
     app.state.settings = settings
     app.state.session_factory = factory
+    # Монитор создаётся здесь, а стартует в lifespan: TestClient без lifespan
+    # не должен плодить потоки, а установка без контроллера — вообще ничего.
+    app.state.door_monitor = (
+        DoorMonitor(
+            host=settings.door_controller_host,
+            port=settings.door_controller_port,
+            reed_input=settings.door_reed_input,
+            lock_relay=settings.door_lock_relay,
+            stable_seconds=settings.door_position_stable_seconds,
+        )
+        if settings.door_controller_host
+        else None
+    )
     # Признак остановки службы. Событие, а не флаг: живое превью крутится в
     # потоке пула, и ему нужно узнать об остановке, не опрашивая ничего.
     app.state.shutting_down = ThreadEvent()
@@ -719,7 +741,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         request: Request,
         session: Annotated[Session, Depends(get_session)],
         page: int = 1,
-        show: str | None = None,
+        lpage: int = 1,
+        who: str = "named",
+        cat: str | None = None,
     ) -> HTMLResponse:
         summary_row = session.execute(
             select(
@@ -733,34 +757,52 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 func.count(Event.id).filter(Event.training_target == "local"),
             )
         ).one()
-        # Незнакомый фильтр молча сбрасывается, а не отвергается — по той же
-        # причине, по которой ниже прижимается номер страницы.
-        if show not in EVENT_FILTERS:
-            show = None
-        if show is None:
-            events_total = summary_row[0]
-        else:
-            events_total = session.execute(
-                select(func.count(Event.id)).where(EVENT_FILTERS[show])
-            ).scalar_one()
-        pages = max(1, ceil(events_total / EVENTS_PER_PAGE))
-        # Номер страницы прижимается к диапазону, а не отвергается: после
-        # удаления последнего прохода на странице сохранённая ссылка иначе вела
-        # бы в пустоту.
-        page = min(max(page, 1), pages)
-        events_query = (
-            select(Event)
-            # Тай-брейк по id обязателен: автоматические проходы пишутся пачками
-            # и могут делить время создания, а при неустойчивом порядке одна и
-            # та же запись прыгала бы между страницами.
-            .order_by(Event.created_at.desc(), Event.id.desc())
-            .limit(EVENTS_PER_PAGE)
-            .offset((page - 1) * EVENTS_PER_PAGE)
+        known_cat_names = session.scalars(
+            select(Event.cat_name)
+            .where(Event.label == "known_cat", Event.cat_name.is_not(None))
+            .distinct()
+            .order_by(Event.cat_name)
+        ).all()
+        # Незнакомые фильтры молча сбрасываются к умолчанию, а не отвергаются —
+        # по той же причине, по которой ниже прижимается номер страницы.
+        if who not in LABELED_FILTERS:
+            who = "named"
+        if cat is not None and cat not in known_cat_names:
+            cat = None
+        labeled_filter = (
+            (Event.label == "known_cat") & (Event.cat_name == cat)
+            if cat is not None
+            else LABELED_FILTERS[who]
         )
-        if show is not None:
-            events_query = events_query.where(EVENT_FILTERS[show])
-        events = session.scalars(events_query).all()
-        event_ids = [event.id for event in events]
+
+        def load_page(condition, page_number: int):
+            total = session.execute(
+                select(func.count(Event.id)).where(condition)
+            ).scalar_one()
+            pages = max(1, ceil(total / EVENTS_PER_PAGE))
+            # Номер страницы прижимается к диапазону, а не отвергается: после
+            # удаления последнего прохода на странице сохранённая ссылка иначе
+            # вела бы в пустоту.
+            page_number = min(max(page_number, 1), pages)
+            rows = session.scalars(
+                select(Event)
+                .where(condition)
+                # Тай-брейк по id обязателен: автоматические проходы пишутся
+                # пачками и могут делить время создания, а при неустойчивом
+                # порядке одна и та же запись прыгала бы между страницами.
+                .order_by(Event.created_at.desc(), Event.id.desc())
+                .limit(EVENTS_PER_PAGE)
+                .offset((page_number - 1) * EVENTS_PER_PAGE)
+            ).all()
+            return rows, total, page_number, pages
+
+        events, events_total, page, pages = load_page(Event.label == "pending", page)
+        labeled_events, labeled_total, lpage, labeled_pages = load_page(
+            labeled_filter, lpage
+        )
+        event_ids = [event.id for event in events] + [
+            event.id for event in labeled_events
+        ]
         prediction_rows = (
             session.scalars(
                 select(EventPrediction)
@@ -786,12 +828,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "foreign": summary_row[4],
             "failed": summary_row[5],
         }
-        known_cat_names = session.scalars(
-            select(Event.cat_name)
-            .where(Event.label == "known_cat", Event.cat_name.is_not(None))
-            .distinct()
-            .order_by(Event.cat_name)
-        ).all()
         # Считается по всей базе, а не по показанной странице: это размер
         # набора для обучения, и он не зависит от того, что сейчас на экране.
         # Прежний подсчёт по срезу врал уже на сотне проходов.
@@ -829,10 +865,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "events_page": page,
                 "events_pages": pages,
                 "events_per_page": EVENTS_PER_PAGE,
-                "events_filter": show,
                 "events_total": events_total,
                 "events_shown_from": (page - 1) * EVENTS_PER_PAGE + 1 if events else 0,
                 "events_shown_to": (page - 1) * EVENTS_PER_PAGE + len(events),
+                "labeled_events": labeled_events,
+                "labeled_page": lpage,
+                "labeled_pages": labeled_pages,
+                "labeled_total": labeled_total,
+                "labeled_who": who,
+                "labeled_cat": cat,
+                "door_configured": app.state.door_monitor is not None,
                 "face_configured": bool(_role_stream_url(registry, "face")),
                 "side_configured": bool(_role_stream_url(registry, "side")),
                 "recording_rotations": {
@@ -1212,6 +1254,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except ValueError:
             stale = True
         return {**status, "stale": stale}
+
+    @app.get("/api/door/status")
+    def door_status() -> dict[str, object]:
+        monitor = app.state.door_monitor
+        if monitor is None:
+            return {"configured": False}
+        shot = monitor.snapshot()
+        return {
+            "configured": True,
+            "available": shot.available,
+            "position": shot.position,
+            "position_stable_seconds": (
+                round(shot.position_stable_seconds, 1)
+                if shot.position_stable_seconds is not None
+                else None
+            ),
+            "reed_closed": shot.reed_closed,
+            "lock_relay_on": shot.lock_relay_on,
+            "error": shot.error,
+        }
 
     @app.get("/api/circuits")
     def get_circuits() -> dict[str, object]:

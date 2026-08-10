@@ -165,7 +165,51 @@ def test_summary_is_above_cameras_and_counts_all_events(
     assert '<option value="Барсик">' in page.text
 
 
-def test_summary_tallies_filter_event_list(runtime_path: Path, monkeypatch) -> None:
+def test_door_status_reports_unconfigured_without_controller(
+    runtime_path: Path, monkeypatch
+) -> None:
+    """Без контроллера панель дверцы не рисуется, а API честно говорит почему."""
+    client = make_client(runtime_path, monkeypatch)
+
+    assert client.get("/api/door/status").json() == {"configured": False}
+    assert 'id="door"' not in client.get("/").text
+
+
+def test_door_status_exposes_monitor_snapshot(runtime_path: Path, monkeypatch) -> None:
+    from src.web.door_monitor import DoorSnapshot
+
+    client = make_client(runtime_path, monkeypatch)
+
+    class FakeMonitor:
+        def snapshot(self) -> DoorSnapshot:
+            return DoorSnapshot(
+                available=True,
+                position="closed",
+                position_stable_seconds=7.34,
+                reed_closed=True,
+                lock_relay_on=False,
+            )
+
+    client.app.state.door_monitor = FakeMonitor()
+
+    payload = client.get("/api/door/status").json()
+    assert payload == {
+        "configured": True,
+        "available": True,
+        "position": "closed",
+        "position_stable_seconds": 7.3,
+        "reed_closed": True,
+        "lock_relay_on": False,
+        "error": None,
+    }
+    # Панель появляется вместе с настроенным монитором.
+    assert 'id="door"' in client.get("/").text
+
+
+def test_pending_and_labeled_passes_live_in_separate_sections(
+    runtime_path: Path, monkeypatch
+) -> None:
+    """Реформа вкладки: разметка отдельно, опознанные отдельно."""
     client = make_client(runtime_path, monkeypatch)
     for _ in range(3):
         client.post("/api/events", json={"duration_seconds": 5})
@@ -178,50 +222,49 @@ def test_summary_tallies_filter_event_list(runtime_path: Path, monkeypatch) -> N
         json={"label": "foreign_cat", "training_target": "excluded"},
     )
 
-    filtered = client.get("/?show=known")
-    assert filtered.status_code == 200
-    assert 'data-event="1"' in filtered.text
-    assert 'data-event="2"' not in filtered.text
-    assert 'data-event="3"' not in filtered.text
-    assert "1–1 из 1" in filtered.text
+    page = client.get("/")
+    assert page.status_code == 200
+    labeling = page.text[page.text.index('id="labeling"'):page.text.index('id="recognized"')]
+    recognized = page.text[page.text.index('id="recognized"'):]
+    # Неразмеченный — только в разметке; именованный — только в опознанных.
+    assert 'data-event="3"' in labeling
+    assert 'data-event="1"' not in labeling
+    assert 'data-event="2"' not in labeling
+    assert 'data-event="1"' in recognized
+    # Чужой кот по умолчанию скрыт (раздел показывает своих с именами)…
+    assert 'data-event="2"' not in recognized
 
-    pending = client.get("/?show=pending")
-    assert 'data-event="3"' in pending.text
-    assert 'data-event="1"' not in pending.text
+    foreign = client.get("/?who=foreign")
+    recognized = foreign.text[foreign.text.index('id="recognized"'):]
+    # …и появляется под своей фишкой.
+    assert 'data-event="2"' in recognized
+    assert 'data-event="1"' not in recognized
 
-    # Счётчики остаются общими и не зависят от включённого фильтра.
-    assert '<span class="tally-key">проходов</span>' in filtered.text
-    assert '<span class="tally-value">3</span>' in filtered.text
-    # Активный фильтр подсвечен, его ссылка ведёт назад к полному списку;
-    # остальные счётчики ссылаются на свои фильтры.
-    assert "tally-active" in filtered.text
-    assert 'href="/?show=pending"' in filtered.text
-    assert "tally-active" not in client.get("/").text
+    by_name = client.get("/?cat=Барсик")
+    recognized = by_name.text[by_name.text.index('id="recognized"'):]
+    assert 'data-event="1"' in recognized
 
 
-def test_unknown_filter_shows_everything(runtime_path: Path, monkeypatch) -> None:
+def test_unknown_labeled_filter_falls_back_to_named(
+    runtime_path: Path, monkeypatch
+) -> None:
     client = make_client(runtime_path, monkeypatch)
     client.post("/api/events", json={"duration_seconds": 5})
+    client.post(
+        "/api/events/1/label",
+        json={"label": "known_cat", "cat_name": "Барсик", "training_target": "macbook"},
+    )
 
-    page = client.get("/?show=nonsense")
-
-    assert page.status_code == 200
-    assert 'data-event="1"' in page.text
-    assert "tally-active" not in page.text
-
-
-def test_filter_with_no_matches_explains_itself(runtime_path: Path, monkeypatch) -> None:
-    client = make_client(runtime_path, monkeypatch)
-    client.post("/api/events", json={"duration_seconds": 5})
-
-    page = client.get("/?show=foreign")
+    page = client.get("/?who=nonsense&cat=Чужак")
 
     assert page.status_code == 200
-    assert 'data-event="1"' not in page.text
-    assert "Под этот фильтр не попал ни один проход" in page.text
+    recognized = page.text[page.text.index('id="recognized"'):]
+    assert 'data-event="1"' in recognized
 
 
-def test_filter_survives_pagination(runtime_path: Path, monkeypatch) -> None:
+def test_labeled_section_pagination_is_independent(
+    runtime_path: Path, monkeypatch
+) -> None:
     client = make_client(runtime_path, monkeypatch)
     for index in range(1, 13):
         client.post("/api/events", json={"duration_seconds": 5})
@@ -230,12 +273,14 @@ def test_filter_survives_pagination(runtime_path: Path, monkeypatch) -> None:
             json={"label": "known_cat", "cat_name": "Барсик", "training_target": "macbook"},
         )
 
-    first = client.get("/?show=known")
-    assert "1–10 из 12" in first.text
-    assert 'href="/?page=2&amp;show=known"' in first.text
+    first = client.get("/")
+    assert "12 шт." in first.text
+    assert 'href="/?lpage=2&amp;who=named#recognized"' in first.text
 
-    second = client.get("/?page=2&show=known")
-    assert "11–12 из 12" in second.text
+    second = client.get("/?lpage=2")
+    recognized = second.text[second.text.index('id="recognized"'):]
+    # Самые свежие первыми: на второй странице — самый старый проход.
+    assert 'data-event="1"' in recognized
 
 
 def test_known_cat_requires_name(runtime_path: Path, monkeypatch) -> None:
@@ -1720,8 +1765,8 @@ def test_passes_are_paginated_by_ten(runtime_path: Path, monkeypatch) -> None:
     # Самые свежие проходы идут первыми, поэтому на второй странице — самый старый.
     assert 'data-event="1"' in second.text
     assert 'data-event="1"' not in first.text
-    assert 'href="/?page=2"' in first.text
-    assert 'href="/?page=1"' in second.text
+    assert 'href="/?page=2#labeling"' in first.text
+    assert 'href="/?page=1#labeling"' in second.text
     assert "1 из 2" in first.text
 
 
