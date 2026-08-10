@@ -1,0 +1,36 @@
+{
+  "frames": "pseudorandom",
+  "frame_count": 64,
+  "cells": [
+    {
+      "model": "yolo11n-416.onnx",
+      "model_sha256": "10e95687ff68",
+      "architecture": "yolo11n",
+      "input_size": 416,
+      "device_requested": "GPU",
+      "device_actual": "GPU.0",
+      "iterations": 200,
+      "warmup": 20,
+      "median_ms": 23.83,
+      "p95_ms": 42.048,
+      "fps": 42.0
+    },
+    {
+      "model": "yolo26n-416.onnx",
+      "model_sha256": "9add80560717",
+      "architecture": "yolo26n",
+      "input_size": 416,
+      "device_requested": "GPU",
+      "device_actual": "GPU.0",
+      "iterations": 200,
+      "warmup": 20,
+      "median_ms": 24.064,
+      "p95_ms": 40.008,
+      "fps": 41.6,
+      "versus_baseline": {
+        "model": "yolo11n-416.onnx",
+        "speedup": 0.99
+      }
+    }
+  ]
+}
