@@ -32,7 +32,7 @@ def metrics(**overrides: object) -> NodeMetrics:
 
 REFERENCE_STATUS = {
     "detector_device_actual": "GPU.0",
-    "detector_model": "yolo11n-416.onnx",
+    "detector_model": "yolo26n-416.onnx",
     "hwaccel_actual": "vaapi",
     "frames_per_second": {"face": 12.1, "side": 6.0},
     "inference_ms": 13.5,

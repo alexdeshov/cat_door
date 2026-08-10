@@ -22,7 +22,7 @@ Status = Literal["ok", "warn", "fail", "unknown"]
 # Детектор котов работает на видеоядре с 2026-08-08: 13.5 мс на кадр против
 # 18.5 на процессоре, и это освободило запас, ушедший в частоту опроса.
 EXPECTED_DETECTOR_DEVICE = "GPU"
-EXPECTED_DETECTOR_MODEL = "yolo11n-416.onnx"
+EXPECTED_DETECTOR_MODEL = "yolo26n-416.onnx"
 
 # Декодирование медиадвижком: ffmpeg дверцы 59.8% ядра → 10.0% (замер 08-08).
 EXPECTED_HWACCEL = "vaapi"
