@@ -31,6 +31,7 @@ def test_initial_migration_is_applied_once() -> None:
         ("005_model_metrics",),
         ("006_preview_offset",),
         ("007_gate_passes",),
+        ("008_gate_passes_indexes",),
     ]
     assert "events" in tables
     assert {"model_versions", "event_predictions", "evaluation_runs"} <= tables
@@ -51,3 +52,42 @@ def test_sqlite_uses_wal_and_normal_synchronous_mode(runtime_path: Path) -> None
     assert journal_mode == "wal"
     assert synchronous == 1
     assert busy_timeout == 10_000
+
+
+def test_indexes_survive_a_migration_torn_by_power_loss(runtime_path: Path) -> None:
+    """`executescript` фиксирует каждую команду сама: транзакции вокруг нет.
+
+    Обрыв между `CREATE TABLE gate_passes` и созданием индексов оставлял
+    таблицу без них навсегда: повтор миграции упирается в «table already
+    exists», это считается признаком уже сделанной работы, и версия помечается
+    применённой. Заметить пропажу можно было бы только по медленному журналу
+    через полгода.
+    """
+    database_path = runtime_path / "catdoor.sqlite3"
+    create_session_factory(database_path)
+
+    # Повторяем обрыв: таблица есть, индексов нет, версии не отмечены.
+    with sqlite3.connect(database_path) as connection:
+        for name in ("created_at", "person_name", "decision"):
+            connection.execute(f"DROP INDEX IF EXISTS ix_gate_passes_{name}")
+        connection.execute(
+            "DELETE FROM schema_migrations WHERE version IN "
+            "('007_gate_passes', '008_gate_passes_indexes')"
+        )
+        connection.commit()
+
+    create_session_factory(database_path)
+
+    with sqlite3.connect(database_path) as connection:
+        indexes = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='gate_passes'"
+            )
+        }
+
+    assert {
+        "ix_gate_passes_created_at",
+        "ix_gate_passes_person_name",
+        "ix_gate_passes_decision",
+    } <= indexes

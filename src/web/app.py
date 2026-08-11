@@ -101,6 +101,7 @@ from src.common.gate_access_config import (
 from src.common.gate_open_request import (
     OpenRequest,
     OpenResult,
+    boot_id,
     load_open_result,
     open_request_path,
     open_result_path,
@@ -1651,7 +1652,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         config = current_gate_access()
         if not config.gates:
             raise HTTPException(422, "Канал реле калитки не настроен")
-        request = OpenRequest(id=uuid4().hex, requested_at=time(), source="admin")
+        request = OpenRequest(
+            id=uuid4().hex,
+            requested_at=time(),
+            source="admin",
+            # Загрузка, в которой нажали: после перезагрузки эта просьба уже не
+            # чья-то, и часам после обрыва питания верить нельзя.
+            boot_id=boot_id(),
+        )
         try:
             save_open_request(open_request_path(settings.data_dir), request)
         except OSError as exc:
