@@ -156,6 +156,7 @@ def train(
     views: Sequence[str],
     cats: Sequence[str] = (),
     train_foreign: bool = False,
+    head: str = "embedding",
 ) -> Path:
     """Обучить выбранные ракурсы и собрать пакет. Вернуть каталог релиза."""
     work = root / "work"
@@ -183,15 +184,23 @@ def train(
     trained: list[str] = []
     for view in views:
         checkpoint = work / f"{view}.pt"
+        # У эмбеддингов чужие в обучении всегда: они не «ещё один кот», а сила,
+        # растаскивающая пространство. Флаг `--train-foreign` остаётся про
+        # классификатор, где чужой — отдельный класс со своей ценой.
+        trainer = (
+            ["-m", "training.train_embeddings"]
+            if head == "embedding"
+            else ["-m", "training.train_classifier", *(["--train-foreign"] if train_foreign else [])]
+        )
         try:
             run(
                 [
-                    sys.executable, "-m", "training.train_classifier",
+                    sys.executable, *trainer[:2],
                     str(split), str(dataset), str(checkpoint),
                     "--view", view,
                     "--epochs", str(epochs),
                     "--image-size", str(image_size),
-                    *(["--train-foreign"] if train_foreign else []),
+                    *trainer[2:],
                 ]
             )
         except PipelineError:
@@ -356,6 +365,16 @@ def main() -> None:
     parser.add_argument("--admin", default=DEFAULT_ADMIN)
     parser.add_argument("--node", default=DEFAULT_NODE)
     parser.add_argument("--epochs", type=int, default=20)
+    parser.add_argument(
+        "--head",
+        choices=("embedding", "softmax"),
+        default="embedding",
+        help=(
+            "чем опознавать: embedding — эталон кота и косинусная близость "
+            "(нового кота можно добавить без переобучения, «чужой» получается "
+            "порогом); softmax — прежний классификатор с классом «чужой»"
+        ),
+    )
     parser.add_argument("--image-size", type=int, default=160)
     parser.add_argument(
         "--views",
@@ -424,6 +443,7 @@ def main() -> None:
                 dataset,
                 epochs=args.epochs,
                 image_size=args.image_size,
+                head=args.head,
                 views=args.views,
                 cats=args.cats,
                 train_foreign=args.train_foreign,
