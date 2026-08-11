@@ -61,7 +61,7 @@ chmod 640 "$CONFIG_FILE"
 # отдельной ручной установкой, и обновления его юнитов молча не доезжали.
 for unit in catdoor-recorder.service catdoor-web.service \
         catdoor-gate-sync.service catdoor-gate-sync.path catdoor-gate-sync.timer \
-        catdoor-gate-notify.service \
+        catdoor-gate-notify.service catdoor-gate-access.service \
         catdoor-cpu-thermal.service \
         catdoor-backup.service catdoor-backup.timer; do
     install -m 644 "$REPO_DIR/install/$unit" "$UNIT_DIR/$unit"
@@ -83,6 +83,10 @@ else
 fi
 systemctl enable catdoor-gate-sync.service catdoor-gate-sync.path \
     catdoor-gate-sync.timer >/dev/null
+# Журнал проходов калитки включается безусловно, в отличие от уведомлений: ему
+# не нужно ни токена, ни разрешения — он только читает ленту Frigate и пишет
+# свою таблицу. Механики в нём нет.
+systemctl enable catdoor-gate-access.service >/dev/null
 
 # Уведомления о калитке включаются только там, где настроен бот: без токена
 # служба падала бы каждые пять секунд и засыпала журнал одной и той же жалобой.

@@ -1,6 +1,7 @@
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from fastapi.testclient import TestClient
 from sqlalchemy import select
@@ -2335,3 +2336,158 @@ def test_pass_videos_do_not_preload(runtime_path: Path, monkeypatch) -> None:
     assert 'preload="none"' in page.text
     assert 'preload="metadata"' not in page.text
     assert "/poster" in page.text
+
+
+def _gate_pass(runtime_path: Path, **overrides) -> int:
+    """Строка журнала калитки прямо в базе: пишет её отдельная служба."""
+    from src.common.database import GatePass
+
+    values: dict[str, object] = {
+        "frigate_event_id": "1786171119.126838-b1jywn",
+        "created_at": datetime.now(UTC),
+        "camera": "gate",
+        "person_name": None,
+        "score": None,
+        "zone": None,
+        "decision": "denied_mode_off",
+        "reason": "Автооткрытие выключено",
+        "snapshot_path": None,
+    }
+    values.update(overrides)
+    factory = create_session_factory(runtime_path / "test.sqlite3")
+    with factory() as session:
+        stored = GatePass(**values)
+        session.add(stored)
+        session.commit()
+        return stored.id
+
+
+def test_gate_tab_shows_the_journal_of_passes(runtime_path: Path, monkeypatch) -> None:
+    """Журнал живёт на вкладке калитки, а не отдельной страницей."""
+    client = make_client(runtime_path, monkeypatch)
+    _gate_pass(runtime_path, frigate_event_id="a", person_name="Алексей", score=0.94)
+    _gate_pass(runtime_path, frigate_event_id="b")
+
+    page = client.get("/gate")
+
+    assert page.status_code == 200
+    assert "Журнал проходов" in page.text
+    assert "Алексей" in page.text
+    assert "неизвестный" in page.text
+    assert "автооткрытие выключено" in page.text
+
+
+def test_the_journal_says_it_is_empty_rather_than_showing_nothing(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    """Пустой список и «журнал пуст» — разные сообщения для человека."""
+    client = make_client(runtime_path, monkeypatch)
+
+    page = client.get("/gate")
+
+    assert "Журнал пуст" in page.text
+
+
+def test_gate_counters_count_the_whole_base_not_the_page(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    client = make_client(runtime_path, monkeypatch)
+    for number in range(12):
+        _gate_pass(
+            runtime_path,
+            frigate_event_id=f"e{number}",
+            person_name="Алексей" if number % 2 else None,
+        )
+
+    page = client.get("/gate")
+
+    assert '<span class="tally-value">12</span>' in page.text
+    assert '<span class="tally-value">6</span>' in page.text
+    assert "1 из 2" in page.text
+
+
+def test_the_journal_filters_by_person_and_by_day(runtime_path: Path, monkeypatch) -> None:
+    """Фильтр «за день» человек задаёт по своим часам, а база живёт в UTC.
+
+    Полночь в Москве наступает на три часа раньше: без пересчёта в «сегодня»
+    попадали бы три часа вчерашней ночи.
+    """
+    client = make_client(runtime_path, monkeypatch)
+    today = datetime.now(ZoneInfo("Europe/Moscow"))
+    _gate_pass(
+        runtime_path,
+        frigate_event_id="today",
+        person_name="Алексей",
+        created_at=today.astimezone(UTC),
+    )
+    _gate_pass(
+        runtime_path,
+        frigate_event_id="old",
+        person_name="Марина",
+        created_at=(today - timedelta(days=3)).astimezone(UTC),
+    )
+
+    by_name = client.get("/gate?name=Марина")
+    by_day = client.get(f"/gate?day={today.strftime('%Y-%m-%d')}")
+
+    assert "Марина" in by_name.text
+    assert by_name.text.count("Алексей") == 1  # только чип фильтра
+    assert "Алексей" in by_day.text
+    assert by_day.text.count("Марина") == 1
+
+
+def test_an_unreadable_day_filter_falls_back_to_everything(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    """Сохранённая ссылка с мусором в параметре не должна отдавать ошибку."""
+    client = make_client(runtime_path, monkeypatch)
+    _gate_pass(runtime_path, frigate_event_id="a", person_name="Алексей")
+
+    page = client.get("/gate?day=позавчера&who=выдумка")
+
+    assert page.status_code == 200
+    assert "Алексей" in page.text
+
+
+def test_a_gate_snapshot_stays_inside_the_data_directory(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    """Путь приходит из базы, а её пишет служба по чужому идентификатору."""
+    client = make_client(runtime_path, monkeypatch)
+    inside = _gate_pass(
+        runtime_path,
+        frigate_event_id="a",
+        snapshot_path="runtime/gate-passes/a.jpg",
+    )
+    outside = _gate_pass(
+        runtime_path,
+        frigate_event_id="b",
+        snapshot_path="../../etc/passwd",
+    )
+    snapshot = runtime_path / "runtime" / "gate-passes" / "a.jpg"
+    snapshot.parent.mkdir(parents=True, exist_ok=True)
+    snapshot.write_bytes(b"jpeg")
+
+    good = client.get(f"/gate/passes/{inside}/snapshot")
+
+    assert good.status_code == 200
+    assert good.headers["cache-control"] == "public, max-age=31536000, immutable"
+    assert client.get(f"/gate/passes/{outside}/snapshot").status_code == 404
+    assert client.get("/gate/passes/9999/snapshot").status_code == 404
+
+
+def test_the_gate_tab_still_says_mechanics_are_not_controlled(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    """Журнал не даёт права на замок, и страница не должна намекать обратное."""
+    client = make_client(runtime_path, monkeypatch)
+    _gate_pass(runtime_path, frigate_event_id="a")
+
+    page = client.get("/gate")
+
+    assert "не управляется" in page.text

@@ -89,6 +89,36 @@ def test_service_never_stops_retrying(name: str) -> None:
     assert int(unit["Unit"]["StartLimitIntervalSec"]) == 0
 
 
+def test_every_unit_is_copied_by_the_installer() -> None:
+    """Юнит, не попавший в установщик, обновляется только руками.
+
+    Так уже было с примирителем контура калитки: он жил отдельной ручной
+    установкой, и правки его юнита молча не доезжали на узел.
+    """
+    installer = (INSTALL_DIR / "install.sh").read_text(encoding="utf-8")
+    missing = [
+        path.name
+        for path in sorted(INSTALL_DIR.glob("catdoor-*.*"))
+        if path.suffix in {".service", ".path", ".timer"} and path.name not in installer
+    ]
+
+    assert missing == []
+
+
+def test_the_gate_journal_needs_no_token_to_be_enabled() -> None:
+    """Журнал проходов включается безусловно, в отличие от уведомлений.
+
+    Уведомлениям нужен бот, и без токена служба падала бы каждые пять секунд.
+    Журналу не нужно ничего: он читает ленту Frigate и пишет свою таблицу.
+    """
+    installer = (INSTALL_DIR / "install.sh").read_text(encoding="utf-8")
+
+    assert "systemctl enable catdoor-gate-access.service" in installer
+    assert "-m src.gate.access" in (
+        (INSTALL_DIR / "catdoor-gate-access.service").read_text(encoding="utf-8")
+    )
+
+
 def test_installer_is_executable() -> None:
     mode = (INSTALL_DIR / "install.sh").stat().st_mode
 
@@ -178,6 +208,7 @@ DATA_UNITS = (
     "catdoor-recorder.service",
     "catdoor-web.service",
     "catdoor-gate-notify.service",
+    "catdoor-gate-access.service",
     "catdoor-gate-sync.service",
     "catdoor-backup.service",
 )

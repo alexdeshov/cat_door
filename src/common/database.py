@@ -4,7 +4,17 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text, create_engine, event
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    create_engine,
+    event,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 SQLITE_BUSY_TIMEOUT_SECONDS = 10
@@ -104,6 +114,43 @@ class EventPrediction(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC)
     )
+
+
+class GatePass(Base):
+    """Проход у калитки: событие Frigate и решение системы о нём.
+
+    Отдельно от `Event`: у кошачьих проходов свои клипы, метки и обучение, а
+    здесь — люди, имена из библиотеки лиц Frigate и журнал решений.
+    """
+
+    __tablename__ = "gate_passes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # Ключ Frigate, а не наш: одно событие перечитывается несколько опросов
+    # подряд, пока распознавание не поставит имя. Уникальность превращает
+    # повторное чтение в обновление строки.
+    frigate_event_id: Mapped[str] = mapped_column(String(100), unique=True)
+    # Время начала события у Frigate, а не время записи строки.
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True
+    )
+    camera: Mapped[str] = mapped_column(String(100))
+    person_name: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+    score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    zone: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    decision: Mapped[str] = mapped_column(String(40), index=True)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    snapshot_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # Какие факторы сказали «за», «против» и «не знаю». Пусто до появления
+    # функции решения; без этого разбирать отказы невозможно.
+    factors_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Что ушло на плату. Пусто: механика не подключена и кода записи нет.
+    pulse_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    modbus_ok: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # Открылась ли калитка на самом деле. Геркона на ней нет — поля заведены
+    # заранее и остаются пустыми.
+    reed_before: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    reed_after: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
 
 
 def apply_migrations(database_path: Path) -> None:
