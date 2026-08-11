@@ -35,6 +35,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import shutil
 import traceback
 from collections import defaultdict
 from collections.abc import Sequence
@@ -62,6 +63,10 @@ logger = logging.getLogger("catdoor.enrolment")
 # Сколько кропов кота нужно, чтобы эталон был эталоном, а не случайностью.
 # Десяток — та граница, ниже которой среднее ловит освещение и позу, а не кота.
 MIN_CROPS_PER_CAT = 10
+# Сколько прогонов хранить вместе с их кадрами. Каждый — пара гигабайт, и
+# копиться молча они не должны; последний нужен целиком, чтобы следующий
+# пересчёт мог взять готовые кропы вместо часовой распаковки.
+KEEP_RUNS = 2
 
 
 class EnrolmentError(RuntimeError):
@@ -189,6 +194,25 @@ def _quality(value: MatchQuality) -> dict[str, object]:
     }
 
 
+def purge_old_runs(runs_root: Path, *, keep: int = KEEP_RUNS) -> list[str]:
+    """Убрать кадры старых прогонов, оставив последние.
+
+    Отчёт и статус остаются: по ним смотрят, что было. Уезжают только кропы —
+    их всегда можно нарезать заново, а место они занимают гигабайтами.
+    """
+    removed = []
+    runs = sorted(
+        (path for path in runs_root.glob("*/status.json")),
+        reverse=True,
+    )
+    for status in runs[keep:]:
+        dataset = status.parent / "dataset"
+        if dataset.is_dir():
+            shutil.rmtree(dataset, ignore_errors=True)
+            removed.append(status.parent.name)
+    return removed
+
+
 def run_job(
     database_path: Path,
     data_dir: Path,
@@ -273,6 +297,9 @@ def run_job(
         (output_dir / "report.json").write_text(
             json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
         )
+        swept = purge_old_runs(output_dir.parent)
+        if swept:
+            logger.info("Убраны кадры прошлых прогонов: %s", ", ".join(swept))
         write_status(
             status_path,
             state="completed",
