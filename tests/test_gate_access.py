@@ -16,6 +16,7 @@ from src.common.gate_open_request import REQUEST_TTL_SECONDS, OpenRequest
 from src.gate.access import (
     GatePassRecord,
     LastOpening,
+    execute_openings,
     handle_open_request,
     last_opening,
     pass_snapshot_path,
@@ -592,3 +593,173 @@ def test_the_request_is_executed_once(runtime_path: Path) -> None:
             timezone=MOSCOW,
         )
         session.commit()
+
+
+def test_the_on_mode_turns_a_decision_into_a_pulse() -> None:
+    """Разница между `dry` и `on` — только в исполнении, решение то же."""
+    opener = _FakeOpener(PulseResult(True, "Импульс 500 мс на канал 1", 500))
+    records, _ = _passes(
+        [_event(sub_label="Алексей", name_score=0.96)],
+        config=_config(mode="on"),
+    )
+    sent: list[str] = []
+
+    executed = execute_openings(
+        records,
+        config=_config(mode="on"),
+        opener=opener,
+        already={},
+        notify=sent.append,
+    )
+
+    assert executed[0].decision == "opened"
+    assert executed[0].pulse_ms == 500
+    assert executed[0].modbus_ok is True
+    assert opener.calls == [(2, 500)]
+    assert sent and "Алексей" in sent[0]
+
+
+def test_the_dry_mode_still_touches_nothing() -> None:
+    opener = _FakeOpener(PulseResult(True, "ок", 500))
+    records, _ = _passes([_event(sub_label="Алексей", name_score=0.96)], config=_config())
+
+    executed = execute_openings(records, config=_config(), opener=opener, already={})
+
+    assert executed[0].decision == DECISION_DRY_RUN
+    assert opener.calls == []
+
+
+def test_an_event_is_opened_once_however_often_it_is_reread() -> None:
+    """Событие перечитывается каждый опрос всё окно наблюдения.
+
+    Без проверки по журналу один человек у калитки получал бы импульс каждую
+    секунду в течение пяти минут.
+    """
+    opener = _FakeOpener(PulseResult(True, "ок", 500))
+    records, _ = _passes(
+        [_event(sub_label="Алексей", name_score=0.96)],
+        config=_config(mode="on"),
+    )
+
+    execute_openings(records, config=_config(mode="on"), opener=opener, already={})
+    execute_openings(
+        records,
+        config=_config(mode="on"),
+        opener=opener,
+        already={records[0].frigate_event_id: "opened"},
+    )
+
+    assert opener.calls == [(2, 500)]
+
+
+def test_a_failed_opening_is_not_retried_every_second() -> None:
+    """Отказ платы не повод долбить её без остановки: у человека есть кнопка."""
+    opener = _FakeOpener(PulseResult(False, "Плата не ответила", 500))
+    records, _ = _passes(
+        [_event(sub_label="Алексей", name_score=0.96)],
+        config=_config(mode="on"),
+    )
+
+    executed = execute_openings(records, config=_config(mode="on"), opener=opener, already={})
+    execute_openings(
+        records,
+        config=_config(mode="on"),
+        opener=opener,
+        already={records[0].frigate_event_id: "error"},
+    )
+
+    assert executed[0].decision == "error"
+    assert executed[0].modbus_ok is False
+    assert opener.calls == [(2, 500)]
+
+
+def test_a_refused_decision_never_reaches_the_board() -> None:
+    """Всё, кроме «открыл бы», до платы не доходит даже в режиме `on`."""
+    opener = _FakeOpener(PulseResult(True, "ок", 500))
+    records, _ = _passes([_event(sub_label=None)], config=_config(mode="on"))
+
+    executed = execute_openings(records, config=_config(mode="on"), opener=opener, already={})
+
+    assert executed[0].decision != "opened"
+    assert opener.calls == []
+
+
+def test_what_went_to_the_board_reaches_the_journal(runtime_path: Path) -> None:
+    factory = _session(runtime_path)
+    records, _ = _passes(
+        [_event(sub_label="Алексей", name_score=0.96)],
+        config=_config(mode="on"),
+    )
+    executed = execute_openings(
+        records,
+        config=_config(mode="on"),
+        opener=_FakeOpener(PulseResult(True, "ок", 500)),
+        already={},
+    )
+
+    with factory() as session:
+        record_passes(session, executed)
+        session.commit()
+        stored = session.query(GatePass).one()
+
+    assert stored.decision == "opened"
+    assert stored.pulse_ms == 500
+    assert stored.modbus_ok is True
+
+
+def test_a_reread_event_does_not_reopen_the_gate(runtime_path: Path) -> None:
+    """Самый дорогой дефект этой работы, пойманный живым прогоном 2026-08-11.
+
+    Событие перечитывается каждый опрос всё окно наблюдения. Исполнение
+    пропускалось по журналу правильно, но строка при этом несла прежнее «открыл
+    бы» — и следующая запись переписывала «открыл» обратно. Ещё через опрос
+    служба видела незавершённое событие и открывала снова: калитка щёлкала
+    каждые две секунды пять минут подряд.
+
+    Отсюда правило: за «открыл» и «отказ» стоит уже случившееся действие, и
+    переоценка того же события их не трогает.
+    """
+    factory = _session(runtime_path)
+    opener = _FakeOpener(PulseResult(True, "Импульс 500 мс на канал 2", 500))
+    config = _config(mode="on")
+
+    for _ in range(4):
+        records, _ = _passes([_event(sub_label="Алексей", name_score=0.96)], config=config)
+        with factory() as session:
+            already = {row.frigate_event_id: row.decision for row in session.query(GatePass)}
+            record_passes(
+                session,
+                execute_openings(records, config=config, opener=opener, already=already),
+            )
+            session.commit()
+
+    with factory() as session:
+        stored = session.query(GatePass).one()
+
+    assert opener.calls == [(2, 500)]
+    assert stored.decision == "opened"
+    assert stored.pulse_ms == 500
+    assert stored.modbus_ok is True
+
+
+def test_a_failed_opening_is_not_downgraded_either(runtime_path: Path) -> None:
+    """«Отказ» — тоже факт: импульс пробовали и он не ушёл."""
+    factory = _session(runtime_path)
+    opener = _FakeOpener(PulseResult(False, "Плата не ответила", 500))
+    config = _config(mode="on")
+
+    for _ in range(3):
+        records, _ = _passes([_event(sub_label="Алексей", name_score=0.96)], config=config)
+        with factory() as session:
+            already = {row.frigate_event_id: row.decision for row in session.query(GatePass)}
+            record_passes(
+                session,
+                execute_openings(records, config=config, opener=opener, already=already),
+            )
+            session.commit()
+
+    with factory() as session:
+        stored = session.query(GatePass).one()
+
+    assert opener.calls == [(2, 500)]
+    assert stored.decision == "error"
