@@ -432,12 +432,14 @@ def test_only_one_module_can_write_to_the_board() -> None:
         Path("src/web/door_monitor.py"),
         Path("src/web/app.py"),
     ]
-    forbidden = ("write_register_frame", "write_coil", "0x06", "0x0F")
+    # Modbus пишет функциями 0x05, 0x06 и 0x0F. Ни одной из них не должно быть
+    # там, где записи не место, — как и самой сборки кадра.
+    forbidden = ("flash_frame", "write_coil", "write_register", "0x05", "0x06", "0x0F")
 
     for path in silent:
         text = path.read_text(encoding="utf-8")
         assert not any(marker in text for marker in forbidden), f"{path} умеет писать на плату"
-    assert "write_register_frame" in Path("src/gate/opener.py").read_text(encoding="utf-8")
+    assert "flash_frame" in Path("src/gate/opener.py").read_text(encoding="utf-8")
 
 
 def test_the_automatic_path_never_touches_the_board() -> None:

@@ -10,9 +10,9 @@ import pytest
 from src.gate.opener import (
     MAX_PULSE_MS,
     RelayOpener,
-    flash_register,
-    parse_write_reply,
-    write_register_frame,
+    flash_address,
+    flash_frame,
+    parse_flash_reply,
 )
 from src.web.door_monitor import modbus_crc16
 
@@ -37,20 +37,41 @@ def _fake_board(sent: list[bytes]) -> tuple[int, threading.Thread, socket.socket
 
 def test_the_channel_numbering_starts_at_one_for_people() -> None:
     """На плате каналы считаются с нуля, у человека — с единицы."""
-    assert flash_register(1) == 0x0200
-    assert flash_register(2) == 0x0201
+    assert flash_address(1) == 0x0200
+    assert flash_address(2) == 0x0201
     with pytest.raises(ValueError, match="диапазона"):
-        flash_register(0)
+        flash_address(0)
     with pytest.raises(ValueError, match="диапазона"):
-        flash_register(9)
+        flash_address(9)
 
 
-def test_the_frame_matches_the_vendor_documentation() -> None:
-    """Команда 0x06 «записать один регистр», адрес платы 0x01, CRC в конце."""
-    frame = write_register_frame(0x0200, 5)
+def test_the_frame_matches_the_board() -> None:
+    """Команда 0x05 «записать одну катушку», адрес платы 0x01, CRC в конце.
 
-    assert frame[:6] == bytes((0x01, 0x06, 0x02, 0x00, 0x00, 0x05))
+    Не 0x06: регистров хранения у платы нет вовсе — измерено на живом железе
+    2026-08-11, чтение функцией 0x03 отвечает отказом по любому адресу.
+    Проверенный на плате кадр «мигнуть» на полсекунды выглядит ровно так.
+    """
+    frame = flash_frame(0x0200, 5)
+
+    assert frame[:6] == bytes((0x01, 0x05, 0x02, 0x00, 0x00, 0x05))
     assert modbus_crc16(frame[:-2]) == frame[-2:]
+    # Этот кадр плата приняла эхом на живой проверке 2026-08-11: канал 8,
+    # одна десятая секунды. Сверка с ним ловит и порядок байтов, и CRC.
+    assert flash_frame(0x0207, 1).hex() == "010502070001bc73"
+
+
+def test_a_refusal_is_translated_into_words() -> None:
+    """`01 86 02` — это «недопустимый адрес», и человеку надо сказать именно это.
+
+    Ровно этот кадр плата прислала 2026-08-11 на первую попытку открыть калитку
+    функцией 0x06. Сообщение «ответ короче эха» было формально верным и
+    совершенно бесполезным: причину пришлось искать руками.
+    """
+    with pytest.raises(ValueError, match="недопустимый адрес"):
+        parse_flash_reply(bytes.fromhex("018602c3a1"), 0x0200, 5)
+    with pytest.raises(ValueError, match="функция не поддерживается"):
+        parse_flash_reply(bytes.fromhex("01850100"), 0x0200, 5)
 
 
 def test_a_reply_that_is_not_the_echo_is_refused() -> None:
@@ -59,15 +80,15 @@ def test_a_reply_that_is_not_the_echo_is_refused() -> None:
     В этот момент в журнал собирается строка «открыл» — принять чужой или битый
     ответ значило бы записать открытие, которого не было.
     """
-    good = write_register_frame(0x0200, 5)
-    parse_write_reply(good, 0x0200, 5)
+    good = flash_frame(0x0200, 5)
+    parse_flash_reply(good, 0x0200, 5)
 
     with pytest.raises(ValueError, match="короче"):
-        parse_write_reply(good[:4], 0x0200, 5)
+        parse_flash_reply(good[:4], 0x0200, 5)
     with pytest.raises(ValueError, match="CRC"):
-        parse_write_reply(good[:-2] + b"\x00\x00", 0x0200, 5)
+        parse_flash_reply(good[:-2] + b"\x00\x00", 0x0200, 5)
     with pytest.raises(ValueError, match="не тем"):
-        parse_write_reply(write_register_frame(0x0201, 5), 0x0200, 5)
+        parse_flash_reply(flash_frame(0x0201, 5), 0x0200, 5)
 
 
 def test_a_pulse_is_one_command_that_ends_itself() -> None:
@@ -86,7 +107,7 @@ def test_a_pulse_is_one_command_that_ends_itself() -> None:
 
     assert result.ok
     assert len(sent) == 1
-    assert sent[0] == write_register_frame(0x0200, 5)
+    assert sent[0] == flash_frame(0x0200, 5)
 
 
 def test_an_unreachable_board_is_reported_not_raised() -> None:
@@ -116,4 +137,4 @@ def test_the_pulse_is_bounded() -> None:
 
     assert result.ok
     assert result.pulse_ms == MAX_PULSE_MS
-    assert sent[0] == write_register_frame(0x0200, MAX_PULSE_MS // 100)
+    assert sent[0] == flash_frame(0x0200, MAX_PULSE_MS // 100)
