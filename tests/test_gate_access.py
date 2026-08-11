@@ -763,3 +763,86 @@ def test_a_failed_opening_is_not_downgraded_either(runtime_path: Path) -> None:
 
     assert opener.calls == [(2, 500)]
     assert stored.decision == "error"
+
+
+def test_a_request_from_a_previous_boot_never_opens_the_gate(
+    runtime_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Обрыв питания не должен открывать калитку при следующей загрузке.
+
+    Возраст по часам защищает не всегда: после обрыва RTC отстаёт, chrony
+    подтягивает время не сразу, и просьба из прошлой жизни выглядит свежей.
+    Проверено 2026-08-11 — в этом случае калитка открывалась сама, ночью, без
+    человека. Идентификатор загрузки от часов не зависит вовсе.
+    """
+    factory = _session(runtime_path)
+    opener = _FakeOpener(PulseResult(True, "ок", 500))
+    monkeypatch.setattr("src.gate.access.boot_id", lambda: "загрузка-нынешняя")
+
+    with factory() as session:
+        result = handle_open_request(
+            session,
+            request=OpenRequest(
+                id="a", requested_at=1000.0, boot_id="загрузка-прошлая"
+            ),
+            config=_config(mode="off"),
+            opener=opener,
+            now=1000.5,
+            timezone=MOSCOW,
+        )
+        rows = list(session.query(GatePass))
+
+    assert result.ok is False
+    assert "прошлой загрузки" in result.detail
+    assert opener.calls == []
+    assert rows == []
+
+
+def test_a_clock_that_stepped_backwards_is_not_freshness(runtime_path: Path) -> None:
+    """Отрицательный возраст — это не «свежая просьба», а неизвестно что.
+
+    Человек нажмёт ещё раз, и это дешевле, чем открыть калитку неизвестно
+    когда.
+    """
+    factory = _session(runtime_path)
+    opener = _FakeOpener(PulseResult(True, "ок", 500))
+
+    with factory() as session:
+        result = handle_open_request(
+            session,
+            request=OpenRequest(id="a", requested_at=1000.0),
+            config=_config(mode="off"),
+            opener=opener,
+            now=1000.0 - 3600,
+            timezone=MOSCOW,
+        )
+
+    assert result.ok is False
+    assert opener.calls == []
+
+
+def test_the_same_boot_is_not_an_obstacle(
+    runtime_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Обычное нажатие проверку загрузки не замечает."""
+    factory = _session(runtime_path)
+    opener = _FakeOpener(PulseResult(True, "ок", 500))
+    monkeypatch.setattr("src.gate.access.boot_id", lambda: "загрузка-нынешняя")
+
+    with factory() as session:
+        result = handle_open_request(
+            session,
+            request=OpenRequest(
+                id="a", requested_at=1000.0, boot_id="загрузка-нынешняя"
+            ),
+            config=_config(mode="off"),
+            opener=opener,
+            now=1000.4,
+            timezone=MOSCOW,
+        )
+        session.commit()
+
+    assert result.ok
+    assert opener.calls == [(2, 500)]

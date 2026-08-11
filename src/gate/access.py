@@ -47,6 +47,7 @@ from src.common.gate_open_request import (
     REQUEST_TTL_SECONDS,
     OpenRequest,
     OpenResult,
+    boot_id,
     load_open_request,
     load_open_result,
     open_request_path,
@@ -390,8 +391,24 @@ def handle_open_request(
     десяток секунд, человеку у калитки уже не нужно, а сработать оно успело бы
     ровно тогда, когда он ушёл.
     """
-    if now - request.requested_at > REQUEST_TTL_SECONDS:
-        logger.warning("Просьба открыть калитку устарела и не исполнена")
+    current_boot = boot_id()
+    if request.boot_id and current_boot and request.boot_id != current_boot:
+        # Узел перезагружался между нажатием и этой секундой. Часам здесь
+        # верить нельзя: после обрыва питания RTC отстаёт, chrony подтягивает
+        # время не сразу, и просьба из прошлой жизни выглядит свежей.
+        logger.warning("Просьба открыть калитку осталась от прошлой загрузки — не исполняю")
+        return OpenResult(
+            id=request.id,
+            ok=False,
+            detail="Просьба осталась от прошлой загрузки узла",
+            finished_at=now,
+        )
+    age = now - request.requested_at
+    if not 0 <= age <= REQUEST_TTL_SECONDS:
+        # Отрицательный возраст — часы шагнули назад. Это не «свежая просьба»,
+        # а неизвестно что; человек нажмёт ещё раз, и это дешевле, чем открыть
+        # калитку неизвестно когда.
+        logger.warning("Просьба открыть калитку негодна по времени (возраст %.1f с)", age)
         return OpenResult(
             id=request.id,
             ok=False,

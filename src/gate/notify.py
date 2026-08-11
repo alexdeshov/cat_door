@@ -27,7 +27,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from src.common.camera_registry import camera_registry_path, load_registry
-from src.common.durable_write import write_text_durably
+from src.common.durable_write import publish_file_durably, write_text_durably
 from src.common.frigate_config import frigate_camera_name
 from src.common.notifications import NotificationGate, notification_snapshot_path
 from src.common.sd_notify import Notifier
@@ -180,7 +180,13 @@ def fetch_snapshot(api_url: str, event: GateEvent, destination: Path, *, timeout
     if not body:
         return False
     destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_bytes(body)
+    # Через временный файл: снимок прохода живёт в журнале столько же, сколько
+    # строка, и обрыв питания посреди записи оставил бы в нём битую картинку
+    # навсегда. Уведомлениям это безразлично — они свой файл сразу удаляют, —
+    # но путь общий, а цена одна лишняя операция.
+    temporary = destination.with_name(f".{destination.name}.part")
+    temporary.write_bytes(body)
+    publish_file_durably(temporary, destination)
     return True
 
 
