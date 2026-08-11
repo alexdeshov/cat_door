@@ -89,7 +89,7 @@ from src.common.detection_config import (
     save_detection_config,
 )
 from src.common.detection_stats import read_detection_stats
-from src.common.frigate_config import RECORDING_RETENTION
+from src.common.frigate_config import RECORDING_RETENTION, frigate_camera_name
 from src.common.gate_access_config import (
     GateAccessConfig,
     GateSpec,
@@ -1546,7 +1546,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "circuits": circuits_view(circuits),
                 "circuit_titles": CIRCUIT_TITLES,
                 "gate_cameras": [
-                    _camera_view(camera)
+                    # Имя во Frigate — рядом с карточкой камеры намеренно. В
+                    # настройках калитки хранится именно оно: события приходят
+                    # с ним, а не с идентификатором инвентаря, и `test-cam`
+                    # против `test_cam` означал бы «камера не назначена
+                    # калиткой» на каждый проход — молча.
+                    {**_camera_view(camera), "frigate_name": frigate_camera_name(camera.id)}
                     for camera in registry.cameras
                     if camera.circuit == "gate"
                 ],

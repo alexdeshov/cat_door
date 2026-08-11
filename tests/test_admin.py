@@ -2649,3 +2649,29 @@ def test_an_unreachable_face_library_is_not_an_empty_one(
     page = client.get("/gate")
 
     assert "спросить не удалось" in page.text
+
+
+def test_the_gate_is_saved_under_its_frigate_name(runtime_path: Path, monkeypatch) -> None:
+    """Инвентарь знает камеру как `test-cam`, а Frigate шлёт события от `test_cam`.
+
+    Дефис в имени камеры Frigate недопустим, и генератор конфигурации меняет
+    его на подчёркивание. Сохранив идентификатор инвентаря, панель получила бы
+    настройку, которая никогда не совпадёт с событием, — и каждый проход
+    получал бы «камера не назначена калиткой». Молча.
+    """
+    from src.common.camera_registry import CameraRecord, CameraRegistry
+
+    save_registry(
+        camera_registry_path(runtime_path),
+        CameraRegistry(
+            cameras=[
+                CameraRecord(id="test-cam", title="на калитке", circuit="gate", host="10.0.0.1")
+            ]
+        ),
+    )
+    client = make_client(runtime_path, monkeypatch)
+
+    page = client.get("/gate")
+
+    assert '<option value="test_cam"' in page.text
+    assert '<option value="test-cam"' not in page.text
