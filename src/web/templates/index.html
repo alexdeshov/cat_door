@@ -251,6 +251,37 @@
   {% for name in known_cat_names %}<option value="{{ name }}">{% endfor %}
 </datalist>
 
+{# Запоминание котов. Не обучение: сеть не меняется, пересчитываются эталоны —
+   средние векторы размеченных кропов. Поэтому это минуты на узле, а не ночь на
+   макбуке, и поэтому новый кот заводится здесь же. #}
+<section class="panel" id="enrolment">
+  <div class="panel-head">
+    <h2>Память о котах</h2>
+    <span class="muted">эталоны считаются на узле</span>
+  </div>
+  <div class="panel-body">
+    <div class="controls">
+      <button id="rebuild-prototypes" type="button">Запомнить заново</button>
+      <span id="prototypes-status" class="muted data" style="font-size: 12px">
+        {{ prototypes_status.message if prototypes_status else "Ещё не пересчитывались" }}
+      </span>
+    </div>
+    <p class="muted" style="font-size: 13px">
+      Кнопка прогоняет размеченные проходы через стоящую модель и пересчитывает
+      эталон каждого кота. Сеть при этом не обучается: новый кот получает эталон
+      по десятку размеченных проходов, и макбук для этого не нужен вовсе.
+    </p>
+    <p class="muted" style="font-size: 13px">
+      Новые эталоны применяются, только если они не пускают больше чужих, чем
+      прежние. Если стало хуже — остаются старые, и здесь будет сказано почему.
+      Чего пересчёт не умеет: улучшить само зрение. Если модель не различает
+      двух чёрных котов в темноте, среднее этого не исправит — это работа для
+      обучения на макбуке.
+    </p>
+    <div id="prototypes-report" class="muted data" style="font-size: 13px"></div>
+  </div>
+</section>
+
 <section class="panel">
   <div class="panel-head">
     <h2>Обучение</h2>
@@ -623,6 +654,63 @@
       : `Не получилось: ${result.detail}`;
     if (response.ok) location.reload();
   });
+
+  // Память о котах: пересчёт эталонов на узле. Опрос статуса — тот же приём,
+  // что у обучения: работа живёт в отдельном процессе и переживает F5.
+  const prototypesButton = document.querySelector("#rebuild-prototypes");
+  const prototypesStatus = document.querySelector("#prototypes-status");
+  const prototypesReport = document.querySelector("#prototypes-report");
+
+  function showPrototypes(status) {
+    if (!status) return;
+    prototypesStatus.textContent = status.message || status.state || "";
+    const busy = ["starting", "preparing", "running"].includes(status.state);
+    prototypesButton.disabled = busy;
+    const report = status.report;
+    if (!report || !report.views) { prototypesReport.textContent = ""; return; }
+    const lines = [];
+    for (const [view, data] of Object.entries(report.views)) {
+      if (data.skipped) { lines.push(`${view}: ${data.skipped}`); continue; }
+      const before = data.before || {}, after = data.after || {};
+      lines.push(
+        `${view}: узнано своих ${after.recognised} (было ${before.recognised}), ` +
+        `чужих пущено ${after.false_accepts} (было ${before.false_accepts}), ` +
+        `порог ${data.threshold}, ${data.applied ? "применено" : "оставлены прежние"}`
+      );
+      const thin = Object.entries(data.too_thin || {});
+      if (thin.length) {
+        lines.push(`  мало кадров: ${thin.map(([n, c]) => `${n} — ${c}`).join(", ")}`);
+      }
+    }
+    prototypesReport.textContent = lines.join("\n");
+  }
+
+  async function refreshPrototypes() {
+    try {
+      showPrototypes(await (await fetch("/api/identity/prototypes/status")).json());
+    } catch (error) {
+      prototypesStatus.textContent = error.message;
+    }
+  }
+
+  prototypesButton?.addEventListener("click", async () => {
+    prototypesButton.disabled = true;
+    prototypesStatus.textContent = "…";
+    try {
+      const response = await fetch("/api/identity/prototypes/rebuild", {method: "POST"});
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.detail || `ошибка ${response.status}`);
+      prototypesStatus.textContent = "Считаю эталоны…";
+    } catch (error) {
+      prototypesStatus.textContent = error.message;
+      prototypesButton.disabled = false;
+    }
+  });
+
+  if (prototypesButton) {
+    refreshPrototypes();
+    setInterval(refreshPrototypes, 5000);
+  }
 
   const trainingButton = document.querySelector("#start-local-training");
   trainingButton?.addEventListener("click", async () => {

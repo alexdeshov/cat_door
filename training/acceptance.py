@@ -32,10 +32,21 @@ def run_onnx_acceptance(
     from PIL import Image
 
     labels = list(model_info["labels"])
+    # У модели эмбеддингов решение принимается расстоянием до эталона, а не
+    # вероятностью класса, и порог у неё свой — тот, что подобран при обучении.
+    # `accept_score` из критериев приёмки к косинусу неприменим: 0.9 там значит
+    # совсем другое, и приёмка отвергла бы годную модель целиком.
+    embedding_prototypes = (
+        dict(model_info["prototypes"])
+        if str(model_info.get("kind", "logits")) == "embedding"
+        else None
+    )
     image_size = int(model_info.get("image_size", 224))
     mean = np.asarray(model_info.get("normalization_mean", [0.485, 0.456, 0.406]))
     std = np.asarray(model_info.get("normalization_std", [0.229, 0.224, 0.225]))
     accept_score = float(thresholds["accept_score"])
+    if embedding_prototypes is not None:
+        accept_score = float(model_info.get("threshold", 0.55))
     max_far = float(thresholds["max_false_accept_rate"])
     max_frr = float(thresholds["max_false_reject_rate"])
     max_mean_inference_ms = float(thresholds["max_mean_inference_ms"])
@@ -52,11 +63,17 @@ def run_onnx_acceptance(
             )
         tensor = ((array / 255.0 - mean) / std).transpose(2, 0, 1)[None].astype(np.float32)
         started = time.perf_counter()
-        logits = session.run(None, {input_name: tensor})[0]
+        output = session.run(None, {input_name: tensor})[0]
         timings.append((time.perf_counter() - started) * 1000)
-        scores = _softmax(logits)[0]
-        best = int(np.argmax(scores))
-        predicted.append(labels[best] if float(scores[best]) >= accept_score else None)
+        if embedding_prototypes is not None:
+            from src.common.prototypes import match
+
+            named, _, _ = match(output[0], embedding_prototypes, threshold=accept_score)
+            predicted.append(named)
+        else:
+            scores = _softmax(output)[0]
+            best = int(np.argmax(scores))
+            predicted.append(labels[best] if float(scores[best]) >= accept_score else None)
         expected.append(item.label)
     return calculate_metrics(
         expected,
@@ -103,11 +120,24 @@ def accept_package(
         temporary_path = Path(temporary)
         with zipfile.ZipFile(package_path) as archive:
             archive.extract(model_name, temporary_path)
+            # Метаданные берутся ракурса, а не пакета. В пакете лежит общий
+            # `model_info.json` — копия первого обученного ракурса, — и для
+            # классификатора разница была невелика: классы у обоих одни. У
+            # эмбеддингов там **эталоны**, и чужие эталоны означают, что модель
+            # не узнаёт никого: 2026-08-11 приёмка side отвергла все 228 кропов,
+            # хотя сама модель узнавала 77% своих.
+            model_info = verification["model_info"]
+            per_view = f"{view}_model.json" if view else ""
+            if per_view in set(archive.namelist()):
+                archive.extract(per_view, temporary_path)
+                model_info = json.loads(
+                    (temporary_path / per_view).read_text(encoding="utf-8")
+                )
         metrics = run_onnx_acceptance(
             temporary_path / model_name,
             items,
             dataset_root,
-            verification["model_info"],
+            model_info,
             verification["thresholds"],
         )
     warnings: list[str] = []

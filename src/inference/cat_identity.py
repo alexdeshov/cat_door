@@ -8,6 +8,7 @@ from typing import Any
 
 import numpy as np
 
+from src.common.prototypes import DEFAULT_MARGIN, match
 from src.inference.cat_detector import DetectorError
 from src.inference.preprocessing import (
     IDENTITY_NORMALIZATION_MEAN,
@@ -24,7 +25,7 @@ DEFAULT_EMBEDDING_THRESHOLD = 0.55
 # Насколько лучший должен опережать второго. Два кота, похожие в сумерках,
 # дают близкие расстояния до обоих эталонов, и выбирать между ними по третьему
 # знаку — значит выдавать монетку за решение.
-DEFAULT_PROTOTYPE_MARGIN = 0.05
+DEFAULT_PROTOTYPE_MARGIN = DEFAULT_MARGIN
 
 
 @dataclass(frozen=True)
@@ -32,11 +33,6 @@ class IdentityPrediction:
     name: str | None
     confidence: float
     candidate_name: str | None = None
-
-
-def _normalise(vector: np.ndarray) -> np.ndarray:
-    norm = float(np.linalg.norm(vector))
-    return vector if norm == 0.0 else vector / norm
 
 
 class OpenVinoCatIdentity:
@@ -63,6 +59,8 @@ class OpenVinoCatIdentity:
         metadata_path = model_path.with_suffix(".json")
         if not model_path.is_file() or not metadata_path.is_file():
             raise DetectorError(f"identity model or metadata is missing: {model_path}")
+        self._metadata_path = metadata_path
+        self._metadata_mtime = metadata_path.stat().st_mtime
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         self.kind = str(metadata.get("kind", "logits"))
         self.image_size = int(metadata.get("image_size", 160))
@@ -86,7 +84,7 @@ class OpenVinoCatIdentity:
                     f"embedding model without prototypes is useless: {metadata_path}"
                 )
             self.prototypes = {
-                str(name): _normalise(np.asarray(vector, dtype=np.float32))
+                str(name): np.asarray(vector, dtype=np.float32)
                 for name, vector in prototypes.items()
             }
             self.labels = sorted(self.prototypes)
@@ -106,14 +104,64 @@ class OpenVinoCatIdentity:
         self._compiled: Any = compiled
         self._output = compiled.output(0)
 
-    def predict(self, frame: np.ndarray, threshold: float) -> IdentityPrediction:
+    def reload_prototypes_if_changed(self) -> bool:
+        """Перечитать эталоны, если их пересчитали. Возвращает, менялось ли.
+
+        Кнопка «Запомнить заново» переписывает только метаданные — сама сеть
+        остаётся прежней, — и ради новых эталонов перезапускать recorder
+        незачем: перезапуск оборвал бы запись прохода, который сейчас идёт.
+
+        Битый или наполовину записанный файл не применяется: лучше работать на
+        прежних эталонах, чем на половине новых. Запись атомарная, так что
+        такого быть не должно, — но «не должно» не повод не проверить.
+        """
+        if self.kind != "embedding":
+            return False
+        try:
+            mtime = self._metadata_path.stat().st_mtime
+        except OSError:
+            return False
+        if mtime == self._metadata_mtime:
+            return False
+        try:
+            metadata = json.loads(self._metadata_path.read_text(encoding="utf-8"))
+            prototypes = {
+                str(name): np.asarray(vector, dtype=np.float32)
+                for name, vector in metadata["prototypes"].items()
+            }
+            threshold = float(metadata.get("threshold", self.threshold))
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            logger.warning("Новые эталоны не прочитаны (%s), работаю на прежних", exc)
+            return False
+        if not prototypes:
+            logger.warning("Новые эталоны пусты — работаю на прежних")
+            return False
+        self._metadata_mtime = mtime
+        self.prototypes = prototypes
+        self.threshold = threshold
+        self.labels = sorted(prototypes)
+        logger.info(
+            "Эталоны перечитаны: %s, порог %.2f", ", ".join(self.labels), threshold
+        )
+        return True
+
+    def embed(self, frame: np.ndarray) -> np.ndarray:
+        """Сырой ответ модели по кропу.
+
+        Вынесено отдельно ради пересчёта эталонов на узле: там нужен сам
+        вектор, а не решение о нём, и гонять кроп через `predict` только чтобы
+        выбросить вердикт — значит считать одно и то же дважды.
+        """
         tensor = prepare_identity_tensor(
             frame,
             self.image_size,
             mean=self.mean,
             std=self.std,
         )
-        output = np.asarray(self._compiled([tensor])[self._output])[0]
+        return np.asarray(self._compiled([tensor])[self._output])[0]
+
+    def predict(self, frame: np.ndarray, threshold: float) -> IdentityPrediction:
+        output = self.embed(frame)
         if self.kind == "embedding":
             return self._match(output)
         shifted = output - output.max()
@@ -135,18 +183,10 @@ class OpenVinoCatIdentity:
         значило «почти монетка». Пороги, настроенные для одной шкалы, к другой
         не применимы.
         """
-        vector = _normalise(np.asarray(embedding, dtype=np.float32).reshape(-1))
-        similarities = sorted(
-            ((float(np.dot(prototype, vector)), name) for name, prototype in self.prototypes.items()),
-            reverse=True,
+        name, candidate, score = match(
+            embedding,
+            self.prototypes,
+            threshold=self.threshold,
+            margin=self.prototype_margin,
         )
-        best_score, best_name = similarities[0]
-        runner_up = similarities[1][0] if len(similarities) > 1 else -1.0
-        close_enough = best_score >= self.threshold
-        # Отрыв от второго нужен только когда есть от кого отрываться.
-        distinct = len(similarities) < 2 or (best_score - runner_up) >= self.prototype_margin
-        return IdentityPrediction(
-            name=best_name if close_enough and distinct else None,
-            confidence=best_score,
-            candidate_name=best_name,
-        )
+        return IdentityPrediction(name=name, confidence=score, candidate_name=candidate)

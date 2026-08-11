@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any
 
 from src.common.metrics import FOREIGN_LABEL, REJECT_LABELS
+from src.common.prototypes import centroid, choose_threshold
 from training.dataset import DatasetItem, load_manifest
 from training.train_classifier import build_pretrained_model, build_transforms
 
@@ -40,8 +41,6 @@ ARC_SCALE = 30.0
 ARC_MARGIN = 0.2
 # Доля чужих, которую согласны принять за своих при подборе порога. Один из
 # ста — та же цена ошибки, что записана в критериях приёмки.
-TARGET_FALSE_ACCEPT_RATE = 0.01
-FALLBACK_THRESHOLD = 0.55
 
 
 def _build_arc_head(embedding_dim: int, classes: int) -> Any:
@@ -85,38 +84,6 @@ def _build_backbone(embedding_dim: int, weights_path: Path | None) -> Any:
             return functional.normalize(self.backbone(images), dim=1)
 
     return Embedder()
-
-
-def _choose_threshold(
-    same: list[float],
-    other: list[float],
-) -> tuple[float, dict[str, float]]:
-    """Порог по отложенному набору: где чужие ещё не проходят.
-
-    Берётся такая близость, при которой доля принятых чужих не выше одного
-    процента. Если чужих в наборе нет, назначать порог не из чего — и честнее
-    сказать это вслух, чем выдать удобное число.
-    """
-    stats = {
-        "same_mean": sum(same) / len(same) if same else 0.0,
-        "other_mean": sum(other) / len(other) if other else 0.0,
-        "same_min": min(same) if same else 0.0,
-        "other_max": max(other) if other else 0.0,
-    }
-    if not other:
-        return FALLBACK_THRESHOLD, stats
-    ranked = sorted(other, reverse=True)
-    allowed = int(len(ranked) * TARGET_FALSE_ACCEPT_RATE)
-    # Чуть выше самого похожего чужого, которого мы согласны пропустить.
-    threshold = round(min(ranked[allowed] + 0.01, 0.95), 3)
-    stats["threshold_from_foreign"] = threshold
-    # Сколько своих проходит выбранный порог. Порог, отсекающий чужих идеально
-    # и своих заодно, — это не строгая модель, а неработающая; молча выдать
-    # такую значило бы отдать на узел то, что никого никогда не узнает.
-    stats["same_above_threshold"] = (
-        sum(score >= threshold for score in same) / len(same) if same else 0.0
-    )
-    return threshold, stats
 
 
 def train(
@@ -215,8 +182,7 @@ def train(
         mask = train_targets == label_to_index[label]
         if not bool(mask.any()):
             continue
-        centroid = train_vectors[mask].mean(dim=0)
-        prototypes[label] = (centroid / centroid.norm()).tolist()
+        prototypes[label] = centroid(train_vectors[mask].tolist())
     if not prototypes:
         raise ValueError("no prototypes could be built: named cats have no train crops")
 
@@ -241,7 +207,7 @@ def train(
                 correct += 1
         else:
             other.append(float(scores.max()))
-    threshold, stats = _choose_threshold(same, other)
+    threshold, stats = choose_threshold(same, other)
 
     output.parent.mkdir(parents=True, exist_ok=True)
     torch.save(

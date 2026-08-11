@@ -780,6 +780,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def current_circuits() -> NodeCircuits:
         return load_circuits(circuits_path(settings.data_dir))
 
+    def _latest_status(runs_root: Path) -> dict[str, object] | None:
+        statuses = sorted(runs_root.glob("*/status.json"))
+        return _read_status(statuses[-1]) if statuses else None
+
     def current_gate_access() -> GateAccessConfig:
         return load_gate_access_config(
             gate_access_config_path(settings.data_dir), GateAccessConfig()
@@ -1088,6 +1092,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "stream_version": uuid4().hex,
                 "detection_config": current_detection_config(),
                 "notifications": _notifications_view(settings),
+                "prototypes_status": _latest_status(
+                    settings.data_dir / "training" / "prototypes"
+                ),
             },
         )
 
@@ -1964,6 +1971,79 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return json.loads(statuses[-1].read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise HTTPException(500, "Не удалось прочитать статус обучения") from exc
+
+    @app.post("/api/identity/prototypes/rebuild", status_code=202)
+    def rebuild_prototypes() -> dict[str, object]:
+        """Пересчитать эталоны котов по свежей разметке — прямо на узле.
+
+        Сеть при этом не обучается: размеченные проходы прогоняются через уже
+        стоящую модель, и эталон каждого кота пересчитывается как среднее его
+        векторов. Поэтому это минуты процессора, а не ночь, и поэтому новый кот
+        заводится без макбука вовсе.
+
+        Работа уходит отдельным процессом по той же причине, что и обучение:
+        перезапуск веб-службы не должен её обрывать.
+        """
+        runs_root = settings.data_dir / "training" / "prototypes"
+        existing = sorted(runs_root.glob("*/status.json"))
+        if existing:
+            latest = _read_status(existing[-1]) or {}
+            if (
+                latest.get("state") in ACTIVE_TRAINING_STATES
+                and not _expire_stale_training(existing[-1], latest)
+            ):
+                raise HTTPException(409, "Пересчёт эталонов уже выполняется")
+        identity_paths = {
+            role: path
+            for role, path in (
+                ("face", settings.identity_face_model_path),
+                ("side", settings.identity_side_model_path),
+            )
+            if path is not None and path.is_file()
+        }
+        if not identity_paths:
+            raise HTTPException(422, "Не установлена ни одна модель опознания")
+        run_id = f"{datetime.now(UTC):%Y%m%d-%H%M%S}-{uuid4().hex[:8]}"
+        output_dir = runs_root / run_id
+        status_path = output_dir / "status.json"
+        write_status(status_path, state="starting", message="Запуск отдельного процесса")
+        command = [
+            sys.executable,
+            "-m",
+            "training.enrolment",
+            str(settings.resolved_database_path.resolve()),
+            str(settings.data_dir.resolve()),
+            settings.ffmpeg_path,
+            str(output_dir.resolve()),
+            "--detector-model",
+            str(settings.detector_model_path.resolve()),
+            "--detector-device",
+            settings.detector_device,
+        ]
+        for role, path in identity_paths.items():
+            command.extend([f"--{role}-model", str(path.resolve())])
+        try:
+            with (output_dir / "enrolment.log").open("ab") as log:
+                process = spawn_detached(
+                    command,
+                    cwd=Path.cwd(),
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                )
+        except OSError as exc:
+            write_status(status_path, state="failed", message="Не удалось запустить Python")
+            raise HTTPException(500, "Не удалось запустить пересчёт эталонов") from exc
+        return {"run_id": run_id, "pid": process.pid, "state": "starting"}
+
+    @app.get("/api/identity/prototypes/status")
+    def prototypes_status() -> dict[str, object]:
+        statuses = sorted((settings.data_dir / "training" / "prototypes").glob("*/status.json"))
+        if not statuses:
+            return {"state": "idle", "message": "Эталоны ещё не пересчитывались"}
+        try:
+            return json.loads(statuses[-1].read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise HTTPException(500, "Не удалось прочитать статус пересчёта") from exc
 
     @app.post("/api/evaluations", status_code=202)
     def start_evaluation(

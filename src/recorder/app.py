@@ -972,6 +972,18 @@ def monitor_automatic(
                     stopped_by_operator = True
                     return
             if now - last_config_check_at >= 1 and machine.state.value == "idle":
+                # Эталоны котов могли пересчитать кнопкой в админке. Это не
+                # новая сеть, а новые числа рядом с ней, и ради них
+                # перезапускать recorder незачем: перезапуск оборвал бы проход,
+                # который сейчас пишется.
+                for role, model in identity_models.items():
+                    if model.reload_prototypes_if_changed():
+                        journal.write(
+                            "identity_prototypes_reloaded",
+                            role=role,
+                            labels=model.labels,
+                            threshold=model.threshold,
+                        )
                 updated_config = load_detection_config(config_path, runtime_config)
                 if updated_config != runtime_config:
                     with config_lock:
