@@ -127,6 +127,30 @@ def frigate_stats(api_url: str, *, timeout: float = 2.0) -> dict[str, Any] | Non
     return payload if isinstance(payload, dict) else None
 
 
+def frigate_face_names(api_url: str, *, timeout: float = 2.0) -> list[str] | None:
+    """Имена из библиотеки лиц Frigate. `None` — не спросили.
+
+    Список имён в админке берётся отсюда, а не вводится руками: два списка имён
+    неизбежно разъезжаются, и, разъехавшись, молча перестают совпадать —
+    человек остаётся в разрешённых под именем, которого в библиотеке уже нет.
+
+    Недоступность отличается от пустой библиотеки: первое значит «спросить не
+    удалось», второе — «лиц ещё не заводили», и путать их нельзя.
+    """
+    if not api_url:
+        return None
+    try:
+        with urllib.request.urlopen(f"{api_url.rstrip('/')}/api/faces", timeout=timeout) as answer:
+            payload = json.loads(answer.read().decode("utf-8", "replace"))
+    except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError):
+        return None
+    if isinstance(payload, dict):
+        return sorted(str(name) for name in payload)
+    if isinstance(payload, list):
+        return sorted(str(name) for name in payload)
+    return None
+
+
 def gate_status(unit: str, api_url: str = "") -> GateStatus:
     """Состояние службы контура калитки.
 

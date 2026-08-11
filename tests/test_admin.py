@@ -2491,3 +2491,161 @@ def test_the_gate_tab_still_says_mechanics_are_not_controlled(
     page = client.get("/gate")
 
     assert "не управляется" in page.text
+
+
+def test_the_gate_tab_offers_two_modes_and_not_the_third(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    """Кнопка «открывать» есть, но нажать её нельзя: разрешения владельца нет."""
+    client = make_client(runtime_path, monkeypatch)
+
+    page = client.get("/gate")
+
+    assert "Открытие по лицу" in page.text
+    assert 'data-mode="dry"' in page.text
+    assert "Требуется письменное разрешение владельца" in page.text
+    assert 'data-mode="on"' not in page.text
+
+
+def test_access_settings_default_to_off(runtime_path: Path, monkeypatch) -> None:
+    client = make_client(runtime_path, monkeypatch)
+
+    settings = client.get("/api/gate/access-settings").json()
+
+    assert settings["mode"] == "off"
+    assert settings["require_second_factor"] is False
+
+
+def test_access_settings_are_saved_for_the_service(runtime_path: Path, monkeypatch) -> None:
+    """Веб пишет файл, служба его читает: механикой админка не распоряжается."""
+    from src.common.gate_access_config import GateAccessConfig, gate_access_config_path
+
+    client = make_client(runtime_path, monkeypatch)
+
+    response = client.put(
+        "/api/gate/access-settings",
+        json={
+            "mode": "dry",
+            "gates": [{"camera": "gate", "relay": 2, "zone": "у калитки"}],
+            "allowed_names": ["Алексей"],
+            "min_score": 0.95,
+        },
+    )
+
+    assert response.status_code == 200
+    stored = GateAccessConfig.model_validate_json(
+        gate_access_config_path(runtime_path).read_text(encoding="utf-8")
+    )
+    assert stored.mode == "dry"
+    assert stored.allowed_names == ["Алексей"]
+    assert stored.min_score == 0.95
+
+
+def test_the_admin_cannot_switch_the_gate_to_open(runtime_path: Path, monkeypatch) -> None:
+    """Правило владельца не обходится через API — и отказ объясняет причину."""
+    client = make_client(runtime_path, monkeypatch)
+
+    response = client.put("/api/gate/access-settings", json={"mode": "on"})
+
+    assert response.status_code == 422
+    assert "письменного разрешения" in response.json()["detail"]
+    assert client.get("/api/gate/access-settings").json()["mode"] == "off"
+
+
+def test_a_phone_mac_never_leaves_the_node_whole(runtime_path: Path, monkeypatch) -> None:
+    """MAC — персональные данные семьи: наружу выходит только хвост."""
+    client = make_client(runtime_path, monkeypatch)
+
+    client.put(
+        "/api/gate/access-settings",
+        json={
+            "mode": "off",
+            "people": [
+                {"name": "Алексей", "phone_ip": "192.168.2.50", "phone_mac": "aa:bb:cc:dd:ee:ff"}
+            ],
+        },
+    )
+    person = client.get("/api/gate/access-settings").json()["people"][0]
+
+    assert person["phone_mac"] == "··:··:··:··:ee:ff"
+    assert person["has_phone_mac"] is True
+    assert "aa:bb" not in client.get("/gate").text
+
+
+def test_a_missing_mac_means_keep_the_stored_one(runtime_path: Path, monkeypatch) -> None:
+    """Форма не может вернуть то, чего не получала, — и не должна это стирать."""
+    from src.common.gate_access_config import GateAccessConfig, gate_access_config_path
+
+    client = make_client(runtime_path, monkeypatch)
+    client.put(
+        "/api/gate/access-settings",
+        json={"people": [{"name": "Алексей", "phone_mac": "aa:bb:cc:dd:ee:ff"}]},
+    )
+
+    client.put(
+        "/api/gate/access-settings",
+        json={"mode": "dry", "people": [{"name": "Алексей", "phone_ip": "192.168.2.51"}]},
+    )
+
+    stored = GateAccessConfig.model_validate_json(
+        gate_access_config_path(runtime_path).read_text(encoding="utf-8")
+    )
+    assert stored.people[0].phone_mac == "aa:bb:cc:dd:ee:ff"
+    assert stored.people[0].phone_ip == "192.168.2.51"
+
+
+def test_a_broken_mac_is_refused_with_a_readable_reason(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    client = make_client(runtime_path, monkeypatch)
+
+    response = client.put(
+        "/api/gate/access-settings",
+        json={"people": [{"name": "Алексей", "phone_mac": "нет"}]},
+    )
+
+    assert response.status_code == 422
+    assert "MAC" in response.json()["detail"]
+
+
+def test_names_come_from_the_frigate_face_library(runtime_path: Path, monkeypatch) -> None:
+    """Два списка имён разъезжаются и молча перестают совпадать."""
+    monkeypatch.setattr(
+        "src.web.app.frigate_face_names", lambda api_url, **kwargs: ["Алексей", "Марина"]
+    )
+    client = make_client(runtime_path, monkeypatch)
+    client.put("/api/gate/access-settings", json={"allowed_names": ["Алексей"]})
+
+    page = client.get("/gate")
+
+    assert 'data-name="Марина"' in page.text
+    assert 'data-name="Алексей"' in page.text
+
+
+def test_a_name_that_left_the_library_is_shown_not_hidden(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    """Иначе в настройках остаётся правило, которое не сработает никогда."""
+    monkeypatch.setattr("src.web.app.frigate_face_names", lambda api_url, **kwargs: ["Марина"])
+    client = make_client(runtime_path, monkeypatch)
+    client.put("/api/gate/access-settings", json={"allowed_names": ["Алексей"]})
+
+    page = client.get("/gate")
+
+    assert "которых нет в библиотеке лиц" in page.text
+    assert "Алексей" in page.text
+
+
+def test_an_unreachable_face_library_is_not_an_empty_one(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr("src.web.app.frigate_face_names", lambda api_url, **kwargs: None)
+    client = make_client(runtime_path, monkeypatch)
+
+    page = client.get("/gate")
+
+    assert "спросить не удалось" in page.text

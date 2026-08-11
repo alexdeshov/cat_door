@@ -90,7 +90,20 @@ from src.common.detection_config import (
 )
 from src.common.detection_stats import read_detection_stats
 from src.common.frigate_config import RECORDING_RETENTION
-from src.common.gate_service import GateStatus, frigate_stats, gate_status
+from src.common.gate_access_config import (
+    GateAccessConfig,
+    GateSpec,
+    gate_access_config_path,
+    load_gate_access_config,
+    mask_mac,
+    save_gate_access_config,
+)
+from src.common.gate_service import (
+    GateStatus,
+    frigate_face_names,
+    frigate_stats,
+    gate_status,
+)
 from src.common.health import build_health, gpu_occupancy_percent, overall_status
 from src.common.model_registry import register_model_version
 from src.common.node_metrics import read_node_metrics
@@ -394,6 +407,34 @@ class CircuitsPayload(BaseModel):
     gate_recording: GateRecording | None = None
 
 
+class GatePersonPayload(BaseModel):
+    name: str
+    phone_ip: str | None = None
+    # `null` — оставить сохранённый MAC. Наружу он выходит только замаскированным,
+    # и админка физически не может прислать обратно то, чего не получала.
+    phone_mac: str | None = None
+
+
+class GateAccessPayload(BaseModel):
+    """Настройки автооткрытия из админки.
+
+    Режим приходит строкой, а не перечислением: значение `on` должно отвергаться
+    внятной причиной — «требуется письменное разрешение владельца», — а не
+    списком допустимых вариантов, из которого причина не видна.
+    """
+
+    mode: str = "off"
+    gates: list[GateSpec] = Field(default_factory=list)
+    allowed_names: list[str] = Field(default_factory=list)
+    require_second_factor: bool = False
+    people: list[GatePersonPayload] = Field(default_factory=list)
+    min_score: float = 0.93
+    pulse_ms: int = 500
+    cooldown_seconds: int = 20
+    open_from: str = "07:00"
+    open_to: str = "23:00"
+
+
 class DiscoveryPayload(BaseModel):
     """Что администратор задаёт перед поиском.
 
@@ -464,6 +505,71 @@ def _camera_view(camera: CameraRecord) -> dict[str, object]:
         "note": camera.note,
         "configured": bool(camera.rtsp_url()),
     }
+
+
+def _error_messages(exc: ValidationError) -> list[str]:
+    """Только сообщения об ошибках.
+
+    Полный текст pydantic цитирует ещё и значения полей — а среди них MAC
+    телефона, то есть персональные данные, которым в ответе API делать нечего.
+    """
+    return [str(error["msg"]).removeprefix("Value error, ") for error in exc.errors()]
+
+
+def _gate_access_view(config: GateAccessConfig) -> dict[str, object]:
+    """Настройки калитки для API. MAC телефона наружу выходит только хвостом."""
+    return {
+        "mode": config.mode,
+        "gates": [gate.model_dump() for gate in config.gates],
+        "allowed_names": list(config.allowed_names),
+        "require_second_factor": config.require_second_factor,
+        "people": [
+            {
+                "name": person.name,
+                "phone_ip": person.phone_ip,
+                "phone_mac": mask_mac(person.phone_mac),
+                "has_phone_mac": bool(person.phone_mac),
+            }
+            for person in config.people
+        ],
+        "min_score": config.min_score,
+        "pulse_ms": config.pulse_ms,
+        "cooldown_seconds": config.cooldown_seconds,
+        "open_from": config.open_from,
+        "open_to": config.open_to,
+    }
+
+
+def _merge_gate_access(
+    payload: GateAccessPayload, stored: GateAccessConfig
+) -> GateAccessConfig:
+    """Наложить присланное на сохранённое.
+
+    Не присланный MAC означает «оставить как было»: админка получает его
+    замаскированным и вернуть настоящий не может. Пустая строка — это «стереть»,
+    и это разные намерения.
+    """
+    people = []
+    for person in payload.people:
+        known = stored.person(person.name)
+        people.append(
+            {
+                "name": person.name,
+                "phone_ip": (
+                    person.phone_ip
+                    if person.phone_ip is not None
+                    else (known.phone_ip if known else "")
+                ),
+                "phone_mac": (
+                    person.phone_mac
+                    if person.phone_mac is not None
+                    else (known.phone_mac if known else "")
+                ),
+            }
+        )
+    return GateAccessConfig.model_validate(
+        {**payload.model_dump(exclude={"people"}), "people": people}
+    )
 
 
 def _apply_camera_payload(
@@ -639,6 +745,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     def current_circuits() -> NodeCircuits:
         return load_circuits(circuits_path(settings.data_dir))
+
+    def current_gate_access() -> GateAccessConfig:
+        return load_gate_access_config(
+            gate_access_config_path(settings.data_dir), GateAccessConfig()
+        )
 
     def current_archive_depth() -> ArchiveDepth:
         _, motion_days = RECORDING_RETENTION.get(
@@ -1364,6 +1475,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ) -> HTMLResponse:
         circuits = current_circuits()
         registry = current_registry()
+        access = current_gate_access()
+        # Имена берутся из библиотеки лиц Frigate, а не вводятся руками: два
+        # списка имён разъезжаются и, разъехавшись, молча перестают совпадать.
+        face_library = frigate_face_names(settings.gate_api_url)
+        orphan_names = [
+            name for name in access.allowed_names if face_library and name not in face_library
+        ]
         timezone = ZoneInfo(settings.display_timezone)
         midnight = datetime.now(timezone).replace(hour=0, minute=0, second=0, microsecond=0)
         today = midnight.strftime("%Y-%m-%d")
@@ -1449,8 +1567,38 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "pass_today": today,
                 "person_names": person_names,
                 "pass_decisions": GATE_PASS_DECISIONS,
+                "gate_access": _gate_access_view(access),
+                # `None` — библиотеку спросить не удалось; это не то же самое,
+                # что «лиц не заведено», и страница обязана различать.
+                "face_library": face_library,
+                # Имя, исчезнувшее из библиотеки, показывается отдельно: молча
+                # оставить его в разрешённых значит хранить настройку, которая
+                # никогда не сработает.
+                "orphan_names": orphan_names,
             },
         )
+
+    @app.get("/api/gate/access-settings")
+    def get_gate_access_settings() -> dict[str, object]:
+        return _gate_access_view(current_gate_access())
+
+    @app.put("/api/gate/access-settings")
+    def update_gate_access_settings(payload: GateAccessPayload) -> dict[str, object]:
+        stored = current_gate_access()
+        try:
+            config = _merge_gate_access(payload, stored)
+        except ValidationError as exc:
+            # Пользовательские причины отказа доходят до человека целиком:
+            # «режим on требует разрешения владельца» — это то, что он должен
+            # прочитать, а не «422 Unprocessable Entity».
+            raise HTTPException(422, "; ".join(_error_messages(exc))) from exc
+        try:
+            save_gate_access_config(gate_access_config_path(settings.data_dir), config)
+        except OSError as exc:
+            raise HTTPException(500, "Не удалось сохранить настройки калитки") from exc
+        # Механику веб не трогает и здесь: файл читает служба
+        # `catdoor-gate-access`, у веб-процесса прав на плату нет и не будет.
+        return _gate_access_view(config)
 
     @app.get("/gate/passes/{pass_id}/snapshot")
     def gate_pass_snapshot(
