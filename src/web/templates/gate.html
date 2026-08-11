@@ -112,6 +112,38 @@
       из <code>docs/gate-access-plan.md</code>.
     </p>
 
+    {# Ручное открытие. Разрешено владельцем письменно (`AGENTS.md`), в отличие
+       от автооткрытия, которое остаётся в `dry`. Импульс уходит не отсюда:
+       веб кладёт просьбу файлом, исполняет служба. #}
+    <div class="controls">
+      <button id="open-gate" type="button" {{ "disabled" if not gate_access.gates }}>
+        Открыть калитку
+      </button>
+      <span id="open-gate-status" class="muted data" style="font-size: 12px">
+        {{ "" if gate_access.gates else "сначала задайте канал реле" }}
+      </span>
+    </div>
+    <p class="muted" style="font-size: 13px">
+      Кнопка замыкает вход «кнопка выхода» контроллера на калитке — то же самое,
+      что нажать её во дворе. Замком по-прежнему распоряжается сам контроллер.
+      Каждое нажатие попадает в журнал ниже и в Телеграм. Работает независимо от
+      режима автооткрытия: режимы относятся к автоматике, а не к человеку.
+    </p>
+
+    <div class="controls">
+      <label for="access-relay">канал реле</label>
+      <input id="access-relay" type="number" min="1" max="8"
+        value="{{ gate_access.gates[0].relay if gate_access.gates else 1 }}">
+      <label for="access-pulse">импульс, мс</label>
+      <input id="access-pulse" type="number" min="100" max="5000" step="100"
+        value="{{ gate_access.pulse_ms }}">
+    </div>
+    <p class="muted" style="font-size: 13px">
+      Канал — тот, к которому подключена кнопка выхода. Импульс задаётся одной
+      командой, которая сама размыкает контакт: смерть процесса не оставит
+      калитку разомкнутой.
+    </p>
+
     <div class="controls">
       <label for="access-camera">камера калитки</label>
       <select id="access-camera">
@@ -441,9 +473,13 @@
   function accessPayload() {
     const camera = document.querySelector("#access-camera").value;
     const zone = document.querySelector("#access-zone").value.trim();
+    const relay = Number(document.querySelector("#access-relay").value);
     return {
       mode: accessMode,
-      gates: camera ? [{camera, relay: 2, zone}] : [],
+      // Канал реле нужен и без камеры: калитку открывают кнопкой руками ещё до
+      // того, как настроено автооткрытие.
+      gates: [{camera, relay, zone}],
+      pulse_ms: Number(document.querySelector("#access-pulse").value),
       allowed_names: nameChips
         .filter(chip => chip.getAttribute("aria-pressed") === "true")
         .map(chip => chip.dataset.name),
@@ -461,6 +497,25 @@
       open_to: document.querySelector("#access-to").value
     };
   }
+
+  document.querySelector("#open-gate")?.addEventListener("click", async event => {
+    const button = event.currentTarget;
+    const status = document.querySelector("#open-gate-status");
+    button.disabled = true;
+    status.textContent = "…";
+    status.classList.remove("bad");
+    try {
+      const response = await fetch("/api/gate/open", {method: "POST"});
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.detail || `ошибка ${response.status}`);
+      status.textContent = "открыто";
+    } catch (error) {
+      status.textContent = error.message;
+      status.classList.add("bad");
+    } finally {
+      button.disabled = false;
+    }
+  });
 
   modeChoices.forEach(choice => {
     choice.addEventListener("click", () => {

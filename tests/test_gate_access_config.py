@@ -96,10 +96,17 @@ def test_the_open_mode_never_arrives_through_the_file(runtime_path: Path, caplog
     assert "письменного разрешения" in caplog.text
 
 
-def test_the_cat_door_relay_is_not_available_to_the_gate() -> None:
-    """Реле 1 закреплено за кошачьей дверцей — это отдельное разрешение."""
+def test_the_relay_must_exist_on_the_board() -> None:
+    """Каналов у платы восемь. Ноль или девятый — опечатка, а не настройка.
+
+    Реле 1 план резервировал за кошачьей дверцей, но на объекте калитку
+    подключили именно к нему: механики у дверцы нет, канал ей подберут отдельно.
+    """
+    assert GateAccessConfig.model_validate({"gates": [{"relay": 1}]}).gates[0].relay == 1
     with pytest.raises(ValueError, match="relay"):
-        GateAccessConfig.model_validate({"gates": [{"camera": "gate", "relay": 1}]})
+        GateAccessConfig.model_validate({"gates": [{"relay": 0}]})
+    with pytest.raises(ValueError, match="relay"):
+        GateAccessConfig.model_validate({"gates": [{"relay": 9}]})
 
 
 def test_a_broken_mac_is_refused() -> None:
