@@ -116,9 +116,13 @@
       <label for="access-camera">камера калитки</label>
       <select id="access-camera">
         <option value="">не выбрана</option>
+        {# Значение — имя камеры во Frigate, а не идентификатор инвентаря:
+           события приходят с ним, и `test-cam` против `test_cam` дал бы
+           «камера не назначена калиткой» на каждый проход. #}
         {% for camera in gate_cameras %}
-          <option value="{{ camera.id }}"
-            {{ 'selected' if gate_access.gates and gate_access.gates[0].camera == camera.id }}>
+          <option value="{{ camera.frigate_name }}"
+            {{ 'selected' if gate_access.gates
+               and gate_access.gates[0].camera == camera.frigate_name }}>
             {{ camera.display_title }}
           </option>
         {% endfor %}
