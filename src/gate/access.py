@@ -4,10 +4,14 @@
 перезапуск админки не должен оставлять дыру в журнале, а падение журнала не
 должно ронять админку.
 
-Механики здесь нет. Служба принимает решение и записывает его, но реле не
-трогает: режимов ровно два — `off` и `dry`, и кода записи в Modbus в проекте не
-существует. Импульс на реле появится отдельным шагом и только после
-письменного разрешения владельца (`AGENTS.md`).
+**Автоматика реле не трогает.** Режимов автооткрытия ровно два — `off` и
+`dry`, — и решение по лицу заканчивается записью «открыл бы». Единственная
+команда, доходящая до платы, — нажатие кнопки в админке: человек решил сам, и
+это разрешено владельцем письменно (`AGENTS.md`, 2026-08-11).
+
+Кнопка живёт в вебе, а плата — здесь, потому что у веб-процесса нет и не должно
+быть прав на механику. Веб кладёт просьбу файлом, служба её исполняет и кладёт
+рядом ответ — та же схема, что у переключателя контуров.
 
 Решение принимает чистая функция `src/gate/decision.py`, ничего не знающая ни о
 базе, ни о сети. Служба лишь собирает для неё факты и раскладывает результат по
@@ -38,8 +42,19 @@ from src.common.gate_access_config import (
     gate_access_config_path,
     load_gate_access_config,
 )
+from src.common.gate_open_request import (
+    REQUEST_TTL_SECONDS,
+    OpenRequest,
+    OpenResult,
+    load_open_request,
+    load_open_result,
+    open_request_path,
+    open_result_path,
+    save_open_result,
+)
 from src.common.sd_notify import Notifier
 from src.common.settings import ConfigurationError, Settings, validate_runtime_paths
+from src.common.telegram import TelegramClient
 from src.gate.decision import DECISION_DRY_RUN, Factor, decide
 from src.gate.notify import (
     WATCH_WINDOW_SECONDS,
@@ -49,6 +64,7 @@ from src.gate.notify import (
     gate_cameras,
     recognised_name,
 )
+from src.gate.opener import RelayOpener
 from src.gate.presence import PhonePresence
 
 logger = logging.getLogger("catdoor.gate-access")
@@ -278,6 +294,84 @@ def purge_old_passes(session: Session, *, data_dir: Path, older_than: datetime) 
     return len(stale)
 
 
+def handle_open_request(
+    session: Session,
+    *,
+    request: OpenRequest,
+    config: GateAccessConfig,
+    opener: RelayOpener,
+    now: float,
+    timezone: ZoneInfo,
+    notify: Callable[[str], None] | None = None,
+) -> OpenResult:
+    """Исполнить нажатие кнопки «Открыть калитку».
+
+    Единственный путь, которым в этой версии на плату уходит команда. Автоматика
+    до неё не доходит: решение по лицу заканчивается записью «открыл бы».
+
+    Просьба стареет намеренно. Нажатие, до которого служба не добралась за
+    десяток секунд, человеку у калитки уже не нужно, а сработать оно успело бы
+    ровно тогда, когда он ушёл.
+    """
+    if now - request.requested_at > REQUEST_TTL_SECONDS:
+        logger.warning("Просьба открыть калитку устарела и не исполнена")
+        return OpenResult(
+            id=request.id,
+            ok=False,
+            detail="Просьба устарела: служба не успела её увидеть",
+            finished_at=now,
+        )
+    gate = config.gates[0] if config.gates else None
+    if gate is None:
+        return OpenResult(
+            id=request.id,
+            ok=False,
+            detail="Канал реле калитки не настроен",
+            finished_at=now,
+        )
+    pulse = opener.pulse(gate.relay, config.pulse_ms)
+    moment = datetime.fromtimestamp(now, UTC)
+    session.add(
+        GatePass(
+            # Своего события у ручного открытия нет, а ключ уникален: берём
+            # идентификатор просьбы — он же защищает от двойного исполнения.
+            frigate_event_id=f"manual-{request.id}",
+            created_at=moment,
+            camera="",
+            decision="opened" if pulse.ok else "error",
+            reason=(
+                f"Открыто вручную из админки. {pulse.detail}"
+                if pulse.ok
+                else f"Открыть вручную не удалось. {pulse.detail}"
+            ),
+            factors_json=json.dumps(
+                [{"name": "manual", "verdict": "for", "detail": request.source}],
+                ensure_ascii=False,
+            ),
+            pulse_ms=pulse.pulse_ms,
+            modbus_ok=pulse.ok,
+        )
+    )
+    if notify is not None:
+        # Уведомление на каждое срабатывание — условие разрешения владельца, а
+        # не удобство. Отказ отправки не отменяет открытия и не роняет службу.
+        local = moment.astimezone(timezone)
+        try:
+            notify(
+                f"Калитка: {'открыта' if pulse.ok else 'открыть не удалось'} "
+                f"по кнопке в админке · {local.strftime('%H:%M')}"
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Уведомление об открытии не ушло: %s", exc)
+    return OpenResult(
+        id=request.id,
+        ok=pulse.ok,
+        detail=pulse.detail,
+        finished_at=now,
+        pulse_ms=pulse.pulse_ms,
+    )
+
+
 def last_opening(session: Session) -> LastOpening | None:
     """Последнее решение «открыл бы» из журнала. Нужно, чтобы пауза пережила перезапуск."""
     row = session.execute(
@@ -319,6 +413,26 @@ def _factors_for(
     return factors
 
 
+def _telegram_sender(settings: Settings) -> Callable[[str], None] | None:
+    """Отправитель уведомлений об открытии. `None` — бот не настроен.
+
+    Уведомление на каждое срабатывание — условие разрешения владельца. Если
+    бота нет, служба всё равно работает: отказаться открывать из-за ненастроенного
+    телеграма значило бы запереть человека у калитки, — но говорит об этом вслух.
+    """
+    client = TelegramClient(
+        settings.telegram_bot_token,
+        settings.telegram_chat_id,
+        api_base=settings.telegram_api_base,
+    )
+    if not client.configured:
+        logger.warning(
+            "Бот не настроен: открытия калитки не попадут в Телеграм, только в журнал"
+        )
+        return None
+    return client.send_message
+
+
 def _snapshot_writer(
     settings: Settings, events: dict[str, GateEvent]
 ) -> Callable[[GatePassRecord], str | None]:
@@ -351,6 +465,15 @@ def run(*, once: bool = False) -> None:
     config_path = gate_access_config_path(settings.data_dir)
     config = load_gate_access_config(config_path, GateAccessConfig())
     presence = PhonePresence()
+    request_path = open_request_path(settings.data_dir)
+    result_path = open_result_path(settings.data_dir)
+    # Плата у калитки и у дверцы одна и та же, поэтому адрес берётся из уже
+    # существующей настройки контроллера.
+    opener = RelayOpener(
+        host=settings.door_controller_host,
+        port=settings.door_controller_port,
+    )
+    telegram = _telegram_sender(settings)
     notifier = Notifier.from_environment()
     notifier.ready("Журнал калитки на связи")
     last_purge_at: float | None = None
@@ -360,6 +483,26 @@ def run(*, once: bool = False) -> None:
         # получал бы очередь решений.
         opening = last_opening(session)
     while True:
+        # Нажатие кнопки разбирается первым и до опроса Frigate: человек стоит у
+        # калитки, а неотвеченный запрос к Frigate стоит десяти секунд таймаута.
+        config = load_gate_access_config(config_path, config)
+        request = load_open_request(request_path)
+        done = load_open_result(result_path)
+        if request is not None and (done is None or done.id != request.id):
+            with factory() as session:
+                result = handle_open_request(
+                    session,
+                    request=request,
+                    config=config,
+                    opener=opener,
+                    now=time.time(),
+                    timezone=timezone,
+                    notify=telegram,
+                )
+                session.commit()
+            # Ответ пишется после записи в журнал: админка, увидев «открыл»,
+            # должна найти строку на месте.
+            save_open_result(result_path, result)
         # Окно наблюдения отсчитывается от текущего времени, а не от старта
         # службы: перезапуск не должен оставлять в журнале дыру. Повторов это
         # не даёт — строка обновляется по идентификатору события.
@@ -375,9 +518,6 @@ def run(*, once: bool = False) -> None:
             # Пустой журнал из-за нечитаемого инвентаря выглядит точно так же,
             # как «к калитке никто не подходил», а это разные вещи.
             logger.warning("Ни одной камеры контура калитки — журнал пуст не потому, что тихо")
-        # Настройки перечитываются каждый опрос: человек, переключивший режим в
-        # админке, ждёт, что это подействовало сейчас, а не после перезапуска.
-        config = load_gate_access_config(config_path, config)
         records, opening = passes_from_events(
             events,
             cameras=cameras,

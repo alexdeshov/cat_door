@@ -2675,3 +2675,122 @@ def test_the_gate_is_saved_under_its_frigate_name(runtime_path: Path, monkeypatc
 
     assert '<option value="test_cam"' in page.text
     assert '<option value="test-cam"' not in page.text
+
+
+def test_the_admin_asks_the_service_instead_of_writing_to_the_board(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    """У веб-процесса нет и не должно быть прав на механику.
+
+    Он кладёт просьбу файлом, а исполняет её `catdoor-gate-access` — та же
+    схема, что у переключателя контуров с его примирителем.
+    """
+    from src.common.gate_open_request import (
+        OpenResult,
+        load_open_request,
+        open_request_path,
+        open_result_path,
+        save_open_result,
+    )
+
+    client = make_client(runtime_path, monkeypatch)
+    client.put("/api/gate/access-settings", json={"gates": [{"relay": 1}]})
+
+    def answer(seconds: float) -> None:
+        request = load_open_request(open_request_path(runtime_path))
+        assert request is not None
+        save_open_result(
+            open_result_path(runtime_path),
+            OpenResult(
+                id=request.id, ok=True, detail="Импульс 500 мс на канал 1",
+                finished_at=0.0, pulse_ms=500,
+            ),
+        )
+
+    monkeypatch.setattr("src.web.app.sleep", answer)
+
+    response = client.post("/api/gate/open")
+
+    assert response.status_code == 200
+    assert response.json()["pulse_ms"] == 500
+
+
+def test_a_silent_service_is_reported_not_assumed(runtime_path: Path, monkeypatch) -> None:
+    """Сказать «открыл», не дождавшись подтверждения, — та самая ложь.
+
+    Служба смотрит файл раз в секунду; молчание дольше означает, что она не
+    работает, и человеку надо сказать именно это.
+    """
+    client = make_client(runtime_path, monkeypatch)
+    client.put("/api/gate/access-settings", json={"gates": [{"relay": 1}]})
+    monkeypatch.setattr("src.web.app.OPEN_RESULT_TIMEOUT_SECONDS", 0.05)
+
+    response = client.post("/api/gate/open")
+
+    assert response.status_code == 504
+    assert "catdoor-gate-access" in response.json()["detail"]
+
+
+def test_the_old_answer_is_not_taken_for_this_press(runtime_path: Path, monkeypatch) -> None:
+    """Рядом лежит ответ на прошлое нажатие, и он не про эту просьбу."""
+    from src.common.gate_open_request import OpenResult, open_result_path, save_open_result
+
+    client = make_client(runtime_path, monkeypatch)
+    client.put("/api/gate/access-settings", json={"gates": [{"relay": 1}]})
+    save_open_result(
+        open_result_path(runtime_path),
+        OpenResult(id="прошлое", ok=True, detail="Импульс", finished_at=0.0, pulse_ms=500),
+    )
+    monkeypatch.setattr("src.web.app.OPEN_RESULT_TIMEOUT_SECONDS", 0.05)
+
+    response = client.post("/api/gate/open")
+
+    assert response.status_code == 504
+
+
+def test_the_button_needs_a_relay_before_it_opens_anything(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    client = make_client(runtime_path, monkeypatch)
+
+    response = client.post("/api/gate/open")
+
+    assert response.status_code == 422
+    assert "не настроен" in response.json()["detail"]
+    assert "сначала задайте канал реле" in client.get("/gate").text
+
+
+def test_a_refused_pulse_reaches_the_person_who_pressed(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    """Человек у калитки должен узнать, что она не открылась, от админки."""
+    from src.common.gate_open_request import (
+        OpenResult,
+        load_open_request,
+        open_request_path,
+        open_result_path,
+        save_open_result,
+    )
+
+    client = make_client(runtime_path, monkeypatch)
+    client.put("/api/gate/access-settings", json={"gates": [{"relay": 1}]})
+
+    def answer(seconds: float) -> None:
+        request = load_open_request(open_request_path(runtime_path))
+        assert request is not None
+        save_open_result(
+            open_result_path(runtime_path),
+            OpenResult(
+                id=request.id, ok=False, detail="Плата не ответила", finished_at=0.0
+            ),
+        )
+
+    monkeypatch.setattr("src.web.app.sleep", answer)
+
+    response = client.post("/api/gate/open")
+
+    assert response.status_code == 502
+    assert response.json()["detail"] == "Плата не ответила"

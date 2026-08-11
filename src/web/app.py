@@ -16,7 +16,7 @@ from pathlib import Path
 # Под именем `Event` в этом модуле уже живёт строка события базы, а событие
 # потока рядом с ней читалось бы как та же сущность.
 from threading import Event as ThreadEvent
-from time import monotonic
+from time import monotonic, sleep, time
 from typing import Annotated, Literal
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -97,6 +97,14 @@ from src.common.gate_access_config import (
     load_gate_access_config,
     mask_mac,
     save_gate_access_config,
+)
+from src.common.gate_open_request import (
+    OpenRequest,
+    OpenResult,
+    load_open_result,
+    open_request_path,
+    open_result_path,
+    save_open_request,
 )
 from src.common.gate_service import (
     GateStatus,
@@ -505,6 +513,31 @@ def _camera_view(camera: CameraRecord) -> dict[str, object]:
         "note": camera.note,
         "configured": bool(camera.rtsp_url()),
     }
+
+
+# Сколько ждать ответа службы на нажатие кнопки. Она смотрит файл раз в
+# секунду; три секунды покрывают опрос, импульс и запись в журнал, и человек у
+# калитки столько ждёт спокойно.
+OPEN_RESULT_TIMEOUT_SECONDS = 3.0
+OPEN_RESULT_POLL_SECONDS = 0.1
+
+
+def _await_open_result(data_dir: Path, request_id: str) -> OpenResult | None:
+    """Дождаться ответа службы на просьбу. `None` — не дождались.
+
+    Ответ ищется по идентификатору просьбы, а не «по свежести файла»: рядом
+    лежит ответ на прошлое нажатие, и принять его за свой значило бы сказать
+    «открыл» там, где не открыл никто.
+    """
+    path = open_result_path(data_dir)
+    deadline = monotonic() + OPEN_RESULT_TIMEOUT_SECONDS
+    while True:
+        result = load_open_result(path)
+        if result is not None and result.id == request_id:
+            return result
+        if monotonic() >= deadline:
+            return None
+        sleep(OPEN_RESULT_POLL_SECONDS)
 
 
 def _error_messages(exc: ValidationError) -> list[str]:
@@ -1604,6 +1637,35 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # Механику веб не трогает и здесь: файл читает служба
         # `catdoor-gate-access`, у веб-процесса прав на плату нет и не будет.
         return _gate_access_view(config)
+
+    @app.post("/api/gate/open")
+    def open_gate() -> dict[str, object]:
+        """Открыть калитку по кнопке в админке.
+
+        Веб механикой не распоряжается и здесь: он кладёт просьбу файлом, а
+        исполняет её служба `catdoor-gate-access` — единственная, которой
+        позволено писать на плату. Ответ ждём её же: сказать «открыл», не
+        дождавшись подтверждения, — это ровно та ложь, ради отсутствия которой
+        всё и разделено.
+        """
+        config = current_gate_access()
+        if not config.gates:
+            raise HTTPException(422, "Канал реле калитки не настроен")
+        request = OpenRequest(id=uuid4().hex, requested_at=time(), source="admin")
+        try:
+            save_open_request(open_request_path(settings.data_dir), request)
+        except OSError as exc:
+            raise HTTPException(500, "Не удалось передать просьбу службе") from exc
+        result = _await_open_result(settings.data_dir, request.id)
+        if result is None:
+            # Служба опрашивает файл раз в секунду; молчание дольше — это она
+            # не работает, и человеку надо сказать именно это.
+            raise HTTPException(
+                504, "Служба калитки не ответила: проверьте catdoor-gate-access"
+            )
+        if not result.ok:
+            raise HTTPException(502, result.detail)
+        return {"ok": True, "detail": result.detail, "pulse_ms": result.pulse_ms}
 
     @app.get("/gate/passes/{pass_id}/snapshot")
     def gate_pass_snapshot(

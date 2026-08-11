@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -7,12 +8,15 @@ from typing import Self
 from zoneinfo import ZoneInfo
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 from src.common.database import GatePass, create_session_factory
 from src.common.gate_access_config import GateAccessConfig
+from src.common.gate_open_request import REQUEST_TTL_SECONDS, OpenRequest
 from src.gate.access import (
     GatePassRecord,
     LastOpening,
+    handle_open_request,
     last_opening,
     pass_snapshot_path,
     passes_from_events,
@@ -21,8 +25,21 @@ from src.gate.access import (
 )
 from src.gate.decision import DECISION_DRY_RUN, DECISION_MODE_OFF, PHONE_FACTOR, Factor
 from src.gate.notify import GateEvent, fetch_events
+from src.gate.opener import PulseResult
 
 MOSCOW = ZoneInfo("Europe/Moscow")
+
+
+class _FakeOpener:
+    """Открывалка, которая ничего не открывает и помнит, о чём её просили."""
+
+    def __init__(self, result: PulseResult) -> None:
+        self._result = result
+        self.calls: list[tuple[int, int]] = []
+
+    def pulse(self, channel: int, milliseconds: int) -> PulseResult:
+        self.calls.append((channel, milliseconds))
+        return self._result
 
 
 def _config(**overrides: object) -> GateAccessConfig:
@@ -400,24 +417,176 @@ def test_the_phone_factor_reaches_the_journal() -> None:
     }
 
 
-def test_nothing_in_the_gate_circuit_can_write_to_the_board() -> None:
-    """Сторожевой тест, который не удаляется.
+def test_only_one_module_can_write_to_the_board() -> None:
+    """Сторожевой тест, который не удаляется, а сужается.
 
-    Правило владельца (`AGENTS.md`) запрещает управлять реальной дверью до
-    отдельного письменного разрешения. Пока его нет, в контуре калитки не
-    должно существовать даже возможности записи: Modbus знает функции 0x05,
-    0x06 и 0x0F, и ни одна из них не должна появиться ни здесь, ни в мониторе
-    двери. День, когда этот тест придётся менять, — это день, когда разрешение
-    получено.
+    Разрешение владельца от 2026-08-11 позволяет ровно одно действие — импульс
+    на реле калитки, — и вся запись на плату собрана в одном модуле. Если
+    функции записи Modbus заведутся где-то ещё, это уже не то, что разрешали:
+    ни автоматика решения, ни монитор дверцы писать не должны.
     """
-    watched = [
+    silent = [
         Path("src/gate/access.py"),
         Path("src/gate/decision.py"),
         Path("src/gate/presence.py"),
         Path("src/web/door_monitor.py"),
+        Path("src/web/app.py"),
     ]
-    forbidden = ("write_coil", "write_register", "write_single", "0x05", "0x06", "0x0F")
+    forbidden = ("write_register_frame", "write_coil", "0x06", "0x0F")
 
-    for path in watched:
+    for path in silent:
         text = path.read_text(encoding="utf-8")
         assert not any(marker in text for marker in forbidden), f"{path} умеет писать на плату"
+    assert "write_register_frame" in Path("src/gate/opener.py").read_text(encoding="utf-8")
+
+
+def test_the_automatic_path_never_touches_the_board() -> None:
+    """Решение по лицу заканчивается записью «открыл бы» и ничем больше.
+
+    Автооткрытие остаётся в `dry` до четырёх условий выхода, и разрешение
+    владельца его не включает. Проверяется не только решение, но и то, что
+    открывалку в этот путь невозможно передать: пока её нет в подписи, никакая
+    правка тела функции случайно до платы не дотянется.
+    """
+    records, _ = _passes([_event(sub_label="Алексей", name_score=0.96)], config=_config())
+
+    assert records[0].decision == DECISION_DRY_RUN
+    assert "opener" not in inspect.signature(passes_from_events).parameters
+
+
+def test_the_button_opens_and_leaves_a_trace(runtime_path: Path) -> None:
+    """Условие разрешения владельца: журнал каждого срабатывания и уведомление."""
+    factory = _session(runtime_path)
+    sent: list[str] = []
+
+    with factory() as session:
+        result = handle_open_request(
+            session,
+            request=OpenRequest(id="a", requested_at=1000.0),
+            config=_config(mode="off"),
+            opener=_FakeOpener(PulseResult(True, "Импульс 500 мс на канал 1", 500)),
+            now=1000.5,
+            timezone=MOSCOW,
+            notify=sent.append,
+        )
+        session.commit()
+        stored = session.query(GatePass).one()
+
+    assert result.ok
+    assert stored.decision == "opened"
+    assert stored.pulse_ms == 500
+    assert stored.modbus_ok is True
+    assert "вручную" in (stored.reason or "")
+    assert sent and "Калитка" in sent[0]
+
+
+def test_the_button_works_with_automation_off(runtime_path: Path) -> None:
+    """`off` и `dry` — про автоматику. Человек, нажавший кнопку, решил сам."""
+    factory = _session(runtime_path)
+
+    with factory() as session:
+        result = handle_open_request(
+            session,
+            request=OpenRequest(id="a", requested_at=1000.0),
+            config=_config(mode="off"),
+            opener=_FakeOpener(PulseResult(True, "ок", 500)),
+            now=1000.1,
+            timezone=MOSCOW,
+        )
+        session.commit()
+
+    assert result.ok
+
+
+def test_a_failed_pulse_is_not_written_as_an_opening(runtime_path: Path) -> None:
+    """«Открыл» без импульса — самая дорогая ложь, какую может рассказать журнал."""
+    factory = _session(runtime_path)
+
+    with factory() as session:
+        result = handle_open_request(
+            session,
+            request=OpenRequest(id="a", requested_at=1000.0),
+            config=_config(mode="off"),
+            opener=_FakeOpener(PulseResult(False, "Плата не ответила", 500)),
+            now=1000.1,
+            timezone=MOSCOW,
+        )
+        session.commit()
+        stored = session.query(GatePass).one()
+
+    assert result.ok is False
+    assert stored.decision == "error"
+    assert stored.modbus_ok is False
+
+
+def test_a_stale_request_never_opens_the_gate(runtime_path: Path) -> None:
+    """Нажатие, до которого служба не добралась, сработало бы, когда человек ушёл.
+
+    Это же защищает от худшего сценария перезапуска: файл, оставшийся на диске,
+    не должен открыть калитку при следующем старте службы.
+    """
+    factory = _session(runtime_path)
+    opener = _FakeOpener(PulseResult(True, "ок", 500))
+
+    with factory() as session:
+        result = handle_open_request(
+            session,
+            request=OpenRequest(id="a", requested_at=1000.0),
+            config=_config(mode="off"),
+            opener=opener,
+            now=1000.0 + REQUEST_TTL_SECONDS + 1,
+            timezone=MOSCOW,
+        )
+        session.commit()
+        rows = list(session.query(GatePass))
+
+    assert result.ok is False
+    assert "устарела" in result.detail
+    assert opener.calls == []
+    assert rows == []
+
+
+def test_an_unconfigured_relay_says_so_instead_of_guessing(runtime_path: Path) -> None:
+    factory = _session(runtime_path)
+    opener = _FakeOpener(PulseResult(True, "ок", 500))
+
+    with factory() as session:
+        result = handle_open_request(
+            session,
+            request=OpenRequest(id="a", requested_at=1000.0),
+            config=GateAccessConfig(),
+            opener=opener,
+            now=1000.1,
+            timezone=MOSCOW,
+        )
+
+    assert result.ok is False
+    assert "не настроен" in result.detail
+    assert opener.calls == []
+
+
+def test_the_request_is_executed_once(runtime_path: Path) -> None:
+    """Уникальный ключ журнала — он же защита от двойного исполнения."""
+    factory = _session(runtime_path)
+    request = OpenRequest(id="a", requested_at=1000.0)
+
+    with factory() as session:
+        handle_open_request(
+            session,
+            request=request,
+            config=_config(mode="off"),
+            opener=_FakeOpener(PulseResult(True, "ок", 500)),
+            now=1000.1,
+            timezone=MOSCOW,
+        )
+        session.commit()
+    with factory() as session, pytest.raises(IntegrityError):
+        handle_open_request(
+            session,
+            request=request,
+            config=_config(mode="off"),
+            opener=_FakeOpener(PulseResult(True, "ок", 500)),
+            now=1000.2,
+            timezone=MOSCOW,
+        )
+        session.commit()
