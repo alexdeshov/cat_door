@@ -118,3 +118,44 @@ def test_a_new_set_may_not_let_more_strangers_in() -> None:
 
 def test_a_zero_vector_does_not_explode() -> None:
     assert np.allclose(unit([0.0, 0.0]), [0.0, 0.0])
+
+
+def test_an_indistinguishable_cat_poisons_the_threshold() -> None:
+    """Кот, которого пространство не различает, рушит опознание остальных.
+
+    Измерено на живом узле 2026-08-11: пересчёт завёл эталоны всем шести
+    размеченным котам, хотя пространство обучено на двух. Четверо остальных при
+    обучении были «чужими» — их векторы лежат в одной области, и эталон такого
+    кота оказывается похож на всех чужих сразу. Порог, вынужденный отсечь
+    чужих, поднимается почти до единицы и отсекает заодно своих: узнаваемость
+    упала с 0.72 до 0.34, и защита от ухудшения не дала это применить.
+
+    Отсюда правило: по умолчанию обновляются только те коты, которых модель уже
+    знает.
+    """
+    known = {"Черныш": [1.0, 0.0, 0.0], "Яся": [0.0, 1.0, 0.0]}
+    # Эталон кота, которого пространство не различает: он похож на всё сразу.
+    muddled = {**known, "Бася": [0.577, 0.577, 0.577]}
+    mine = [("Черныш", [0.9, 0.436, 0.0]), ("Яся", [0.436, 0.9, 0.0])]
+    strangers = [("__foreign__", [0.6, 0.55, 0.58]), ("__foreign__", [0.55, 0.6, 0.58])]
+    samples = mine + strangers
+
+    def with_chosen_threshold(prototypes: dict[str, list[float]]):
+        same = [
+            match(vector, prototypes, threshold=0.0)[2]
+            for label, vector in mine
+        ]
+        other = [
+            match(vector, prototypes, threshold=0.0)[2]
+            for label, vector in strangers
+        ]
+        threshold, _ = choose_threshold(same, other)
+        return evaluate(prototypes, samples, threshold=threshold), threshold
+
+    before, before_threshold = with_chosen_threshold(known)
+    after, after_threshold = with_chosen_threshold(muddled)
+
+    assert before.recognised == 1.0
+    assert after_threshold > before_threshold
+    assert after.recognised < before.recognised
+    assert not after.not_worse_than(before)

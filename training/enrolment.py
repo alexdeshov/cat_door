@@ -14,6 +14,16 @@
 сколько среднее ни уточняй, они рядом и останутся. Эту границу двигает только
 обучение backbone — редкая работа на макбуке.
 
+Отсюда же и правило по умолчанию: **обновляются только те коты, которых
+пространство знает**. Измерено 2026-08-11 на живом узле: пересчёт завёл эталоны
+всем шести размеченным котам, хотя пространство обучено на двух, — и
+узнаваемость упала с 0.72 до 0.34. Четверо остальных при обучении были
+«чужими», их векторы свалены в одну область и между собой неразличимы; порог,
+вынужденный отсечь такое, отсекает заодно и своих.
+
+Нового кота можно добавить явно (`--include`), и отчёт покажет цену. Но честный
+путь для него — обучение, где он станет отдельным классом.
+
 Новые эталоны применяются, только если они **не пускают больше чужих**, чем
 прежние. Иначе они остаются в отчёте, а на узле продолжает работать то, что
 работало: молча ухудшить опознание — худшее, что может сделать кнопка,
@@ -27,6 +37,7 @@ import json
 import logging
 import traceback
 from collections import defaultdict
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -77,14 +88,22 @@ def rebuild_for_view(
     rows: list[Any],
     *,
     device: str = "CPU",
+    include: Sequence[str] = (),
 ) -> dict[str, object]:
-    """Пересчитать эталоны одного ракурса. Возвращает отчёт, файл не трогает."""
+    """Пересчитать эталоны одного ракурса. Возвращает отчёт, файл не трогает.
+
+    По умолчанию обновляются только коты, которых модель уже знает. Кот,
+    которого пространство не обучалось различать, эталона не получает: его
+    векторы лежат там же, где все чужие, и добавление такого эталона рушит
+    опознание остальных — измерено, а не предположено.
+    """
     model = OpenVinoCatIdentity(model_path, device)
     if model.kind != "embedding":
         raise EnrolmentError(
             "на узле стоит классификатор: эталонов у него нет, и пересчитывать нечего. "
             "Сперва нужна модель эмбеддингов"
         )
+    allowed = set(model.prototypes) | set(include)
     vectors = _embeddings(model, dataset_root, rows)
     by_label: dict[str, list[np.ndarray]] = defaultdict(list)
     for split, label, vector in vectors:
@@ -93,7 +112,11 @@ def rebuild_for_view(
 
     prototypes: dict[str, list[float]] = {}
     thin: dict[str, int] = {}
+    unknown: dict[str, int] = {}
     for label, values in sorted(by_label.items()):
+        if label not in allowed:
+            unknown[label] = len(values)
+            continue
         if len(values) < MIN_CROPS_PER_CAT:
             # Кот, показанный трижды, эталона не получает: среднее по трём
             # кадрам описывает освещение, а не кота, и пускать по нему в дом
@@ -128,6 +151,9 @@ def rebuild_for_view(
         "threshold": threshold,
         "crops": {label: len(values) for label, values in sorted(by_label.items())},
         "too_thin": thin,
+        # Коты, размеченные в базе, но незнакомые пространству: им нужно
+        # обучение, а не эталон.
+        "unknown_to_model": unknown,
         "similarity": {key: round(value, 3) for key, value in stats.items()},
         "fresh": fresh,
         "stale": stale,
@@ -173,23 +199,39 @@ def run_job(
     detector_device: str,
     identity_models: dict[str, Path],
     apply: bool = True,
+    include: Sequence[str] = (),
+    dataset_dir: Path | None = None,
 ) -> dict[str, object]:
     status_path = output_dir / "status.json"
     heartbeat = StatusHeartbeat(status_path)
     heartbeat.start()
     report: dict[str, object] = {}
     try:
-        write_status(status_path, state="preparing", message="Готовлю кадры размеченных проходов")
-        dataset_dir = output_dir / "dataset"
-        manifest, dataset_report = build_dataset(
-            database_path,
-            data_dir,
-            ffmpeg_path,
-            "all",
-            dataset_dir,
-            detector_model_path=detector_model_path,
-            detector_device=detector_device,
-        )
+        # Готовый набор кропов можно переиспользовать: распаковка кадров стоит
+        # час процессора, и повторять её ради других настроек пересчёта — та же
+        # работа впустую, что и заново скачивать набор на макбук.
+        if dataset_dir is not None and (dataset_dir / "dataset.jsonl").is_file():
+            write_status(
+                status_path, state="preparing", message="Беру готовые кадры прошлого прогона"
+            )
+            manifest = dataset_dir / "dataset.jsonl"
+            dataset_report = json.loads(
+                (dataset_dir / "dataset-report.json").read_text(encoding="utf-8")
+            )
+        else:
+            write_status(
+                status_path, state="preparing", message="Готовлю кадры размеченных проходов"
+            )
+            dataset_dir = output_dir / "dataset"
+            manifest, dataset_report = build_dataset(
+                database_path,
+                data_dir,
+                ffmpeg_path,
+                "all",
+                dataset_dir,
+                detector_model_path=detector_model_path,
+                detector_device=detector_device,
+            )
         rows_by_view: dict[str, list[Any]] = defaultdict(list)
         for item in load_manifest(manifest):
             rows_by_view[item.view].append(item)
@@ -207,7 +249,7 @@ def run_job(
                 message=f"Считаю эталоны: {role}, кропов {len(rows)}",
             )
             view_report = rebuild_for_view(
-                model_path, dataset_dir, rows, device=detector_device
+                model_path, dataset_dir, rows, device=detector_device, include=include
             )
             if apply and view_report["better"]:
                 apply_prototypes(model_path, view_report)
@@ -217,6 +259,7 @@ def run_job(
                 "threshold": view_report["threshold"],
                 "crops": view_report["crops"],
                 "too_thin": view_report["too_thin"],
+                "unknown_to_model": view_report["unknown_to_model"],
                 "similarity": view_report["similarity"],
                 "before": _quality(view_report["stale"]),  # type: ignore[arg-type]
                 "after": _quality(view_report["fresh"]),  # type: ignore[arg-type]
@@ -269,6 +312,22 @@ def main() -> None:
         action="store_true",
         help="посчитать и показать, но эталоны не подменять",
     )
+    parser.add_argument(
+        "--include",
+        nargs="+",
+        default=(),
+        metavar="ИМЯ",
+        help=(
+            "завести эталон коту, которого модель пока не знает. Работает "
+            "только если пространство его различает — проверяйте по отчёту"
+        ),
+    )
+    parser.add_argument(
+        "--dataset",
+        type=Path,
+        default=None,
+        help="взять готовые кропы прошлого прогона вместо часовой распаковки",
+    )
     args = parser.parse_args()
     models = {
         role: path
@@ -287,6 +346,8 @@ def main() -> None:
         detector_device=args.detector_device,
         identity_models=models,
         apply=not args.dry_run,
+        include=args.include,
+        dataset_dir=args.dataset,
     )
 
 
