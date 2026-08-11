@@ -4,19 +4,45 @@ import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Self
+from zoneinfo import ZoneInfo
 
 import pytest
 
 from src.common.database import GatePass, create_session_factory
+from src.common.gate_access_config import GateAccessConfig
 from src.gate.access import (
-    DECISION_MODE_OFF,
     GatePassRecord,
+    LastOpening,
+    last_opening,
     pass_snapshot_path,
     passes_from_events,
     purge_old_passes,
     record_passes,
 )
+from src.gate.decision import DECISION_DRY_RUN, DECISION_MODE_OFF, PHONE_FACTOR, Factor
 from src.gate.notify import GateEvent, fetch_events
+
+MOSCOW = ZoneInfo("Europe/Moscow")
+
+
+def _config(**overrides: object) -> GateAccessConfig:
+    values: dict[str, object] = {
+        "mode": "dry",
+        "gates": [{"camera": "gate", "relay": 2}],
+        "allowed_names": ["Алексей"],
+    }
+    values.update(overrides)
+    return GateAccessConfig.model_validate(values)
+
+
+def _passes(events, **overrides):  # type: ignore[no-untyped-def]
+    values: dict[str, object] = {
+        "cameras": {"gate": "Калитка"},
+        "config": _config(mode="off"),
+        "timezone": MOSCOW,
+    }
+    values.update(overrides)
+    return passes_from_events(events, **values)  # type: ignore[arg-type]
 
 
 class _Response:
@@ -72,36 +98,29 @@ def test_only_the_gate_cameras_reach_the_journal() -> None:
     Без отбора в журнал калитки поехали бы проходы кошачьей дверцы — и его
     цифры перестали бы означать «люди у калитки».
     """
-    records = passes_from_events(
-        [_event(id="a", camera="gate"), _event(id="b", camera="face")],
-        cameras={"gate": "Калитка"},
-    )
+    records, _ = _passes([_event(id="a", camera="gate"), _event(id="b", camera="face")])
 
     assert [record.frigate_event_id for record in records] == ["a"]
 
 
 def test_a_car_is_not_a_pass() -> None:
     """Журнал про людей: машину лицом не открывают, а строка о ней — шум."""
-    records = passes_from_events(
-        [_event(id="a", label="car"), _event(id="b", label="person")],
-        cameras={"gate": "Калитка"},
-    )
+    records, _ = _passes([_event(id="a", label="car"), _event(id="b", label="person")])
 
     assert [record.frigate_event_id for record in records] == ["b"]
 
 
 def test_a_stranger_is_written_down_too() -> None:
     """«В 02:40 у калитки был кто-то неузнанный» — самая ценная строка журнала."""
-    records = passes_from_events([_event(sub_label=None)], cameras={"gate": "Калитка"})
+    records, _ = _passes([_event(sub_label=None)])
 
     assert records[0].person_name is None
     assert records[0].decision == DECISION_MODE_OFF
 
 
 def test_the_journal_records_who_and_how_certainly() -> None:
-    records = passes_from_events(
-        [_event(sub_label="Алексей", name_score=0.94, zones=("двор", "у калитки"))],
-        cameras={"gate": "Калитка"},
+    records, _ = _passes(
+        [_event(sub_label="Алексей", name_score=0.94, zones=("двор", "у калитки"))]
     )
 
     assert records[0].person_name == "Алексей"
@@ -279,3 +298,126 @@ def test_a_snapshot_name_cannot_escape_its_directory(runtime_path: Path) -> None
 
     assert path.resolve().parent == (runtime_path / "runtime" / "gate-passes").resolve()
     assert "/" not in path.name
+
+
+def test_the_dry_mode_decides_and_writes_it_down() -> None:
+    """Ради этого режим и заведён: настоящая статистика на реальных людях."""
+    records, opening = _passes(
+        [_event(sub_label="Алексей", name_score=0.96)],
+        config=_config(),
+    )
+
+    assert records[0].decision == DECISION_DRY_RUN
+    assert opening is not None
+    assert opening.frigate_event_id == records[0].frigate_event_id
+
+
+def test_a_late_name_changes_the_decision(runtime_path: Path) -> None:
+    """Имя приходит через секунды после события, и решение обязано его догнать.
+
+    Строка, застрявшая на «лицо не узнано», врала бы в самой интересной части
+    журнала — там, где разбирают, кого система не пустила.
+    """
+    factory = _session(runtime_path)
+    first, _ = _passes([_event(sub_label=None)], config=_config())
+    second, _ = _passes([_event(sub_label="Алексей", name_score=0.96)], config=_config())
+
+    with factory() as session:
+        record_passes(session, first)
+        session.commit()
+    with factory() as session:
+        record_passes(session, second)
+        session.commit()
+        stored = session.query(GatePass).one()
+
+    assert first[0].decision != DECISION_DRY_RUN
+    assert stored.decision == DECISION_DRY_RUN
+    assert stored.person_name == "Алексей"
+
+
+def test_the_pause_does_not_fire_on_the_events_own_decision() -> None:
+    """Событие перечитывается каждый опрос всё окно наблюдения.
+
+    Без этого собственное «открыл бы» через секунду становилось бы для того же
+    человека паузой — «прошло 1 с из 20», — и журнал наполнялся бы отказами на
+    ровном месте.
+    """
+    event = _event(sub_label="Алексей", name_score=0.96)
+
+    first, opening = _passes([event], config=_config())
+    second, _ = _passes([event], config=_config(), last_opening=opening)
+
+    assert first[0].decision == DECISION_DRY_RUN
+    assert second[0].decision == DECISION_DRY_RUN
+
+
+def test_the_pause_fires_on_the_next_person() -> None:
+    started = _event().started_at
+    first = _event(id="a", sub_label="Алексей", name_score=0.96, started_at=started)
+    second = _event(id="b", sub_label="Алексей", name_score=0.96, started_at=started + 5)
+
+    records, _ = _passes([first, second], config=_config(cooldown_seconds=20))
+
+    assert records[0].decision == DECISION_DRY_RUN
+    assert records[1].decision == "denied_cooldown"
+
+
+def test_the_pause_survives_a_restart(runtime_path: Path) -> None:
+    """Обновление админки среди дня не должно обнулять паузу."""
+    factory = _session(runtime_path)
+    records, _ = _passes(
+        [_event(sub_label="Алексей", name_score=0.96)],
+        config=_config(),
+    )
+
+    with factory() as session:
+        record_passes(session, records)
+        session.commit()
+    with factory() as session:
+        remembered = last_opening(session)
+
+    assert isinstance(remembered, LastOpening)
+    assert remembered.frigate_event_id == records[0].frigate_event_id
+
+
+def test_the_phone_factor_reaches_the_journal() -> None:
+    """Фактор пишется всегда, даже когда на решение не влияет.
+
+    Иначе включать его пришлось бы вслепую: главный риск этой схемы — ложные
+    отказы, и увидеть их можно только по накопленным строкам.
+    """
+    records, _ = _passes(
+        [_event(sub_label="Алексей", name_score=0.96)],
+        config=_config(),
+        factors_for=lambda name: [Factor(PHONE_FACTOR, "against", "телефона нет в сети")],
+    )
+    factors = json.loads(records[0].factors_json or "[]")
+
+    assert records[0].decision == DECISION_DRY_RUN
+    assert {factor["name"]: factor["verdict"] for factor in factors} == {
+        "face": "for",
+        PHONE_FACTOR: "against",
+    }
+
+
+def test_nothing_in_the_gate_circuit_can_write_to_the_board() -> None:
+    """Сторожевой тест, который не удаляется.
+
+    Правило владельца (`AGENTS.md`) запрещает управлять реальной дверью до
+    отдельного письменного разрешения. Пока его нет, в контуре калитки не
+    должно существовать даже возможности записи: Modbus знает функции 0x05,
+    0x06 и 0x0F, и ни одна из них не должна появиться ни здесь, ни в мониторе
+    двери. День, когда этот тест придётся менять, — это день, когда разрешение
+    получено.
+    """
+    watched = [
+        Path("src/gate/access.py"),
+        Path("src/gate/decision.py"),
+        Path("src/gate/presence.py"),
+        Path("src/web/door_monitor.py"),
+    ]
+    forbidden = ("write_coil", "write_register", "write_single", "0x05", "0x06", "0x0F")
+
+    for path in watched:
+        text = path.read_text(encoding="utf-8")
+        assert not any(marker in text for marker in forbidden), f"{path} умеет писать на плату"

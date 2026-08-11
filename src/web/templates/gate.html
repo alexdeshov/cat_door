@@ -80,6 +80,149 @@
   </div>
 </section>
 
+{# Автооткрытие по лицу. Режимов два: `off` — ни одной команды на плату, `dry` —
+   решение принимается и пишется в журнал, реле не трогается. Значения `on` в
+   системе нет: управление замком требует письменного разрешения владельца, и
+   кода исполнения ещё не существует. #}
+<section class="panel" id="access">
+  <div class="panel-head">
+    <h2>Открытие по лицу</h2>
+    <span class="muted">механика не подключена</span>
+  </div>
+  <div class="panel-body">
+    <div class="segmented" role="group" aria-label="Режим автооткрытия">
+      <button type="button" class="mode-choice" data-mode="off"
+        aria-pressed="{{ 'true' if gate_access.mode == 'off' else 'false' }}">
+        выключено
+      </button>
+      <button type="button" class="mode-choice" data-mode="dry"
+        aria-pressed="{{ 'true' if gate_access.mode == 'dry' else 'false' }}">
+        решать и записывать
+      </button>
+      <button type="button" class="mode-choice" disabled aria-disabled="true"
+        title="Требуется письменное разрешение владельца">
+        открывать
+      </button>
+    </div>
+    <p class="muted" style="font-size: 13px">
+      «Решать и записывать» — это тот же приём, которым проверялась кошачья
+      дверца: система пишет в журнал «открыл бы», но реле не трогает. Он даёт
+      настоящую статистику ложных распознаваний на реальных людях у реальной
+      калитки, и выходить из него стоит не по календарю, а по четырём условиям
+      из <code>docs/gate-access-plan.md</code>.
+    </p>
+
+    <div class="controls">
+      <label for="access-camera">камера калитки</label>
+      <select id="access-camera">
+        <option value="">не выбрана</option>
+        {% for camera in gate_cameras %}
+          <option value="{{ camera.id }}"
+            {{ 'selected' if gate_access.gates and gate_access.gates[0].camera == camera.id }}>
+            {{ camera.display_title }}
+          </option>
+        {% endfor %}
+      </select>
+      <label for="access-zone">зона</label>
+      <input id="access-zone" type="text" placeholder="вся картинка"
+        value="{{ gate_access.gates[0].zone if gate_access.gates else '' }}">
+    </div>
+    <p class="muted" style="font-size: 13px">
+      Зона нужна, чтобы узнанное лицо на террасе не открывало калитку с другой
+      стороны участка. Пусто — вся картинка камеры.
+    </p>
+
+    <div class="controls">
+      <label for="access-min-score">порог узнавания</label>
+      <input id="access-min-score" type="number" min="0" max="1" step="0.01"
+        value="{{ gate_access.min_score }}">
+      <label for="access-cooldown">пауза, с</label>
+      <input id="access-cooldown" type="number" min="0" max="3600"
+        value="{{ gate_access.cooldown_seconds }}">
+      <label for="access-from">с</label>
+      <input id="access-from" type="time" value="{{ gate_access.open_from }}">
+      <label for="access-to">до</label>
+      <input id="access-to" type="time" value="{{ gate_access.open_to }}">
+    </div>
+    <p class="muted" style="font-size: 13px">
+      Frigate ставит имя при 0.9 — свой порог выше намеренно. Пауза защищает от
+      очереди импульсов на одного человека: обратной связи от геркона нет.
+    </p>
+
+    <h3 style="margin: 16px 0 8px; font-size: 15px">Кому открывать</h3>
+    {% if face_library is none %}
+      <p class="notice notice-signal">
+        Библиотеку лиц Frigate спросить не удалось — список имён показан таким,
+        каким он сохранён. Это не то же самое, что «лиц не заведено».
+      </p>
+    {% elif not face_library %}
+      <p class="muted">
+        В библиотеке лиц Frigate пока никого нет. Имена заводятся в его
+        интерфейсе — здесь они только выбираются.
+      </p>
+    {% endif %}
+    <div class="filter-chips" id="access-names" style="margin: 0 0 12px">
+      {% for name in face_library or gate_access.allowed_names %}
+        <button type="button" data-name="{{ name }}"
+          class="filter-chip access-name{{ ' filter-chip-active' if name in gate_access.allowed_names }}"
+          aria-pressed="{{ 'true' if name in gate_access.allowed_names else 'false' }}">
+          {{ name }}
+        </button>
+      {% endfor %}
+    </div>
+    {% if orphan_names %}
+      <p class="notice notice-bad">
+        В разрешённых остались имена, которых нет в библиотеке лиц:
+        {{ orphan_names | join(", ") }}. Такая настройка не сработает никогда —
+        уберите её или заведите лицо во Frigate.
+      </p>
+    {% endif %}
+
+    <h3 style="margin: 16px 0 8px; font-size: 15px">Телефон как второй фактор</h3>
+    <p class="muted" style="font-size: 13px">
+      Лицо — удобство, а не фактор безопасности: распознавание обманывается
+      фотографией на экране. Телефон рядом с именем закрывает этот случай, но не
+      закрывает подготовленного человека — MAC подделывается одной командой, — и
+      присутствие в сети не означает присутствия у калитки. Главный практический
+      риск — ложные отказы, поэтому фактор сперва наблюдается и только потом
+      включается.
+    </p>
+    <div id="access-people">
+      {% for person in gate_access.people %}
+        <div class="controls access-person" data-name="{{ person.name }}">
+          <strong style="min-width: 120px">{{ person.name }}</strong>
+          <label for="phone-ip-{{ loop.index }}">адрес</label>
+          <input id="phone-ip-{{ loop.index }}" class="phone-ip" type="text"
+            value="{{ person.phone_ip }}" placeholder="192.168.х.х">
+          <label for="phone-mac-{{ loop.index }}">MAC</label>
+          <input id="phone-mac-{{ loop.index }}" class="phone-mac" type="text"
+            placeholder="{{ person.phone_mac or 'не задан' }}">
+        </div>
+      {% else %}
+        <p class="muted">
+          Телефоны привязываются к разрешённым именам: отметьте человека выше и
+          сохраните — его строка появится здесь.
+        </p>
+      {% endfor %}
+    </div>
+    <p class="muted" style="font-size: 13px">
+      Пустое поле MAC означает «оставить сохранённый»: наружу он выходит только
+      хвостом. Адреса и MAC — персональные данные семьи: они живут в файле на
+      узле и в репозиторий не попадают.
+    </p>
+    <label class="controls" style="font-size: 13px">
+      <input id="access-second-factor" type="checkbox"
+        {{ 'checked' if gate_access.require_second_factor }}>
+      требовать телефон обязательно
+    </label>
+
+    <div class="controls">
+      <button id="save-access-settings" type="button">Сохранить</button>
+      <span id="access-status" class="muted data" style="font-size: 12px"></span>
+    </div>
+  </div>
+</section>
+
 {# Журнал проходов: кто подошёл к калитке и что система решила. Пишет его
    отдельная служба `catdoor-gate-access`; механики в ней нет, поэтому решение
    пока одно — «автооткрытие выключено». Фильтры живут в адресной строке и
@@ -286,6 +429,74 @@
 {% block scripts %}
 {% include "_circuit_scripts.html" %}
 <script>
+  const accessStatus = document.querySelector("#access-status");
+  const modeChoices = [...document.querySelectorAll(".mode-choice[data-mode]")];
+  const nameChips = [...document.querySelectorAll(".access-name")];
+  let accessMode = {{ gate_access.mode | tojson }};
+
+  function accessPayload() {
+    const camera = document.querySelector("#access-camera").value;
+    const zone = document.querySelector("#access-zone").value.trim();
+    return {
+      mode: accessMode,
+      gates: camera ? [{camera, relay: 2, zone}] : [],
+      allowed_names: nameChips
+        .filter(chip => chip.getAttribute("aria-pressed") === "true")
+        .map(chip => chip.dataset.name),
+      require_second_factor: document.querySelector("#access-second-factor").checked,
+      people: [...document.querySelectorAll(".access-person")].map(row => ({
+        name: row.dataset.name,
+        phone_ip: row.querySelector(".phone-ip").value.trim(),
+        // Пустое поле — «оставить сохранённый»: настоящий MAC наружу не выходит,
+        // и форма не может вернуть его неизменным.
+        phone_mac: row.querySelector(".phone-mac").value.trim() || null
+      })),
+      min_score: Number(document.querySelector("#access-min-score").value),
+      cooldown_seconds: Number(document.querySelector("#access-cooldown").value),
+      open_from: document.querySelector("#access-from").value,
+      open_to: document.querySelector("#access-to").value
+    };
+  }
+
+  modeChoices.forEach(choice => {
+    choice.addEventListener("click", () => {
+      accessMode = choice.dataset.mode;
+      press(modeChoices, button => button.dataset.mode === accessMode);
+      accessStatus.textContent = "не сохранено";
+    });
+  });
+
+  nameChips.forEach(chip => {
+    chip.addEventListener("click", () => {
+      const pressed = chip.getAttribute("aria-pressed") === "true";
+      chip.setAttribute("aria-pressed", pressed ? "false" : "true");
+      chip.classList.toggle("filter-chip-active", !pressed);
+      accessStatus.textContent = "не сохранено";
+    });
+  });
+
+  document.querySelector("#save-access-settings").addEventListener("click", async event => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    accessStatus.textContent = "…";
+    accessStatus.classList.remove("bad");
+    try {
+      const response = await fetch("/api/gate/access-settings", {
+        method: "PUT",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(accessPayload())
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.detail || `ошибка ${response.status}`);
+      location.reload();
+    } catch (error) {
+      accessStatus.textContent = error.message;
+      accessStatus.classList.add("bad");
+    } finally {
+      button.disabled = false;
+    }
+  });
+
   const recordingChoices = [...document.querySelectorAll(".recording-choice")];
   recordingChoices.forEach(choice => {
     choice.addEventListener("click", async () => {
