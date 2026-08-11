@@ -4,10 +4,11 @@
 перезапуск админки не должен оставлять дыру в журнале, а падение журнала не
 должно ронять админку.
 
-**Автоматика реле не трогает.** Режимов автооткрытия ровно два — `off` и
-`dry`, — и решение по лицу заканчивается записью «открыл бы». Единственная
-команда, доходящая до платы, — нажатие кнопки в админке: человек решил сам, и
-это разрешено владельцем письменно (`AGENTS.md`, 2026-08-11).
+**Реле трогает только режим `on`.** В `off` не уходит ни одной команды, в
+`dry` решение заканчивается записью «открыл бы» — это тот же приём, которым
+проверялась кошачья дверца, и он даёт настоящую статистику ложных
+распознаваний. Кнопка в админке работает во всех трёх режимах: они про
+автоматику, а не про человека, нажавшего сам.
 
 Кнопка живёт в вебе, а плата — здесь, потому что у веб-процесса нет и не должно
 быть прав на механику. Веб кладёт просьбу файлом, служба её исполняет и кладёт
@@ -28,7 +29,7 @@ import logging
 import re
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -72,9 +73,12 @@ logger = logging.getLogger("catdoor.gate-access")
 # Журнал ведётся про людей: машина у калитки лицом её не откроет, а строка о
 # ней утопила бы в шуме то, ради чего журнал заведён.
 PASS_LABELS = frozenset({"person"})
-# Решения, после которых считается пауза. `opened` появится вместе с кодом
-# исполнения; в этой версии реальное открытие невозможно.
+# Решения, после которых считается пауза.
 OPENING_DECISIONS = frozenset({DECISION_DRY_RUN, "opened"})
+# Решения, за которыми стоит уже случившееся действие: импульс ушёл или не
+# ушёл, и это факт о физическом мире. Переоценка того же события на следующем
+# опросе фактом не является и переписать его не может.
+TERMINAL_DECISIONS = frozenset({"opened", "error"})
 # Уборка старых строк — раз в час: чаще незачем, а раз в сутки означало бы, что
 # после долгого простоя чистка не случится вовсе.
 PURGE_INTERVAL_SECONDS = 3600.0
@@ -97,6 +101,9 @@ class GatePassRecord:
     # Какие факторы сказали «за», «против» и «не знаю». Без этого разбирать
     # отказы невозможно: видно решение, но не видно, чем оно вызвано.
     factors_json: str | None = None
+    # Что реально ушло на плату. Пусто у всего, кроме исполненных открытий.
+    pulse_ms: int | None = None
+    modbus_ok: bool | None = None
 
 
 def pass_snapshot_path(data_dir: Path, frigate_event_id: str) -> Path:
@@ -192,6 +199,64 @@ def passes_from_events(
     return records, opening
 
 
+def execute_openings(
+    records: list[GatePassRecord],
+    *,
+    config: GateAccessConfig,
+    opener: RelayOpener,
+    already: dict[str, str],
+    notify: Callable[[str], None] | None = None,
+) -> list[GatePassRecord]:
+    """Довести решение «открыл бы» до импульса, если режим это позволяет.
+
+    Отделено от самого решения намеренно: решение — чистая функция, которую
+    проверяют таблицей случаев, а исполнение трогает железо. Смешав их, нельзя
+    было бы проверить ни то ни другое.
+
+    **Повтор исключается по журналу, а не по времени.** Событие перечитывается
+    каждый опрос всё окно наблюдения: без этой проверки один человек у калитки
+    получал бы импульс каждую секунду, а после отказа платы служба долбила бы её
+    без остановки. Строка, у которой уже есть исход, второй раз не исполняется.
+    """
+    if config.mode != "on" or not config.gates:
+        return records
+    relay = config.gates[0].relay
+    executed = []
+    for record in records:
+        if record.decision != DECISION_DRY_RUN:
+            executed.append(record)
+            continue
+        outcome = already.get(record.frigate_event_id)
+        if outcome in TERMINAL_DECISIONS:
+            # Исход уже есть — несём его дальше, а не прежнее «открыл бы».
+            executed.append(replace(record, decision=outcome))
+            continue
+        pulse = opener.pulse(relay, config.pulse_ms)
+        executed.append(
+            replace(
+                record,
+                decision="opened" if pulse.ok else "error",
+                reason=(
+                    f"{record.person_name}: открыто по лицу. {pulse.detail}"
+                    if pulse.ok
+                    else f"{record.person_name}: открыть не удалось. {pulse.detail}"
+                ),
+                pulse_ms=pulse.pulse_ms,
+                modbus_ok=pulse.ok,
+            )
+        )
+        if notify is not None:
+            # Уведомление на каждое открытие — условие разрешения владельца.
+            try:
+                notify(
+                    f"Калитка: {'открыта' if pulse.ok else 'открыть не удалось'} "
+                    f"по лицу — {record.person_name}"
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Уведомление об открытии не ушло: %s", exc)
+    return executed
+
+
 def record_passes(
     session: Session,
     records: list[GatePassRecord],
@@ -236,6 +301,8 @@ def record_passes(
                 decision=record.decision,
                 reason=record.reason,
                 factors_json=record.factors_json,
+                pulse_ms=record.pulse_ms,
+                modbus_ok=record.modbus_ok,
                 snapshot_path=snapshot(record) if snapshot is not None else None,
             )
             session.add(stored)
@@ -248,6 +315,14 @@ def record_passes(
             )
             stored.person_name = record.person_name
             changed = True
+        if stored.decision in TERMINAL_DECISIONS and record.decision not in TERMINAL_DECISIONS:
+            # Строку, за которой стоит ушедший импульс, переоценка не трогает.
+            #
+            # 2026-08-11 на живом прогоне без этой защиты вышло качание:
+            # следующий опрос переписывал «открыл» обратно в «открыл бы», ещё
+            # следующий видел незавершённое событие и открывал снова — калитка
+            # щёлкала каждые две секунды всё окно наблюдения.
+            continue
         if record.decision != stored.decision:
             # Решение обязано меняться вместе с именем: первый опрос видит
             # человека без имени и отказывает, а через две секунды это уже
@@ -262,6 +337,8 @@ def record_passes(
             stored.decision = record.decision
             stored.reason = record.reason
             stored.factors_json = record.factors_json
+            stored.pulse_ms = record.pulse_ms
+            stored.modbus_ok = record.modbus_ok
             changed = True
         if record.score is not None and record.score != stored.score:
             stored.score = record.score
@@ -528,6 +605,25 @@ def run(*, once: bool = False) -> None:
         )
         if records:
             with factory() as session:
+                # Исход прошлых опросов по этим же событиям: он решает, не
+                # исполнено ли открытие уже.
+                already = {
+                    row.frigate_event_id: row.decision
+                    for row in session.execute(
+                        select(GatePass).where(
+                            GatePass.frigate_event_id.in_(
+                                [record.frigate_event_id for record in records]
+                            )
+                        )
+                    ).scalars()
+                }
+                records = execute_openings(
+                    records,
+                    config=config,
+                    opener=opener,
+                    already=already,
+                    notify=telegram,
+                )
                 added, refined = record_passes(
                     session,
                     records,

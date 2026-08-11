@@ -188,11 +188,21 @@ def test_every_decision_carries_the_face_factor() -> None:
 
 
 @pytest.mark.parametrize("mode", ["on", "ON", " on "])
-def test_the_open_mode_is_refused_by_the_settings(mode: str) -> None:
-    """Управление замком требует письменного разрешения владельца.
+def test_the_mode_survives_a_hand_edited_file(mode: str) -> None:
+    """Файл правят и руками, а «ON» с пробелом — тот же режим, что «on»."""
+    assert _config(mode=mode).mode == "on"
 
-    Отказ обязан быть внятным: `Literal` отверг бы значение сообщением про
-    допустимые варианты, из которого причина не видна.
+
+def test_an_unknown_mode_is_refused() -> None:
+    """Опечатка в режиме не должна тихо превратиться во что-нибудь работающее."""
+    with pytest.raises(ValueError, match="mode"):
+        _config(mode="открывать")
+
+
+def test_the_open_mode_actually_opens() -> None:
+    """В `on` решение то же, что в `dry`: разница — в исполнении, не в логике.
+
+    Функция решения о железе не знает вовсе, и это намеренно: одна и та же
+    таблица случаев проверяет оба режима.
     """
-    with pytest.raises(ValueError, match="письменного разрешения"):
-        _config(mode=mode)
+    assert _decide(config=_config(mode="on")).decision == DECISION_DRY_RUN

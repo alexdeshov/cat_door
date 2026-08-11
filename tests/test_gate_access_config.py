@@ -83,17 +83,17 @@ def test_rejected_settings_leave_a_trace(runtime_path: Path, caplog) -> None:
     assert "не приняты" in caplog.text
 
 
-def test_the_open_mode_never_arrives_through_the_file(runtime_path: Path, caplog) -> None:
-    """Правку файла руками правило владельца связывает так же, как и админку."""
+def test_an_unknown_mode_falls_back_to_the_previous_one(runtime_path: Path, caplog) -> None:
+    """Опечатка в режиме не должна ни открыть калитку, ни закрыть её молча."""
     path = gate_access_config_path(runtime_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"mode": "on"}), encoding="utf-8")
+    path.write_text(json.dumps({"mode": "открывать"}), encoding="utf-8")
 
     with caplog.at_level(logging.WARNING):
-        config = load_gate_access_config(path, GateAccessConfig())
+        config = load_gate_access_config(path, GateAccessConfig(mode="dry"))
 
-    assert config.mode == "off"
-    assert "письменного разрешения" in caplog.text
+    assert config.mode == "dry"
+    assert "не приняты" in caplog.text
 
 
 def test_the_relay_must_exist_on_the_board() -> None:
