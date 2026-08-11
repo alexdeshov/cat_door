@@ -1,6 +1,7 @@
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 from fastapi.testclient import TestClient
@@ -2801,3 +2802,64 @@ def test_a_refused_pulse_reaches_the_person_who_pressed(
 
     assert response.status_code == 502
     assert response.json()["detail"] == "Плата не ответила"
+
+
+def test_the_admin_offers_to_remember_cats_without_the_macbook(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    """Пересчёт эталонов — это запоминание, а не обучение, и живёт он на узле."""
+    client = make_client(runtime_path, monkeypatch)
+
+    page = client.get("/")
+
+    assert "Память о котах" in page.text
+    assert 'id="rebuild-prototypes"' in page.text
+    assert client.get("/api/identity/prototypes/status").json()["state"] == "idle"
+
+
+def test_rebuilding_prototypes_needs_a_model(runtime_path: Path, monkeypatch) -> None:
+    """Без модели опознания пересчитывать нечем, и это надо сказать, а не молчать."""
+    client = make_client(runtime_path, monkeypatch)
+
+    response = client.post("/api/identity/prototypes/rebuild")
+
+    assert response.status_code == 422
+    assert "модель опознания" in response.json()["detail"]
+
+
+def test_prototype_rebuild_runs_outside_the_web_process(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    """Перезапуск админки не должен обрывать пересчёт — как и обучение.
+
+    Заодно проверяется, что процессу передана модель своего ракурса: эталоны у
+    ракурсов разные, и чужие означают, что модель не узнаёт никого.
+    """
+    from src.common.settings import Settings
+
+    model = runtime_path / "face-identity.onnx"
+    model.write_bytes(b"synthetic")
+    settings = Settings(
+        data_dir=runtime_path,
+        database_path=runtime_path / "test.sqlite3",
+        identity_face_model_path=model,
+    )
+    started: dict[str, object] = {}
+
+    def fake_spawn(command, **kwargs):
+        started["command"] = command
+        return SimpleNamespace(pid=4242)
+
+    monkeypatch.setattr("src.web.app.spawn_detached", fake_spawn)
+    client = TestClient(create_app(settings))
+
+    response = client.post("/api/identity/prototypes/rebuild")
+
+    assert response.status_code == 202
+    assert response.json()["pid"] == 4242
+    command = started["command"]
+    assert "training.enrolment" in command
+    assert "--face-model" in command
+    assert str(model.resolve()) in command
