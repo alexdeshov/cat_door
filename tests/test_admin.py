@@ -2863,3 +2863,72 @@ def test_prototype_rebuild_runs_outside_the_web_process(
     assert "training.enrolment" in command
     assert "--face-model" in command
     assert str(model.resolve()) in command
+
+
+def test_the_button_reuses_the_crops_of_the_last_run(runtime_path: Path, monkeypatch) -> None:
+    """Распаковка кадров стоит три четверти часа процессора узла.
+
+    Повторять её ради других настроек пересчёта — работа впустую, и первый же
+    повтор 2026-08-11 обошёлся в лишние 45 минут именно так.
+    """
+    from src.common.settings import Settings
+
+    model = runtime_path / "face-identity.onnx"
+    model.write_bytes(b"synthetic")
+    previous = runtime_path / "training" / "prototypes" / "20260811-100000-aaaa" / "dataset"
+    previous.mkdir(parents=True)
+    (previous / "dataset.jsonl").write_text("{}\n", encoding="utf-8")
+    (previous.parent / "status.json").write_text('{"state": "completed"}', encoding="utf-8")
+    started: dict[str, object] = {}
+
+    def fake_spawn(command, **kwargs):
+        started["command"] = command
+        return SimpleNamespace(pid=1)
+
+    monkeypatch.setattr("src.web.app.spawn_detached", fake_spawn)
+    client = TestClient(
+        create_app(
+            Settings(
+                data_dir=runtime_path,
+                database_path=runtime_path / "test.sqlite3",
+                identity_face_model_path=model,
+            )
+        )
+    )
+
+    first = client.post("/api/identity/prototypes/rebuild")
+    assert first.status_code == 202, first.text
+    reused = started["command"]
+    started.clear()
+    # Первый запуск оставил статус «работает», и второй запрос иначе получил бы
+    # честный отказ «пересчёт уже выполняется».
+    for status in (runtime_path / "training" / "prototypes").glob("*/status.json"):
+        status.write_text('{"state": "completed"}', encoding="utf-8")
+    client.post("/api/identity/prototypes/rebuild?reuse=false")
+    fresh = started["command"]
+
+    assert "--dataset" in reused
+    assert str(previous) in reused
+    assert "--dataset" not in fresh
+
+
+def test_old_crops_are_swept_but_reports_stay(runtime_path: Path) -> None:
+    """Каждый прогон — пара гигабайт кадров, и копиться молча они не должны.
+
+    Отчёты остаются: по ним смотрят, что было. Кропы всегда можно нарезать
+    заново.
+    """
+    from training.enrolment import purge_old_runs
+
+    runs = runtime_path / "prototypes"
+    for name in ("20260811-100000", "20260811-110000", "20260811-120000"):
+        (runs / name / "dataset").mkdir(parents=True)
+        (runs / name / "dataset" / "dataset.jsonl").write_text("{}", encoding="utf-8")
+        (runs / name / "status.json").write_text('{"state": "completed"}', encoding="utf-8")
+
+    removed = purge_old_runs(runs, keep=2)
+
+    assert removed == ["20260811-100000"]
+    assert not (runs / "20260811-100000" / "dataset").exists()
+    assert (runs / "20260811-100000" / "status.json").is_file()
+    assert (runs / "20260811-120000" / "dataset").is_dir()

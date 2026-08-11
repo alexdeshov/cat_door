@@ -780,6 +780,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def current_circuits() -> NodeCircuits:
         return load_circuits(circuits_path(settings.data_dir))
 
+    def _latest_dataset(runs_root: Path) -> Path | None:
+        """Кропы последнего прогона, если они уцелели."""
+        for status in sorted(runs_root.glob("*/status.json"), reverse=True):
+            dataset = status.parent / "dataset"
+            if (dataset / "dataset.jsonl").is_file():
+                return dataset
+        return None
+
     def _latest_status(runs_root: Path) -> dict[str, object] | None:
         statuses = sorted(runs_root.glob("*/status.json"))
         return _read_status(statuses[-1]) if statuses else None
@@ -1973,7 +1981,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(500, "Не удалось прочитать статус обучения") from exc
 
     @app.post("/api/identity/prototypes/rebuild", status_code=202)
-    def rebuild_prototypes() -> dict[str, object]:
+    def rebuild_prototypes(reuse: bool = True, include: str = "") -> dict[str, object]:
         """Пересчитать эталоны котов по свежей разметке — прямо на узле.
 
         Сеть при этом не обучается: размеченные проходы прогоняются через уже
@@ -2007,6 +2015,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         output_dir = runs_root / run_id
         status_path = output_dir / "status.json"
         write_status(status_path, state="starting", message="Запуск отдельного процесса")
+        # Распаковка кадров стоит три четверти часа процессора, и повторять её
+        # ради других настроек пересчёта — работа впустую. Кропы прошлого
+        # прогона годятся, пока не появилась новая разметка; когда появилась,
+        # `reuse=false` пересоберёт их заново.
+        previous = _latest_dataset(runs_root) if reuse else None
         command = [
             sys.executable,
             "-m",
@@ -2022,6 +2035,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         ]
         for role, path in identity_paths.items():
             command.extend([f"--{role}-model", str(path.resolve())])
+        if previous is not None:
+            command.extend(["--dataset", str(previous)])
+        if include.strip():
+            command.extend(["--include", *include.split(",")])
         try:
             with (output_dir / "enrolment.log").open("ab") as log:
                 process = spawn_detached(
