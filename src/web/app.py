@@ -27,7 +27,7 @@ from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field, ValidationError
-from sqlalchemy import func, select
+from sqlalchemy import ColumnElement, func, select
 from sqlalchemy.orm import Session
 
 from src.common.archive_depth import ArchiveDepth, read_archive_depth
@@ -77,6 +77,7 @@ from src.common.database import (
     EvaluationRun,
     Event,
     EventPrediction,
+    GatePass,
     ModelVersion,
     create_session_factory,
     session_dependency,
@@ -135,6 +136,28 @@ LABELED_FILTERS = {
     "nocat": Event.label == "not_visible",
     "multi": Event.label == "multiple_cats",
     "all": Event.label != "pending",
+}
+# Журнал калитки: те же чипы-фильтры, что и у проходов дверцы. «Неузнанные»
+# отдельным ключом не для симметрии — это самая интересная часть журнала: по
+# ней видно, кого система не узнала и почему у калитки набирали код руками.
+GATE_PASS_FILTERS = {
+    "all": GatePass.id.is_not(None),
+    "named": GatePass.person_name.is_not(None),
+    "unknown": GatePass.person_name.is_(None),
+}
+# Решения журнала калитки по-русски. Коды заведены все сразу, включая те, что
+# появятся с функцией решения: словарь в шаблоне не должен молча показать
+# английский код в тот день, когда служба научится его писать.
+GATE_PASS_DECISIONS = {
+    "denied_mode_off": "автооткрытие выключено",
+    "dry_run": "открыл бы",
+    "opened": "открыл",
+    "denied_not_allowed": "не в списке",
+    "denied_low_score": "узнан неуверенно",
+    "denied_window": "вне разрешённых часов",
+    "denied_cooldown": "пауза после прошлого",
+    "denied_second_factor": "нет второго фактора",
+    "error": "отказ",
 }
 # Состояние службы Frigate показывается в шапке каждой страницы, а узнаётся
 # запуском systemctl. Короткая память избавляет от процесса на отрисовку, не
@@ -217,6 +240,20 @@ def _notifications_view(settings: Settings) -> dict[str, object]:
 
 def _as_utc(value: datetime) -> datetime:
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
+def local_day_bounds(day: str, timezone: ZoneInfo) -> tuple[datetime, datetime] | None:
+    """Границы местных суток в UTC. `None` — день не разобрался.
+
+    Фильтр «за день» человек задаёт по своим часам, а база живёт в UTC: в
+    Москве полночь наступает на три часа раньше, и без пересчёта в список за
+    сегодня попадали бы три часа вчерашней ночи.
+    """
+    try:
+        start = datetime.strptime(day, "%Y-%m-%d").replace(tzinfo=timezone)
+    except ValueError:
+        return None
+    return (start.astimezone(UTC), (start + timedelta(days=1)).astimezone(UTC))
 
 
 def format_local_time(
@@ -1317,9 +1354,73 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return circuits_view(circuits)
 
     @app.get("/gate", response_class=HTMLResponse)
-    def gate_page(request: Request) -> HTMLResponse:
+    def gate_page(
+        request: Request,
+        session: Annotated[Session, Depends(get_session)],
+        gpage: int = 1,
+        who: str = "all",
+        name: str | None = None,
+        day: str | None = None,
+    ) -> HTMLResponse:
         circuits = current_circuits()
         registry = current_registry()
+        timezone = ZoneInfo(settings.display_timezone)
+        midnight = datetime.now(timezone).replace(hour=0, minute=0, second=0, microsecond=0)
+        today = midnight.strftime("%Y-%m-%d")
+        today_bounds = (
+            midnight.astimezone(UTC),
+            (midnight + timedelta(days=1)).astimezone(UTC),
+        )
+        # Счётчики считаются по всей базе, а не по показанной странице: это
+        # ответ на вопрос «сколько людей у калитки», и он не зависит от того,
+        # что сейчас на экране.
+        summary_row = session.execute(
+            select(
+                func.count(GatePass.id),
+                func.count(GatePass.id).filter(GatePass.person_name.is_not(None)),
+                func.count(GatePass.id).filter(GatePass.person_name.is_(None)),
+                func.count(GatePass.id).filter(
+                    GatePass.created_at >= today_bounds[0],
+                    GatePass.created_at < today_bounds[1],
+                ),
+            )
+        ).one()
+        person_names = session.scalars(
+            select(GatePass.person_name)
+            .where(GatePass.person_name.is_not(None))
+            .distinct()
+            .order_by(GatePass.person_name)
+        ).all()
+        # Незнакомые значения фильтров молча сбрасываются к умолчанию — так же,
+        # как на вкладке дверцы: сохранённая ссылка не должна отдавать ошибку.
+        if who not in GATE_PASS_FILTERS:
+            who = "all"
+        if name is not None and name not in person_names:
+            name = None
+        bounds = local_day_bounds(day, timezone) if day else None
+        if bounds is None:
+            day = None
+        criteria: list[ColumnElement[bool]] = [
+            GatePass.person_name == name if name is not None else GATE_PASS_FILTERS[who]
+        ]
+        if bounds is not None:
+            criteria.append(GatePass.created_at >= bounds[0])
+            criteria.append(GatePass.created_at < bounds[1])
+        total = session.execute(
+            select(func.count(GatePass.id)).where(*criteria)
+        ).scalar_one()
+        pages = max(1, ceil(total / EVENTS_PER_PAGE))
+        gpage = min(max(gpage, 1), pages)
+        passes = session.scalars(
+            select(GatePass)
+            .where(*criteria)
+            # Тай-брейк по id обязателен: события у калитки приходят пачками и
+            # делят время начала, а при неустойчивом порядке одна и та же
+            # строка прыгала бы между страницами.
+            .order_by(GatePass.created_at.desc(), GatePass.id.desc())
+            .limit(EVENTS_PER_PAGE)
+            .offset((gpage - 1) * EVENTS_PER_PAGE)
+        ).all()
         return templates.TemplateResponse(
             request,
             "gate.html",
@@ -1332,7 +1433,42 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     if camera.circuit == "gate"
                 ],
                 "stream_version": uuid4().hex,
+                "passes": passes,
+                "pass_summary": {
+                    "total": summary_row[0],
+                    "named": summary_row[1],
+                    "unknown": summary_row[2],
+                    "today": summary_row[3],
+                },
+                "pass_page": gpage,
+                "pass_pages": pages,
+                "pass_total": total,
+                "pass_who": who,
+                "pass_name": name,
+                "pass_day": day,
+                "pass_today": today,
+                "person_names": person_names,
+                "pass_decisions": GATE_PASS_DECISIONS,
             },
+        )
+
+    @app.get("/gate/passes/{pass_id}/snapshot")
+    def gate_pass_snapshot(
+        pass_id: int,
+        session: Annotated[Session, Depends(get_session)],
+    ) -> FileResponse:
+        """Кадр прохода. Запись прохода неизменяема, поэтому кэш навсегда."""
+        stored = session.get(GatePass, pass_id)
+        if stored is None or not stored.snapshot_path:
+            raise HTTPException(404, "Снимок не найден")
+        root = settings.data_dir.resolve()
+        path = (root / stored.snapshot_path).resolve()
+        if root not in path.parents or not path.is_file():
+            raise HTTPException(404, "Снимок не найден")
+        return FileResponse(
+            path,
+            media_type="image/jpeg",
+            headers={"Cache-Control": "public, max-age=31536000, immutable"},
         )
 
     @app.get("/nvr", response_class=HTMLResponse)

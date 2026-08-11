@@ -1,0 +1,30 @@
+{# Строка журнала калитки. Контекст: entry (GatePass), pass_decisions.
+
+   Карточка кошачьего прохода (`_event_card.html`) сюда не годится: она про
+   видео, метки и обучение. Общая у них только вёрстка, и она взята отсюда. #}
+<article class="pass" data-pass-id="{{ entry.id }}">
+  <div class="pass-media">
+    {% if entry.snapshot_path %}
+      <img class="viewport" loading="lazy"
+        alt="Кадр прохода {{ entry.person_name or 'неизвестного' }}"
+        src="/gate/passes/{{ entry.id }}/snapshot">
+    {% else %}
+      <div class="viewport viewport-empty">Кадра нет</div>
+    {% endif %}
+  </div>
+  <div class="pass-body">
+    <div class="pass-head">
+      <strong>{{ entry.person_name or "неизвестный" }}</strong>
+      <span class="faint data">{{ entry.created_at | local_time }}</span>
+    </div>
+    <p class="muted" style="font-size: 13px">
+      {{ pass_decisions.get(entry.decision, entry.decision) }}
+      {%- if entry.score is not none %} · уверенность {{ "%.2f" | format(entry.score) }}{% endif -%}
+      {%- if entry.zone %} · {{ entry.zone }}{% endif -%}
+      · {{ entry.camera }}
+    </p>
+    {% if entry.reason and entry.decision != "denied_mode_off" %}
+      <p class="muted" style="font-size: 13px">{{ entry.reason }}</p>
+    {% endif %}
+  </div>
+</article>

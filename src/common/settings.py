@@ -204,6 +204,12 @@ class Settings(BaseSettings):
     gate_notify_unknown_cooldown_seconds: float = Field(default=600.0, ge=0.0, le=86400.0)
     gate_notify_cooldown_seconds: float = Field(default=120.0, ge=0.0, le=86400.0)
     gate_notify_poll_seconds: float = Field(default=10.0, ge=1.0, le=600.0)
+    # Журнал проходов калитки. Опрос втрое чаще уведомлений: сообщению
+    # безразлично, придёт оно секундой позже, а решению об открытии — нет,
+    # человек за четыре секунды успевает набрать код руками.
+    gate_access_poll_seconds: float = Field(default=1.0, ge=0.5, le=60.0)
+    # Сколько дней хранить строки журнала и снимки к ним. Ноль — не удалять.
+    gate_access_retention_days: int = Field(default=30, ge=0, le=3650)
     local_training_epochs: int = Field(default=2, ge=1, le=100)
     web_host: str = "127.0.0.1"
     web_port: int = Field(default=8080, ge=1, le=65535)

@@ -80,6 +80,105 @@
   </div>
 </section>
 
+{# Журнал проходов: кто подошёл к калитке и что система решила. Пишет его
+   отдельная служба `catdoor-gate-access`; механики в ней нет, поэтому решение
+   пока одно — «автооткрытие выключено». Фильтры живут в адресной строке и
+   переживают F5, как на вкладке дверцы. #}
+<div class="tallies">
+  <a class="tally" href="/gate#passes">
+    <span class="tally-value">{{ pass_summary.total }}</span>
+    <span class="tally-key">проходов</span>
+  </a>
+  <a class="tally" href="/gate?day={{ pass_today }}#passes">
+    <span class="tally-value">{{ pass_summary.today }}</span>
+    <span class="tally-key">сегодня</span>
+  </a>
+  <a class="tally" href="/gate?who=named#passes">
+    <span class="tally-value">{{ pass_summary.named }}</span>
+    <span class="tally-key">узнанных</span>
+  </a>
+  <a class="tally" href="/gate?who=unknown#passes">
+    <span class="tally-value">{{ pass_summary.unknown }}</span>
+    <span class="tally-key">неузнанных</span>
+  </a>
+</div>
+
+<section class="panel" id="passes">
+  <div class="panel-head">
+    <h2>Журнал проходов</h2>
+    <span class="muted">
+      {%- if pass_total -%}
+        {{ pass_total }} шт.
+      {%- else -%}
+        под фильтр ничего не попало
+      {%- endif -%}
+    </span>
+  </div>
+  <div class="filter-chips" style="margin: 0 0 12px">
+    {% for key, title in [
+      ("all", "все"), ("named", "узнанные"), ("unknown", "неузнанные"),
+    ] %}
+      <a class="filter-chip{{ ' filter-chip-active' if pass_who == key and not pass_name }}"
+        href="/gate?who={{ key }}{{ ('&day=' ~ pass_day) if pass_day else '' }}#passes">{{ title }}</a>
+    {% endfor %}
+    {% for person in person_names %}
+      <a class="filter-chip{{ ' filter-chip-active' if pass_name == person }}"
+        href="/gate?name={{ person | urlencode }}{{ ('&day=' ~ pass_day) if pass_day else '' }}#passes">{{ person }}</a>
+    {% endfor %}
+    {% if pass_day %}
+      <a class="filter-chip filter-chip-active"
+        href="/gate?who={{ pass_who }}{{ ('&name=' ~ (pass_name | urlencode)) if pass_name else '' }}#passes">{{ pass_day }} ✕</a>
+    {% endif %}
+  </div>
+  <form class="controls" method="get" action="/gate" style="margin: 0 0 12px">
+    <input type="hidden" name="who" value="{{ pass_who }}">
+    {% if pass_name %}<input type="hidden" name="name" value="{{ pass_name }}">{% endif %}
+    <label class="muted" style="font-size: 13px" for="pass-day">день</label>
+    <input id="pass-day" type="date" name="day" value="{{ pass_day or '' }}" max="{{ pass_today }}">
+    <button type="submit">Показать</button>
+  </form>
+  <div class="passes">
+  {% for entry in passes %}
+    {% include "_gate_pass_card.html" %}
+  {% else %}
+    <div class="panel-body">
+      <p class="muted">
+        {% if pass_summary.total %}
+          Под фильтр ничего не попало.
+        {% else %}
+          Журнал пуст. Строки появятся, когда служба
+          <code>catdoor-gate-access</code> увидит человека на камере калитки.
+        {% endif %}
+      </p>
+    </div>
+  {% endfor %}
+  </div>
+  {% if pass_pages > 1 %}
+    {% set pass_suffix = ("&name=" ~ (pass_name | urlencode)) if pass_name else ("&who=" ~ pass_who) %}
+    {% set day_suffix = ("&day=" ~ pass_day) if pass_day else "" %}
+    <nav class="pager" aria-label="Страницы журнала калитки">
+      {% if pass_page > 1 %}
+        <a class="button" href="/gate?gpage={{ pass_page - 1 }}{{ pass_suffix }}{{ day_suffix }}#passes">← Назад</a>
+      {% else %}
+        <span class="button disabled" aria-disabled="true">← Назад</span>
+      {% endif %}
+      <span class="muted data">{{ pass_page }} из {{ pass_pages }}</span>
+      {% if pass_page < pass_pages %}
+        <a class="button" href="/gate?gpage={{ pass_page + 1 }}{{ pass_suffix }}{{ day_suffix }}#passes">Вперёд →</a>
+      {% else %}
+        <span class="button disabled" aria-disabled="true">Вперёд →</span>
+      {% endif %}
+    </nav>
+  {% endif %}
+  <div class="panel-body">
+    <p class="muted" style="font-size: 13px">
+      Незнакомые лица записываются тоже: строка «в 02:40 у калитки был кто-то
+      неузнанный» стоит дороже большинства узнанных. Механикой журнал не
+      распоряжается — калиткой управляет только контроллер на ней самой.
+    </p>
+  </div>
+</section>
+
 <section class="panel">
   <div class="panel-head">
     <h2>Распознавание людей</h2>

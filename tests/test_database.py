@@ -30,9 +30,11 @@ def test_initial_migration_is_applied_once() -> None:
         ("004_automatic_event_metadata",),
         ("005_model_metrics",),
         ("006_preview_offset",),
+        ("007_gate_passes",),
     ]
     assert "events" in tables
     assert {"model_versions", "event_predictions", "evaluation_runs"} <= tables
+    assert "gate_passes" in tables
 
 
 def test_sqlite_uses_wal_and_normal_synchronous_mode(runtime_path: Path) -> None:

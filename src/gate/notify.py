@@ -57,6 +57,12 @@ class GateEvent:
     sub_label: str | None
     started_at: float
     has_snapshot: bool
+    # Уверенность распознавания лица, а не объекта: решение об открытии
+    # принимается по ней. Уведомлениям она не нужна, журналу калитки — нужна.
+    name_score: float | None = None
+    zones: tuple[str, ...] = ()
+    # `None` значит «событие ещё идёт»: Frigate закрывает его позже.
+    ended_at: float | None = None
 
 
 def gate_cameras(data_dir: Path) -> dict[str, str]:
@@ -113,6 +119,37 @@ def forget_old(sent: dict[str, float], *, older_than: float) -> dict[str, float]
     return {key: value for key, value in sent.items() if value >= older_than}
 
 
+def _optional_float(*values: object) -> float | None:
+    """Первое значение, которое похоже на число. Иначе `None`."""
+    for value in values:
+        if isinstance(value, int | float) and not isinstance(value, bool):
+            return float(value)
+    return None
+
+
+def _event_from_payload(item: dict[str, object]) -> GateEvent:
+    """Событие Frigate из ответа API.
+
+    Уверенность распознавания лежит то в корне ответа, то во вложенном `data` —
+    Frigate переносил её между версиями. Читаются оба места: узел обновляют, а
+    журнал не должен молча остаться без цифры.
+    """
+    data = item.get("data")
+    data = data if isinstance(data, dict) else {}
+    zones = item.get("zones")
+    return GateEvent(
+        id=str(item.get("id", "")),
+        camera=str(item.get("camera", "")),
+        label=str(item.get("label", "")),
+        sub_label=(str(item["sub_label"]) if item.get("sub_label") else None),
+        started_at=_optional_float(item.get("start_time")) or 0.0,
+        has_snapshot=bool(item.get("has_snapshot")),
+        name_score=_optional_float(data.get("sub_label_score"), item.get("sub_label_score")),
+        zones=tuple(str(zone) for zone in zones) if isinstance(zones, list) else (),
+        ended_at=_optional_float(item.get("end_time")),
+    )
+
+
 def fetch_events(api_url: str, after: float, *, timeout: float = 10.0) -> list[GateEvent]:
     query = urllib.parse.urlencode({"after": f"{after:.3f}", "limit": EVENTS_PER_POLL})
     url = f"{api_url.rstrip('/')}/api/events?{query}"
@@ -125,18 +162,7 @@ def fetch_events(api_url: str, after: float, *, timeout: float = 10.0) -> list[G
         # Ответ не того вида — это тоже «Frigate не ответил» с точки зрения
         # вызывающего: он умеет только подождать и спросить снова.
         raise RuntimeError("Frigate вернул не список событий")  # noqa: TRY004
-    events = [
-        GateEvent(
-            id=str(item.get("id", "")),
-            camera=str(item.get("camera", "")),
-            label=str(item.get("label", "")),
-            sub_label=(str(item["sub_label"]) if item.get("sub_label") else None),
-            started_at=float(item.get("start_time", 0.0)),
-            has_snapshot=bool(item.get("has_snapshot")),
-        )
-        for item in payload
-        if isinstance(item, dict)
-    ]
+    events = [_event_from_payload(item) for item in payload if isinstance(item, dict)]
     # Frigate отдаёт свежие первыми, а рассказывать надо по порядку.
     return sorted(events, key=lambda event: event.started_at)
 
