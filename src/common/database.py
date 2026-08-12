@@ -157,6 +157,9 @@ class GatePass(Base):
     # бывает только при включённом втором шансе.
     pulses: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     last_pulse_at: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Какой была створка в момент импульса. По этому второй шанс отличает
+    # пропавший зря импульс от использованного.
+    pulse_gate_state: Mapped[str | None] = mapped_column(String(20), nullable=True)
     # Открылась ли калитка на самом деле. Геркона на ней нет — поля заведены
     # заранее и остаются пустыми. Ответ на тот же вопрос приходит от
     # классификатора Frigate и живёт в `gate_state_*`: смешивать источники в
@@ -218,19 +221,17 @@ def _statements(script: str) -> list[str]:
     """Разбить миграцию на отдельные команды.
 
     Миграции проекта — простой DDL без точек с запятой внутри строковых
-    литералов, поэтому деления по `;` достаточно. Пустые куски и остатки
-    комментариев отбрасываются: `execute` на них ругается.
+    литералов, поэтому деления по `;` достаточно. Но **не до** выброса
+    комментариев: они здесь по-русски и живые, а точка с запятой в русской
+    фразе — обычное дело. 12 августа такая запятая разрезала команду пополам, и
+    миграция упала с `near "импульс": syntax error`.
+
+    Поэтому сначала убираем строки комментариев, и только потом делим.
     """
-    parts = []
-    for chunk in script.split(";"):
-        meaningful = [
-            line
-            for line in chunk.splitlines()
-            if line.strip() and not line.strip().startswith("--")
-        ]
-        if meaningful:
-            parts.append(chunk.strip())
-    return parts
+    without_comments = "\n".join(
+        line for line in script.splitlines() if not line.strip().startswith("--")
+    )
+    return [chunk.strip() for chunk in without_comments.split(";") if chunk.strip()]
 
 
 def _already_applied(exc: sqlite3.OperationalError) -> bool:

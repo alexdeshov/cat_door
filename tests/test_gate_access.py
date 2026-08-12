@@ -1103,7 +1103,14 @@ def test_a_pulse_still_goes_while_the_person_is_there(ended_at: float | None, no
 
 
 def _prior(**overrides: object) -> PriorPass:
-    values: dict[str, object] = {"decision": "opened", "pulses": 1, "last_pulse_at": 1000.0}
+    values: dict[str, object] = {
+        "decision": "opened",
+        "pulses": 1,
+        "last_pulse_at": 1000.0,
+        # Импульс, попавший в уже открытую створку, — тот единственный случай,
+        # ради которого второй шанс и заведён.
+        "pulse_gate_state": "open",
+    }
     values.update(overrides)
     return PriorPass(**values)  # type: ignore[arg-type]
 
@@ -1160,6 +1167,22 @@ def test_the_gate_opens_again_when_it_closed_and_the_person_is_still_there() -> 
         pytest.param(
             _prior(last_pulse_at=None), _chance(), 1005.0, 1010.0, "когда", id="строка без времени"
         ),
+        pytest.param(
+            _prior(pulse_gate_state="closed"),
+            _chance(),
+            1005.0,
+            1010.0,
+            "импульс сработал",
+            id="импульс попал в закрытую створку",
+        ),
+        pytest.param(
+            _prior(pulse_gate_state="unknown"),
+            _chance(),
+            1005.0,
+            1010.0,
+            "неизвестно",
+            id="состояние створки неизвестно",
+        ),
     ],
 )
 def test_the_second_chance_has_its_limits(
@@ -1210,3 +1233,48 @@ def test_the_repeat_is_counted_in_the_journal(runtime_path: Path) -> None:
     assert row.pulses == 2
     assert row.last_pulse_at == pytest.approx(1010.0)
     assert row.reason == "открыто ещё раз"
+
+
+def test_the_gate_does_not_beep_after_someone_who_got_in() -> None:
+    """12 августа калитка пикнула вслед прошедшему, и это была не мелочь.
+
+        17:46:31  импульс — створка была закрыта
+        17:46:36  створка открыта   ← человек прошёл
+        17:46:51  створка закрыта
+        17:46:51  импульс второй    ← лишний
+
+    Отличие удачи от неудачи — состояние створки в момент импульса. Закрыта:
+    защёлку отпустили для человека, он открыл и прошёл. Открыта: защёлка и так
+    была отпущена, наш импульс ничего не изменил.
+    """
+    opener = _FakeOpener(PulseResult(True, "ок", 500))
+    records, _ = _passes([_event(sub_label="Алексей", name_score=0.96)], config=_chance())
+
+    executed = execute_openings(
+        records,
+        config=_chance(),
+        opener=opener,
+        already={records[0].frigate_event_id: _prior(pulse_gate_state="closed")},
+        gate_closed_at=1005.0,
+        now=1010.0,
+    )
+
+    assert opener.calls == []
+    assert executed[0].decision == "opened"
+
+
+def test_the_state_of_the_gate_at_the_pulse_is_remembered() -> None:
+    """Без этого второй шанс не отличит пропавший импульс от сработавшего."""
+    opener = _FakeOpener(PulseResult(True, "ок", 500))
+    records, _ = _passes([_event(sub_label="Алексей", name_score=0.96)], config=_chance())
+
+    executed = execute_openings(
+        records,
+        config=_chance(),
+        opener=opener,
+        already={},
+        gate_state="open",
+        now=1000.0,
+    )
+
+    assert executed[0].pulse_gate_state == "open"

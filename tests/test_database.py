@@ -37,6 +37,7 @@ def test_initial_migration_is_applied_once() -> None:
         ("011_gate_passes_repair",),
         ("012_gate_pass_label",),
         ("013_gate_pass_pulses",),
+        ("014_gate_pass_pulse_state",),
     ]
     assert "events" in tables
     assert {"model_versions", "event_predictions", "evaluation_runs"} <= tables
@@ -126,3 +127,24 @@ def test_a_migration_torn_in_the_middle_heals_itself(runtime_path: Path) -> None
         columns = {row[1] for row in connection.execute("PRAGMA table_info(gate_passes)")}
 
     assert set(torn) <= columns
+
+
+def test_a_semicolon_inside_a_comment_does_not_split_a_statement() -> None:
+    """Комментарии в миграциях по-русски, а точка с запятой в русской фразе обычна.
+
+    12 августа такая запятая разрезала `ALTER TABLE` пополам, и миграция упала
+    с `near "импульс": syntax error`.
+    """
+    from src.common.database import _statements
+
+    parts = _statements(
+        "-- один прошёл; другой остался\n"
+        "ALTER TABLE gate_passes ADD COLUMN a TEXT;\n"
+        "-- и ещё; хвост\n"
+        "ALTER TABLE gate_passes ADD COLUMN b TEXT;\n"
+    )
+
+    assert parts == [
+        "ALTER TABLE gate_passes ADD COLUMN a TEXT",
+        "ALTER TABLE gate_passes ADD COLUMN b TEXT",
+    ]
