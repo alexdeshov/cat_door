@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import logging
 import socket
+import time
 from dataclasses import dataclass
 
 from src.web.door_monitor import modbus_crc16
@@ -116,6 +117,21 @@ class RelayOpener:
     host: str
     port: int = 4196
     timeout: float = 3.0
+    # Молчание платы — не отказ, а потерянный ответ, и повторить его стоит.
+    #
+    # Плата одна на два контура, и говорят с ней двое: монитор дверцы держит
+    # своё соединение и опрашивает входы дважды в секунду, а импульс приходит
+    # с новым соединением. 2026-08-12 это дважды сошлось неудачно — в 17:04:16
+    # и в 17:18:11 плата не ответила за три секунды, и человеку у калитки не
+    # открылось, хотя узнан он был уверенно (0.99).
+    #
+    # Повтор безопасен именно здесь: команда «замкнуть на 500 мс» не
+    # накапливается. Если первый кадр всё же дошёл, а потерялся ответ, второй
+    # просто отпустит защёлку ещё раз — калитка от этого не откроется дважды.
+    # Поэтому повторяем только молчание и обрыв: на отказ самой платы
+    # («такого регистра нет») повтор ответит тем же, и долбить её незачем.
+    retries: int = 1
+    retry_pause: float = 0.3
 
     def pulse(self, channel: int, milliseconds: int) -> PulseResult:
         """Замкнуть контакт на заданное время. Исключений не бросает.
@@ -131,16 +147,45 @@ class RelayOpener:
             address = flash_address(channel)
         except ValueError as exc:
             return PulseResult(False, str(exc), 0)
-        try:
-            with socket.create_connection((self.host, self.port), timeout=self.timeout) as link:
-                link.settimeout(self.timeout)
-                link.sendall(flash_frame(address, units))
-                parse_flash_reply(link.recv(64), address, units)
-        except (OSError, TimeoutError) as exc:
-            logger.warning("Импульс на канал %d не ушёл: %s", channel, exc)
-            return PulseResult(False, f"Плата не ответила: {exc}", duration)
-        except ValueError as exc:
-            logger.warning("Плата ответила неожиданно: %s", exc)
-            return PulseResult(False, f"Плата ответила неожиданно: {exc}", duration)
-        logger.info("Импульс %d мс на канал %d ушёл", duration, channel)
-        return PulseResult(True, f"Импульс {duration} мс на канал {channel}", duration)
+        attempts = max(1, self.retries + 1)
+        for attempt in range(1, attempts + 1):
+            try:
+                with socket.create_connection(
+                    (self.host, self.port), timeout=self.timeout
+                ) as link:
+                    link.settimeout(self.timeout)
+                    link.sendall(flash_frame(address, units))
+                    parse_flash_reply(link.recv(64), address, units)
+            except (OSError, TimeoutError) as exc:
+                if attempt < attempts:
+                    logger.warning(
+                        "Плата молчит (попытка %d из %d): %s — повторяю",
+                        attempt,
+                        attempts,
+                        exc,
+                    )
+                    time.sleep(self.retry_pause)
+                    continue
+                logger.warning("Импульс на канал %d не ушёл: %s", channel, exc)
+                return PulseResult(
+                    False,
+                    f"Плата не ответила ни на одну из {attempts} попыток: {exc}",
+                    duration,
+                )
+            except ValueError as exc:
+                # Плата ответила, и ответ негодный. Это её слово, а не потеря:
+                # повтор принесёт тот же ответ.
+                logger.warning("Плата ответила неожиданно: %s", exc)
+                return PulseResult(False, f"Плата ответила неожиданно: {exc}", duration)
+            if attempt > 1:
+                logger.info(
+                    "Импульс %d мс на канал %d ушёл со второй попытки", duration, channel
+                )
+                return PulseResult(
+                    True,
+                    f"Импульс {duration} мс на канал {channel} (со второй попытки)",
+                    duration,
+                )
+            logger.info("Импульс %d мс на канал %d ушёл", duration, channel)
+            return PulseResult(True, f"Импульс {duration} мс на канал {channel}", duration)
+        raise AssertionError("недостижимо: цикл всегда возвращает результат")

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import socket
 import threading
+import time
 
 import pytest
 
@@ -138,3 +139,90 @@ def test_the_pulse_is_bounded() -> None:
     assert result.ok
     assert result.pulse_ms == MAX_PULSE_MS
     assert sent[0] == flash_frame(0x0200, MAX_PULSE_MS // 100)
+
+
+def _flaky_board(
+    *, silent_first: int, attempts: list[bytes]
+) -> tuple[int, threading.Thread, socket.socket]:
+    """Плата, которая молчит первые `silent_first` раз, а потом отвечает эхом.
+
+    Каждое соединение обслуживается отдельным потоком: молчащая плата не должна
+    заодно перестать принимать следующую попытку — иначе проверялся бы не
+    повтор, а невнимательный заменитель.
+    """
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen(4)
+    workers: list[threading.Thread] = []
+
+    def handle(link: socket.socket, silent: bool) -> None:
+        with link:
+            attempts.append(link.recv(64))
+            if silent:
+                time.sleep(0.5)
+            else:
+                link.sendall(attempts[-1])
+
+    def serve() -> None:
+        for number in range(silent_first + 1):
+            link, _ = server.accept()
+            worker = threading.Thread(target=handle, args=(link, number < silent_first))
+            worker.start()
+            workers.append(worker)
+        for worker in workers:
+            worker.join()
+
+    thread = threading.Thread(target=serve)
+    thread.start()
+    return server.getsockname()[1], thread, server
+
+
+def test_a_silent_board_gets_one_more_chance() -> None:
+    """Молчание платы — потерянный ответ, а не отказ.
+
+    12 августа плата дважды не ответила за три секунды, и человеку у калитки не
+    открылось, хотя узнан он был на 0.99. Плата одна на два контура, и монитор
+    дверцы опрашивает её дважды в секунду — совпадения неизбежны.
+    """
+    attempts: list[bytes] = []
+    port, thread, server = _flaky_board(silent_first=1, attempts=attempts)
+    opener = RelayOpener("127.0.0.1", port=port, timeout=0.2, retry_pause=0.0)
+
+    try:
+        result = opener.pulse(1, 500)
+    finally:
+        thread.join()
+        server.close()
+
+    assert result.ok
+    assert "со второй попытки" in result.detail
+    assert len(attempts) == 2
+
+
+def test_a_board_that_says_no_is_not_pestered() -> None:
+    """Отказ платы — её слово, и повтор принесёт ровно то же самое."""
+    attempts: list[bytes] = []
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen(2)
+
+    def serve() -> None:
+        link, _ = server.accept()
+        with link:
+            attempts.append(link.recv(64))
+            body = bytes((0x01, 0x85, 0x02))
+            link.sendall(body + modbus_crc16(body))
+
+    thread = threading.Thread(target=serve)
+    thread.start()
+    opener = RelayOpener("127.0.0.1", port=server.getsockname()[1], retry_pause=0.0)
+
+    try:
+        result = opener.pulse(1, 500)
+    finally:
+        thread.join()
+        server.close()
+
+    assert not result.ok
+    assert "недопустимый адрес" in result.detail
+    assert len(attempts) == 1
