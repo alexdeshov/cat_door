@@ -293,12 +293,17 @@
         value="{{ cat_door.min_confidence }}">
       <label for="door-cooldown">пауза, с</label>
       <input id="door-cooldown" type="number" min="0" max="3600"
-        value="{{ cat_door.cooldown_seconds }}">
+        value="{{ cat_door.cooldown_seconds }}" title="Пока не действует: автоматики нет">
     </div>
     <p class="muted" style="font-size: 13px">
       Защёлка на 12 вольт кратковременного включения: держать её дольше
-      нескольких секунд — греть катушку. Пауза защищает от очереди открытий,
-      когда кот гуляет у дверцы.
+      нескольких секунд — греть катушку.
+    </p>
+    <p class="notice notice-signal">
+      Порог опознания и пауза <strong>пока не действуют</strong>: автоматического
+      открытия по коту ещё нет, а кнопка выше открывает без них — на то она и
+      ручная. Настройки заведены заранее, чтобы не терять уже выбранные числа,
+      когда автоматика появится.
     </p>
 
     <div class="filter-chips" id="door-cats" style="margin: 0 0 12px">

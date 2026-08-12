@@ -3148,3 +3148,16 @@ def test_an_old_heartbeat_does_not_excuse_the_service(runtime_path: Path, monkey
     response = client.post("/api/gate/open")
 
     assert response.status_code == 504
+
+
+def test_settings_that_do_nothing_say_so(runtime_path: Path, monkeypatch) -> None:
+    """Настройка, которая ничего не делает, врёт человеку.
+
+    Порог опознания и пауза у дверцы заведены под будущую автоматику, а ручная
+    кнопка открывает без них. Пока автоматики нет, панель обязана это сказать.
+    """
+    client = make_client(runtime_path, monkeypatch)
+
+    page = client.get("/")
+
+    assert "пока не действуют" in page.text
