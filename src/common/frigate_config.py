@@ -300,19 +300,39 @@ def build_config(
     preserved: str = "",
     detector_device: str = "CPU",
     preserved_cameras: dict[str, list[str]] | None = None,
+    mqtt: tuple[str, int] | None = None,
 ) -> str:
-    """Текст `config.yml`. Без камер — валидный конфиг без единой камеры."""
+    """Текст `config.yml`. Без камер — валидный конфиг без единой камеры.
+
+    `mqtt` — адрес брокера **так, как его видит контейнер Frigate**: в compose
+    это имя сервиса, а не `127.0.0.1`, потому что в мостовой сети loopback
+    контейнера — это он сам. `None` оставляет MQTT выключенным.
+    """
     cameras = frigate_cameras(registry, circuits)
     continuous_days, motion_days = _retention(circuits.gate_recording)
     header = [
         "# Собран автоматически из инвентаря камер CatDoor. Правки руками",
         "# перетрёт примиритель: меняйте камеры на вкладке «Камеры» в админке.",
         "",
-        "mqtt:",
-        "  # Понадобится на этапе отчётов о перемещениях. Пока брокера нет, и",
-        "  # включённый MQTT только сыпал бы ошибками подключения.",
-        "  enabled: false",
-        "",
+        *(
+            [
+                "mqtt:",
+                "  # Через брокер приходит то, чего нет в HTTP API: состояние",
+                "  # классификатора калитки и обновления треков по ходу прохода.",
+                "  # Опрос раз в секунду ни того, ни другого не даёт.",
+                "  enabled: true",
+                f"  host: {mqtt[0]}",
+                f"  port: {mqtt[1]}",
+                "",
+            ]
+            if mqtt is not None
+            else [
+                "mqtt:",
+                "  # Брокера нет, а включённый MQTT сыпал бы ошибками подключения.",
+                "  enabled: false",
+                "",
+            ]
+        ),
         "detectors:",
         "  openvino:",
         "    type: openvino",
