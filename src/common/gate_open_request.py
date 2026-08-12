@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 
 from pydantic import BaseModel, Field
@@ -84,6 +85,35 @@ def open_request_path(data_dir: Path) -> Path:
 
 def open_result_path(data_dir: Path) -> Path:
     return data_dir / "runtime" / "gate-open-result.json"
+
+
+def heartbeat_path(data_dir: Path) -> Path:
+    """Отметка «служба жива и слушает просьбы».
+
+    Нужна ради честного сообщения человеку. Не дождавшись ответа, админка иначе
+    может сказать только «служба не отвечает» — и это ложь, когда служба просто
+    занята опросом Frigate. «Занята, повторите» и «не работает, проверьте» ведут
+    человека к разным действиям, и путать их нельзя.
+    """
+    return data_dir / "runtime" / "gate-open-alive"
+
+
+def touch_heartbeat(path: Path) -> None:
+    """Отметиться. Пишется обычной записью: переживать обрыв питания незачем."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"{time.time():.3f}", encoding="utf-8")
+    except OSError as exc:
+        logger.warning("Отметка живости не записана: %s", exc)
+
+
+def heartbeat_age(path: Path, *, now: float | None = None) -> float | None:
+    """Сколько секунд назад служба отмечалась. `None` — не отмечалась вовсе."""
+    try:
+        stamp = float(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return (now if now is not None else time.time()) - stamp
 
 
 def save_open_request(path: Path, request: OpenRequest) -> None:

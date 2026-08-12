@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -54,11 +55,13 @@ from src.common.gate_open_request import (
     OpenRequest,
     OpenResult,
     boot_id,
+    heartbeat_path,
     load_open_request,
     load_open_result,
     open_request_path,
     open_result_path,
     save_open_result,
+    touch_heartbeat,
 )
 from src.common.sd_notify import Notifier
 from src.common.settings import ConfigurationError, Settings, validate_runtime_paths
@@ -677,6 +680,93 @@ def _notify_all(send: Callable[[str], None] | None, messages: list[str]) -> None
             logger.warning("Уведомление не ушло: %s", exc)
 
 
+class OpenRequestWatcher:
+    """Отдельный поток, который слушает просьбы открыть.
+
+    Раньше просьбы разбирались в общем цикле, между опросом Frigate и записью
+    журнала. Опрос может занять секунды — таймаут HTTP десять, забор снимка
+    пятнадцать, — и человек у двери успевал получить «служба не ответила»,
+    хотя служба работала и вот-вот бы ответила.
+
+    Поток проверяет файл пять раз в секунду и ничем тяжёлым не занят. Команды
+    на плату идут под общим замком: писать в один порт шлюза с двух сторон —
+    верный способ однажды получить отказ соединения.
+    """
+
+    def __init__(
+        self,
+        settings: Settings,
+        factory: Callable[[], Session],
+        opener: RelayOpener,
+        board_lock: threading.Lock,
+        *,
+        timezone: ZoneInfo,
+        notify: Callable[[str], None] | None,
+        interval: float = 0.2,
+    ) -> None:
+        self._settings = settings
+        self._factory = factory
+        self._opener = opener
+        self._board = board_lock
+        self._timezone = timezone
+        self._notify = notify
+        self._interval = interval
+        self._stop = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run, name="catdoor-open-requests", daemon=True
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def _run(self) -> None:
+        request_path = open_request_path(self._settings.data_dir)
+        result_path = open_result_path(self._settings.data_dir)
+        alive_path = heartbeat_path(self._settings.data_dir)
+        while not self._stop.wait(self._interval):
+            touch_heartbeat(alive_path)
+            try:
+                self._once(request_path, result_path)
+            except Exception:
+                # Поток обязан пережить что угодно: он единственный, кто
+                # отвечает человеку у двери.
+                logger.exception("Разбор просьбы открыть не удался")
+
+    def _once(self, request_path: Path, result_path: Path) -> None:
+        request = load_open_request(request_path)
+        if request is None:
+            return
+        done = load_open_result(result_path)
+        if done is not None and done.id == request.id:
+            return
+        config = load_gate_access_config(
+            gate_access_config_path(self._settings.data_dir), GateAccessConfig()
+        )
+        cat_door = load_cat_door_config(
+            cat_door_config_path(self._settings.data_dir), CatDoorConfig()
+        )
+        pending: list[str] = []
+        with self._board, self._factory() as session:
+            result = handle_open_request(
+                session,
+                request=request,
+                config=config,
+                opener=self._opener,
+                now=time.time(),
+                timezone=self._timezone,
+                cat_door=cat_door,
+                notify=pending.append,
+            )
+            session.commit()
+        # Ответ — сразу после журнала и до уведомлений: тот, кто стоит перед
+        # дверью, не должен ждать чата.
+        save_open_result(result_path, result)
+        _notify_all(self._notify, pending)
+
+
 def _telegram_sender(settings: Settings) -> Callable[[str], None] | None:
     """Отправитель уведомлений об открытии. `None` — бот не настроен.
 
@@ -734,8 +824,6 @@ def run(*, once: bool = False) -> None:
     gate_watcher = GateStateWatcher(settings.mqtt_host, settings.mqtt_port)
     if not gate_watcher.start():
         logger.info("Состояние створки писаться не будет")
-    request_path = open_request_path(settings.data_dir)
-    result_path = open_result_path(settings.data_dir)
     # Плата у калитки и у дверцы одна и та же, поэтому адрес берётся из уже
     # существующей настройки контроллера.
     opener = RelayOpener(
@@ -743,6 +831,13 @@ def run(*, once: bool = False) -> None:
         port=settings.door_controller_port,
     )
     telegram = _telegram_sender(settings)
+    # Плату держит один процесс, но потоков в нём теперь два: замок делает так,
+    # чтобы в порт шлюза одновременно не полезли оба.
+    board_lock = threading.Lock()
+    requests = OpenRequestWatcher(
+        settings, factory, opener, board_lock, timezone=timezone, notify=telegram
+    )
+    requests.start()
     notifier = Notifier.from_environment()
     notifier.ready("Журнал калитки на связи")
     last_purge_at: float | None = None
@@ -757,35 +852,7 @@ def run(*, once: bool = False) -> None:
         # получал бы очередь решений.
         opening = last_opening(session)
     while True:
-        # Нажатие кнопки разбирается первым и до опроса Frigate: человек стоит у
-        # калитки, а неотвеченный запрос к Frigate стоит десяти секунд таймаута.
         config = load_gate_access_config(config_path, config)
-        request = load_open_request(request_path)
-        done = load_open_result(result_path)
-        if request is not None and (done is None or done.id != request.id):
-            pending: list[str] = []
-            with factory() as session:
-                result = handle_open_request(
-                    session,
-                    request=request,
-                    config=config,
-                    opener=opener,
-                    now=time.time(),
-                    timezone=timezone,
-                    cat_door=load_cat_door_config(
-                        cat_door_config_path(settings.data_dir), CatDoorConfig()
-                    ),
-                    notify=pending.append,
-                )
-                session.commit()
-            # Ответ пишется после записи в журнал: админка, увидев «открыл»,
-            # должна найти строку на месте.
-            save_open_result(result_path, result)
-            # И только потом уведомления. 2026-08-12 порядок был обратный:
-            # защёлка щёлкнула мгновенно, а служба пятнадцать секунд ждала
-            # недоступный Телеграм — и человек у дверцы увидел «служба не
-            # ответила». Тот, кто стоит перед дверью, не должен ждать чата.
-            _notify_all(telegram, pending)
         # Окно наблюдения отсчитывается от текущего времени, а не от старта
         # службы: перезапуск не должен оставлять в журнале дыру. Повторов это
         # не даёт — строка обновляется по идентификатору события.
@@ -839,13 +906,14 @@ def run(*, once: bool = False) -> None:
                     ).scalars()
                 }
                 automatic: list[str] = []
-                records = execute_openings(
-                    records,
-                    config=config,
-                    opener=opener,
-                    already=already,
-                    notify=automatic.append,
-                )
+                with board_lock:
+                    records = execute_openings(
+                        records,
+                        config=config,
+                        opener=opener,
+                        already=already,
+                        notify=automatic.append,
+                    )
                 added, refined = record_passes(
                     session,
                     records,

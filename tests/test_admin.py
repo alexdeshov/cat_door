@@ -3100,3 +3100,51 @@ def test_opening_the_door_goes_through_the_service(runtime_path: Path, monkeypat
 
     assert response.status_code == 200
     assert response.json()["pulse_ms"] == 5000
+
+
+def test_a_busy_service_is_not_called_dead(runtime_path: Path, monkeypatch) -> None:
+    """«Занята» и «не работает» ведут человека к разным действиям.
+
+    2026-08-12 повторное нажатие показывало «служба не ответила, проверьте
+    catdoor-gate-access», хотя служба работала и была занята опросом Frigate.
+    Человек шёл чинить исправное.
+    """
+    from src.common.gate_open_request import heartbeat_path, touch_heartbeat
+
+    client = make_client(runtime_path, monkeypatch)
+    client.put("/api/gate/access-settings", json={"gates": [{"relay": 1}]})
+    monkeypatch.setattr("src.web.app.OPEN_RESULT_TIMEOUT_SECONDS", 0.05)
+    touch_heartbeat(heartbeat_path(runtime_path))
+
+    response = client.post("/api/gate/open")
+
+    assert response.status_code == 503
+    assert "занята" in response.json()["detail"]
+
+
+def test_a_silent_service_is_still_reported_as_silent(runtime_path: Path, monkeypatch) -> None:
+    """Без отметки живости вывод прежний: идти и смотреть службу."""
+    client = make_client(runtime_path, monkeypatch)
+    client.put("/api/gate/access-settings", json={"gates": [{"relay": 1}]})
+    monkeypatch.setattr("src.web.app.OPEN_RESULT_TIMEOUT_SECONDS", 0.05)
+
+    response = client.post("/api/gate/open")
+
+    assert response.status_code == 504
+    assert "catdoor-gate-access" in response.json()["detail"]
+
+
+def test_an_old_heartbeat_does_not_excuse_the_service(runtime_path: Path, monkeypatch) -> None:
+    """Отметка недельной давности — не признак жизни."""
+    from src.common.gate_open_request import heartbeat_path
+
+    client = make_client(runtime_path, monkeypatch)
+    client.put("/api/gate/access-settings", json={"gates": [{"relay": 1}]})
+    monkeypatch.setattr("src.web.app.OPEN_RESULT_TIMEOUT_SECONDS", 0.05)
+    path = heartbeat_path(runtime_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("1000.0", encoding="utf-8")
+
+    response = client.post("/api/gate/open")
+
+    assert response.status_code == 504

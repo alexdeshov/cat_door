@@ -113,6 +113,8 @@ from src.common.gate_open_request import (
     OpenRequest,
     OpenResult,
     boot_id,
+    heartbeat_age,
+    heartbeat_path,
     load_open_result,
     open_request_path,
     open_result_path,
@@ -557,7 +559,10 @@ def _camera_view(camera: CameraRecord) -> dict[str, object]:
 # Сколько ждать ответа службы на нажатие кнопки. Она смотрит файл раз в
 # секунду; три секунды покрывают опрос, импульс и запись в журнал, и человек у
 # калитки столько ждёт спокойно.
-OPEN_RESULT_TIMEOUT_SECONDS = 3.0
+OPEN_RESULT_TIMEOUT_SECONDS = 5.0
+# Насколько свежей должна быть отметка службы, чтобы считать её живой. Она
+# отмечается пять раз в секунду, так что три — с большим запасом.
+HEARTBEAT_FRESH_SECONDS = 3.0
 OPEN_RESULT_POLL_SECONDS = 0.1
 
 
@@ -1730,9 +1735,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(500, "Не удалось передать просьбу службе") from exc
         result = _await_open_result(settings.data_dir, request.id)
         if result is None:
-            # Служба смотрит файл раз в секунду; молчание дольше — это она не
-            # работает, и человеку надо сказать именно это.
-            raise HTTPException(504, "Служба не ответила: проверьте catdoor-gate-access")
+            # «Занята» и «не работает» ведут человека к разным действиям, и
+            # путать их нельзя: в первом случае надо повторить через секунду,
+            # во втором — идти чинить службу.
+            age = heartbeat_age(heartbeat_path(settings.data_dir))
+            if age is not None and age <= HEARTBEAT_FRESH_SECONDS:
+                raise HTTPException(
+                    503, "Служба занята другим делом — нажмите ещё раз через секунду"
+                )
+            raise HTTPException(504, "Служба не отвечает: проверьте catdoor-gate-access")
         if not result.ok:
             raise HTTPException(502, result.detail)
         return {"ok": True, "detail": result.detail, "pulse_ms": result.pulse_ms}
