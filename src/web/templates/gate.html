@@ -572,7 +572,7 @@
       const response = await fetch("/api/gate/open", {method: "POST"});
       const result = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(result.detail || `ошибка ${response.status}`);
-      status.textContent = "открыто";
+      status.textContent = result.detail || "открыто";
     } catch (error) {
       status.textContent = error.message;
       status.classList.add("bad");
