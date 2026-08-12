@@ -191,6 +191,17 @@ class Settings(BaseSettings):
     # локальном порту: наружу он не смотрит и пароля не спрашивает. Пустой
     # список камер означает «все», пустой список меток — «любые».
     gate_api_url: str = "http://127.0.0.1:5000"
+    # Брокер MQTT. Адресов два, и это не дублирование: Frigate живёт в
+    # контейнере с мостовой сетью и видит брокер по имени сервиса в compose, а
+    # наши службы работают на самом узле и ходят на опубликованный порт
+    # loopback. Один адрес на двоих означал бы, что кто-то из них не подключится.
+    gate_mqtt_enabled: bool = False
+    # Как брокер зовётся из контейнера Frigate.
+    gate_mqtt_host: str = "mqtt"
+    gate_mqtt_port: int = Field(default=1883, ge=1, le=65535)
+    # Как до брокера дотягиваются службы узла.
+    mqtt_host: str = "127.0.0.1"
+    mqtt_port: int = Field(default=1883, ge=1, le=65535)
     gate_notify_cameras: list[str] = Field(default_factory=list)
     gate_notify_labels: list[str] = Field(default_factory=lambda: ["person"])
     # О своих — с именем, о чужих — отдельным сообщением «неизвестный».
