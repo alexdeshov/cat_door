@@ -15,10 +15,13 @@ from src.common.gate_access_config import GateAccessConfig
 from src.gate.decision import (
     DECISION_COOLDOWN,
     DECISION_DRY_RUN,
+    DECISION_LEAVING,
     DECISION_LOW_SCORE,
     DECISION_MODE_OFF,
+    DECISION_MOVEMENT_UNKNOWN,
     DECISION_NO_GATE,
     DECISION_NOT_ALLOWED,
+    DECISION_NOT_APPROACHING,
     DECISION_SECOND_FACTOR,
     DECISION_WINDOW,
     DECISION_ZONE,
@@ -206,3 +209,63 @@ def test_the_open_mode_actually_opens() -> None:
     таблица случаев проверяет оба режима.
     """
     assert _decide(config=_config(mode="on")).decision == DECISION_DRY_RUN
+
+
+def _moving(**rules: object):  # type: ignore[no-untyped-def]
+    values = {"enabled": True, **rules}
+    return _config(movement=values)
+
+
+def test_rules_change_nothing_until_switched_on() -> None:
+    """Умолчание — как было до 12 августа: свежая установка ведёт себя прежне."""
+    assert _decide(movement="leaving").decision == DECISION_DRY_RUN
+
+
+def test_a_leaving_person_never_opens_the_gate() -> None:
+    """Та самая жалоба: калитка открывалась вслед выходящему."""
+    verdict = _decide(config=_moving(), movement="leaving")
+
+    assert verdict.decision == DECISION_LEAVING
+    assert ("movement", "against") in [(f.name, f.verdict) for f in verdict.factors]
+
+
+def test_an_approaching_person_is_let_in_as_before() -> None:
+    assert _decide(config=_moving(), movement="approaching").decision == DECISION_DRY_RUN
+
+
+def test_standing_still_opens_only_right_after_the_gate_closed() -> None:
+    """Возвращение: вышел, закрыл за собой, развернулся — и хочет обратно."""
+    standing = {"config": _moving(), "movement": "still"}
+
+    assert _decide(**standing, gate_just_closed=True).decision == DECISION_DRY_RUN
+    assert _decide(**standing).decision == DECISION_NOT_APPROACHING
+
+
+def test_the_return_exception_can_be_switched_off() -> None:
+    verdict = _decide(
+        config=_moving(open_when_still=False), movement="still", gate_just_closed=True
+    )
+
+    assert verdict.decision == DECISION_NOT_APPROACHING
+
+
+def test_unknown_movement_waits_instead_of_opening() -> None:
+    """Событие обновляется раз в несколько секунд.
+
+    Считать незнание разрешением значило бы открывать на первом же опросе —
+    ровно та ошибка, из-за которой правила и появились.
+    """
+    verdict = _decide(config=_moving(), movement="unknown")
+
+    assert verdict.decision == DECISION_MOVEMENT_UNKNOWN
+
+
+def test_movement_is_checked_after_the_face_not_before() -> None:
+    """Чужому отказывают по имени, а не по походке: причина должна быть той.
+
+    Иначе в журнале «человек уходит» встречалось бы у прохожих, которых мы и не
+    собирались пускать, и разбирать отказы стало бы не по чему.
+    """
+    verdict = _decide(config=_moving(), person_name="Марина", movement="leaving")
+
+    assert verdict.decision == DECISION_NOT_ALLOWED

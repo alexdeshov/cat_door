@@ -192,6 +192,52 @@
       очереди импульсов на одного человека: обратной связи от геркона нет.
     </p>
 
+    <h3 style="margin: 16px 0 8px; font-size: 15px">Куда идёт человек</h3>
+    <p class="muted" style="font-size: 13px">
+      Правила направления умеют только запрещать. Уходящему калитка не
+      открывается никогда; стоящему у калитки — только сразу после того, как
+      створка закрылась, и это возвращение: вышел, закрыл за собой, развернулся.
+      Числа измерены на живых проходах, разбор в
+      <code>docs/gate-direction-experiments.md</code>.
+    </p>
+    <div class="controls">
+      <label class="controls" style="font-size: 13px">
+        <input id="movement-enabled" type="checkbox"
+          {{ "checked" if gate_access.movement.enabled }}>
+        учитывать направление
+      </label>
+      <label class="controls" style="font-size: 13px">
+        <input id="movement-still" type="checkbox"
+          {{ "checked" if gate_access.movement.open_when_still }}>
+        пускать вернувшегося
+      </label>
+    </div>
+    <div class="controls">
+      <label for="movement-approaching">идёт к калитке, если вырос в</label>
+      <input id="movement-approaching" type="number" min="1.1" max="20" step="0.1"
+        value="{{ gate_access.movement.approaching_ratio }}">
+      <label for="movement-leaving">уходит, если упал до</label>
+      <input id="movement-leaving" type="number" min="0.05" max="0.95" step="0.05"
+        value="{{ gate_access.movement.leaving_ratio }}">
+      <label for="movement-window">окно возвращения, с</label>
+      <input id="movement-window" type="number" min="0" max="600"
+        value="{{ gate_access.movement.return_window_seconds }}">
+    </div>
+    <div class="controls">
+      <button id="apply-preset" type="button">Накатить пресет «{{ gate_access.preset_name }}»</button>
+      <button id="rollback-preset" type="button" {{ "" if gate_access.preset_applied else "disabled" }}>
+        Вернуть как было
+      </button>
+      <span id="preset-status" class="muted data" style="font-size: 12px">
+        {{ "пресет применён" if gate_access.preset_applied else "" }}
+      </span>
+    </div>
+    <p class="muted" style="font-size: 13px">
+      Пресет — это те самые измеренные числа одним движением. Прежние правила
+      запоминаются в том же файле настроек, поэтому «вернуть как было» работает
+      и после перезагрузки узла.
+    </p>
+
     <h3 style="margin: 16px 0 8px; font-size: 15px">Кому открывать</h3>
     {% if face_library is none %}
       <p class="notice notice-signal">
@@ -498,6 +544,13 @@
         // и форма не может вернуть его неизменным.
         phone_mac: row.querySelector(".phone-mac").value.trim() || null
       })),
+      movement: {
+        enabled: document.querySelector("#movement-enabled").checked,
+        open_when_still: document.querySelector("#movement-still").checked,
+        approaching_ratio: Number(document.querySelector("#movement-approaching").value),
+        leaving_ratio: Number(document.querySelector("#movement-leaving").value),
+        return_window_seconds: Number(document.querySelector("#movement-window").value)
+      },
       min_score: Number(document.querySelector("#access-min-score").value),
       cooldown_seconds: Number(document.querySelector("#access-cooldown").value),
       open_from: document.querySelector("#access-from").value,
@@ -540,6 +593,25 @@
       accessStatus.textContent = "не сохранено";
     });
   });
+
+  async function preset(rollback) {
+    const status = document.querySelector("#preset-status");
+    status.textContent = "…";
+    status.classList.remove("bad");
+    try {
+      const response = await fetch("/api/gate/access-settings/preset?rollback=" + rollback,
+        {method: "POST"});
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.detail || `ошибка ${response.status}`);
+      location.reload();
+    } catch (error) {
+      status.textContent = error.message;
+      status.classList.add("bad");
+    }
+  }
+
+  document.querySelector("#apply-preset")?.addEventListener("click", () => preset(false));
+  document.querySelector("#rollback-preset")?.addEventListener("click", () => preset(true));
 
   document.querySelector("#save-access-settings").addEventListener("click", async event => {
     const button = event.currentTarget;

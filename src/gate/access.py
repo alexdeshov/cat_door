@@ -60,12 +60,16 @@ from src.common.telegram import TelegramClient
 from src.gate.decision import DECISION_DRY_RUN, Factor, decide
 from src.gate.gate_state import UNKNOWN as GATE_STATE_UNKNOWN
 from src.gate.gate_state import GateStateWatcher
+from src.gate.movement import UNKNOWN as MOVEMENT_UNKNOWN
+from src.gate.movement import area_ratio as movement_ratio
+from src.gate.movement import classify as classify_movement
 from src.gate.notify import (
     APPROACH_UNKNOWN,
     WATCH_WINDOW_SECONDS,
     GateEvent,
     approach_from_box,
     fetch_events,
+    fetch_first_area,
     fetch_first_box,
     fetch_snapshot,
     gate_cameras,
@@ -108,6 +112,8 @@ class GatePassRecord:
     # решение не влияют, пока не наберётся неделя записей.
     approach: str = APPROACH_UNKNOWN
     first_box_bottom: float | None = None
+    movement: str = MOVEMENT_UNKNOWN
+    area_ratio: float | None = None
     gate_state_before: str | None = None
     gate_state_after: str | None = None
     # Какие факторы сказали «за», «против» и «не знаю». Без этого разбирать
@@ -152,7 +158,9 @@ def passes_from_events(
     last_opening: LastOpening | None = None,
     factors_for: Callable[[str], list[Factor]] | None = None,
     approach_for: Callable[[str], tuple[str, float | None]] | None = None,
+    geometry_for: Callable[[GateEvent], tuple[str, float | None]] | None = None,
     gate_state: str | None = None,
+    gate_just_closed: bool = False,
 ) -> tuple[list[GatePassRecord], LastOpening | None]:
     """Что из ленты Frigate попадает в журнал и что система об этом решила.
 
@@ -178,6 +186,9 @@ def passes_from_events(
         approach, bottom = (
             approach_for(event.id) if approach_for is not None else (APPROACH_UNKNOWN, None)
         )
+        movement, ratio = (
+            geometry_for(event) if geometry_for is not None else (MOVEMENT_UNKNOWN, None)
+        )
         name = recognised_name(event)
         extra = factors_for(name) if factors_for is not None and name is not None else []
         verdict = decide(
@@ -194,6 +205,8 @@ def passes_from_events(
                 else None
             ),
             factors=extra,
+            movement=movement,
+            gate_just_closed=gate_just_closed,
         )
         if verdict.would_open:
             opening = LastOpening(event.id, moment)
@@ -213,6 +226,8 @@ def passes_from_events(
                 ),
                 approach=approach,
                 first_box_bottom=bottom,
+                movement=movement,
+                area_ratio=ratio,
                 gate_state_before=gate_state,
             )
         )
@@ -323,6 +338,8 @@ def record_passes(
                 factors_json=record.factors_json,
                 approach=record.approach,
                 first_box_bottom=record.first_box_bottom,
+                movement=record.movement,
+                area_ratio=record.area_ratio,
                 gate_state_before=record.gate_state_before,
                 gate_state_after=record.gate_state_after,
                 pulse_ms=record.pulse_ms,
@@ -373,6 +390,12 @@ def record_passes(
         if record.gate_state_after and record.gate_state_after != stored.gate_state_after:
             # Створка могла шевельнуться уже после того, как строка появилась.
             stored.gate_state_after = record.gate_state_after
+            changed = True
+        if record.movement != MOVEMENT_UNKNOWN and record.movement != stored.movement:
+            # Движение уточняется с каждым обновлением события: человек, который
+            # только что стоял, мог пойти.
+            stored.movement = record.movement
+            stored.area_ratio = record.area_ratio
             changed = True
         if stored.approach in (None, APPROACH_UNKNOWN) and record.approach != APPROACH_UNKNOWN:
             stored.approach = record.approach
@@ -541,6 +564,40 @@ def _approach_for(
     return approach
 
 
+def _geometry_for(
+    settings: Settings, first_areas: dict[str, float | None], config: GateAccessConfig
+) -> Callable[[GateEvent], tuple[str, float | None]]:
+    """Куда идёт человек, по изменению площади рамки.
+
+    Первая площадь берётся из таймлайна и не меняется, поэтому запоминается.
+    Текущая приходит в самом событии и обновляется раз в несколько секунд —
+    это и есть предел разрешения при опросе по HTTP.
+    """
+
+    def geometry(event: GateEvent) -> tuple[str, float | None]:
+        if event.id not in first_areas:
+            first = fetch_first_area(settings.gate_api_url, event.id)
+            if first is None:
+                # Не запоминаем незнание: таймлайн заводится с задержкой.
+                return (MOVEMENT_UNKNOWN, None)
+            first_areas[event.id] = first
+            if len(first_areas) > 200:
+                first_areas.pop(next(iter(first_areas)))
+        first = first_areas[event.id]
+        rules = config.movement
+        return (
+            classify_movement(
+                first,
+                event.area,
+                approaching_ratio=rules.approaching_ratio,
+                leaving_ratio=rules.leaving_ratio,
+            ),
+            movement_ratio(first, event.area),
+        )
+
+    return geometry
+
+
 def _factors_for(
     config: GateAccessConfig, presence: PhonePresence
 ) -> Callable[[str], list[Factor]]:
@@ -637,6 +694,7 @@ def run(*, once: bool = False) -> None:
     # Первая рамка события неизменна, и спрашивать её у Frigate повторно на
     # каждом опросе — лишний запрос на каждое событие в окне наблюдения.
     first_boxes: dict[str, tuple[str, float | None]] = {}
+    first_areas: dict[str, float | None] = {}
     record_states: dict[str, str] = {}
     with factory() as session:
         # Пауза переживает перезапуск: иначе обновление админки среди дня
@@ -688,7 +746,11 @@ def run(*, once: bool = False) -> None:
             last_opening=opening,
             factors_for=_factors_for(config, presence),
             approach_for=_approach_for(settings, first_boxes),
+            geometry_for=_geometry_for(settings, first_areas, config),
             gate_state=state.value if state.known else GATE_STATE_UNKNOWN,
+            gate_just_closed=state.closed_within(
+                config.movement.return_window_seconds, now=time.time()
+            ),
         )
         # Состояние после прохода уточняется на следующих опросах, пока событие
         # в окне наблюдения: створка часто шевелится уже после появления строки.

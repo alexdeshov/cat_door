@@ -157,6 +157,10 @@ class GatePass(Base):
     # `unknown` — рамку узнать не удалось. Считается по первой рамке события.
     approach: Mapped[str | None] = mapped_column(String(20), nullable=True)
     first_box_bottom: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Куда шёл человек и во сколько раз изменилась его рамка. Отношение нужно,
+    # чтобы пороги можно было перемерить, когда изменится геометрия камеры.
+    movement: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    area_ratio: Mapped[float | None] = mapped_column(Float, nullable=True)
     # Что классификатор Frigate говорил про створку до прохода и после него.
     gate_state_before: Mapped[str | None] = mapped_column(String(20), nullable=True)
     gate_state_after: Mapped[str | None] = mapped_column(String(20), nullable=True)
