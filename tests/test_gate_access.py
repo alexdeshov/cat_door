@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import json
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Self
@@ -846,3 +847,56 @@ def test_the_same_boot_is_not_an_obstacle(
 
     assert result.ok
     assert opener.calls == [(2, 500)]
+
+
+def test_the_first_box_says_where_the_person_came_from() -> None:
+    """Рамка, упирающаяся в нижний край, — человек уже вплотную.
+
+    Замер на живых проходах 2026-08-12: у выхода, разворота у калитки и
+    открытия кодом низ первой рамки был ровно 1.00, у настоящих приходов —
+    0.23–0.91. Одиннадцать событий разделились без ошибок.
+    """
+    from src.gate.notify import approach_from_box
+
+    assert approach_from_box(0.23) == "far"
+    assert approach_from_box(0.91) == "far"
+    assert approach_from_box(1.0) == "near"
+    assert approach_from_box(None) == "unknown"
+
+
+def test_the_circumstances_reach_the_journal(runtime_path: Path) -> None:
+    """Наблюдение без вмешательства: обстоятельства пишутся, решения не трогают."""
+    factory = _session(runtime_path)
+    records, _ = _passes(
+        [_event(sub_label="Алексей", name_score=0.96)],
+        config=_config(),
+        approach_for=lambda event_id: ("far", 0.31),
+        gate_state="closed",
+    )
+
+    with factory() as session:
+        record_passes(session, records)
+        session.commit()
+        stored = session.query(GatePass).one()
+
+    assert stored.approach == "far"
+    assert stored.first_box_bottom == pytest.approx(0.31)
+    assert stored.gate_state_before == "closed"
+    # Решение осталось прежним: обстоятельства пока только наблюдаются.
+    assert stored.decision == DECISION_DRY_RUN
+
+
+def test_the_gate_state_after_is_refined_later(runtime_path: Path) -> None:
+    """Створка часто шевелится уже после того, как строка появилась."""
+    factory = _session(runtime_path)
+    first, _ = _passes([_event(sub_label="Алексей", name_score=0.96)], config=_config())
+
+    with factory() as session:
+        record_passes(session, [replace(first[0], gate_state_after="closed")])
+        session.commit()
+    with factory() as session:
+        record_passes(session, [replace(first[0], gate_state_after="open")])
+        session.commit()
+        stored = session.query(GatePass).one()
+
+    assert stored.gate_state_after == "open"

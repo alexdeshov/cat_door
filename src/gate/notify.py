@@ -190,6 +190,49 @@ def fetch_snapshot(api_url: str, event: GateEvent, destination: Path, *, timeout
     return True
 
 
+# Ниже этой доли высоты кадра рамка считается «человек ещё идёт». Рамка,
+# упирающаяся в нижний край, означает, что человек стоит вплотную и обрезан
+# снизу: так выглядят выход, разворот у калитки и открытие кодом. Замер
+# 2026-08-12: одиннадцать событий разделились без ошибок — приходы 0.23–0.91,
+# всё остальное ровно 1.00.
+APPROACH_FAR_BELOW = 0.99
+APPROACH_FAR = "far"
+APPROACH_NEAR = "near"
+APPROACH_UNKNOWN = "unknown"
+
+
+def fetch_first_box(api_url: str, event_id: str, *, timeout: float = 5.0) -> float | None:
+    """Низ первой рамки события: 1.0 — у нижнего края кадра, 0.0 — у верхнего.
+
+    Берётся из таймлайна, где запись `visible` появляется в момент, когда
+    Frigate впервые увидел объект. Именно первая рамка отвечает на вопрос
+    «откуда он взялся»: конечная появляется только по окончании прохода, то
+    есть заведомо позже, чем нужно решать.
+    """
+    query = urllib.parse.urlencode({"source_id": event_id})
+    url = f"{api_url.rstrip('/')}/api/timeline?{query}"
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8", "replace"))
+    except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+        logger.warning("Таймлайн события %s не прочитан: %s", event_id, exc)
+        return None
+    if not isinstance(payload, list):
+        return None
+    for row in payload:
+        box = (row.get("data") or {}).get("box") if isinstance(row, dict) else None
+        if isinstance(box, list) and len(box) == 4:
+            return float(box[1]) + float(box[3])
+    return None
+
+
+def approach_from_box(bottom: float | None) -> str:
+    """«Издалека» или «вплотную» по первой рамке."""
+    if bottom is None:
+        return APPROACH_UNKNOWN
+    return APPROACH_FAR if bottom < APPROACH_FAR_BELOW else APPROACH_NEAR
+
+
 def recognised_name(event: GateEvent) -> str | None:
     """Имя из базы лиц, если Frigate его поставил.
 

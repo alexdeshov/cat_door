@@ -58,10 +58,15 @@ from src.common.sd_notify import Notifier
 from src.common.settings import ConfigurationError, Settings, validate_runtime_paths
 from src.common.telegram import TelegramClient
 from src.gate.decision import DECISION_DRY_RUN, Factor, decide
+from src.gate.gate_state import UNKNOWN as GATE_STATE_UNKNOWN
+from src.gate.gate_state import GateStateWatcher
 from src.gate.notify import (
+    APPROACH_UNKNOWN,
     WATCH_WINDOW_SECONDS,
     GateEvent,
+    approach_from_box,
     fetch_events,
+    fetch_first_box,
     fetch_snapshot,
     gate_cameras,
     recognised_name,
@@ -99,6 +104,12 @@ class GatePassRecord:
     decision: str
     reason: str | None
     has_snapshot: bool
+    # Обстоятельства прохода. Пока только наблюдаются и пишутся в журнал: на
+    # решение не влияют, пока не наберётся неделя записей.
+    approach: str = APPROACH_UNKNOWN
+    first_box_bottom: float | None = None
+    gate_state_before: str | None = None
+    gate_state_after: str | None = None
     # Какие факторы сказали «за», «против» и «не знаю». Без этого разбирать
     # отказы невозможно: видно решение, но не видно, чем оно вызвано.
     factors_json: str | None = None
@@ -140,6 +151,8 @@ def passes_from_events(
     timezone: ZoneInfo,
     last_opening: LastOpening | None = None,
     factors_for: Callable[[str], list[Factor]] | None = None,
+    approach_for: Callable[[str], tuple[str, float | None]] | None = None,
+    gate_state: str | None = None,
 ) -> tuple[list[GatePassRecord], LastOpening | None]:
     """Что из ленты Frigate попадает в журнал и что система об этом решила.
 
@@ -162,6 +175,9 @@ def passes_from_events(
         if not event.id:
             continue
         moment = datetime.fromtimestamp(event.started_at, UTC)
+        approach, bottom = (
+            approach_for(event.id) if approach_for is not None else (APPROACH_UNKNOWN, None)
+        )
         name = recognised_name(event)
         extra = factors_for(name) if factors_for is not None and name is not None else []
         verdict = decide(
@@ -195,6 +211,9 @@ def passes_from_events(
                 factors_json=json.dumps(
                     [factor.as_dict() for factor in verdict.factors], ensure_ascii=False
                 ),
+                approach=approach,
+                first_box_bottom=bottom,
+                gate_state_before=gate_state,
             )
         )
     return records, opening
@@ -302,6 +321,10 @@ def record_passes(
                 decision=record.decision,
                 reason=record.reason,
                 factors_json=record.factors_json,
+                approach=record.approach,
+                first_box_bottom=record.first_box_bottom,
+                gate_state_before=record.gate_state_before,
+                gate_state_after=record.gate_state_after,
                 pulse_ms=record.pulse_ms,
                 modbus_ok=record.modbus_ok,
                 snapshot_path=snapshot(record) if snapshot is not None else None,
@@ -346,6 +369,14 @@ def record_passes(
             changed = True
         if record.zone is not None and record.zone != stored.zone:
             stored.zone = record.zone
+            changed = True
+        if record.gate_state_after and record.gate_state_after != stored.gate_state_after:
+            # Створка могла шевельнуться уже после того, как строка появилась.
+            stored.gate_state_after = record.gate_state_after
+            changed = True
+        if stored.approach in (None, APPROACH_UNKNOWN) and record.approach != APPROACH_UNKNOWN:
+            stored.approach = record.approach
+            stored.first_box_bottom = record.first_box_bottom
             changed = True
         if stored.snapshot_path is None and snapshot is not None:
             stored.snapshot_path = snapshot(record)
@@ -483,6 +514,24 @@ def last_opening(session: Session) -> LastOpening | None:
     return LastOpening(row.frigate_event_id, moment)
 
 
+def _approach_for(
+    settings: Settings, cache: dict[str, tuple[str, float | None]]
+) -> Callable[[str], tuple[str, float | None]]:
+    """Откуда пришёл человек. Ответ на событие неизменен, поэтому запоминается."""
+
+    def approach(event_id: str) -> tuple[str, float | None]:
+        if event_id not in cache:
+            bottom = fetch_first_box(settings.gate_api_url, event_id)
+            cache[event_id] = (approach_from_box(bottom), bottom)
+            if len(cache) > 200:
+                # Окно наблюдения — пять минут; двести событий с запасом
+                # перекрывают его, а расти без предела памяти незачем.
+                cache.pop(next(iter(cache)))
+        return cache[event_id]
+
+    return approach
+
+
 def _factors_for(
     config: GateAccessConfig, presence: PhonePresence
 ) -> Callable[[str], list[Factor]]:
@@ -559,6 +608,11 @@ def run(*, once: bool = False) -> None:
     config_path = gate_access_config_path(settings.data_dir)
     config = load_gate_access_config(config_path, GateAccessConfig())
     presence = PhonePresence()
+    # Створка: пока только наблюдаем и пишем в журнал. Решения это не трогает —
+    # сперва неделя записей, потом разговор о правилах.
+    gate_watcher = GateStateWatcher(settings.mqtt_host, settings.mqtt_port)
+    if not gate_watcher.start():
+        logger.info("Состояние створки писаться не будет")
     request_path = open_request_path(settings.data_dir)
     result_path = open_result_path(settings.data_dir)
     # Плата у калитки и у дверцы одна и та же, поэтому адрес берётся из уже
@@ -571,6 +625,10 @@ def run(*, once: bool = False) -> None:
     notifier = Notifier.from_environment()
     notifier.ready("Журнал калитки на связи")
     last_purge_at: float | None = None
+    # Первая рамка события неизменна, и спрашивать её у Frigate повторно на
+    # каждом опросе — лишний запрос на каждое событие в окне наблюдения.
+    first_boxes: dict[str, tuple[str, float | None]] = {}
+    record_states: dict[str, str] = {}
     with factory() as session:
         # Пауза переживает перезапуск: иначе обновление админки среди дня
         # обнуляло бы её, и человек, которого камера видит снова и снова,
@@ -612,6 +670,7 @@ def run(*, once: bool = False) -> None:
             # Пустой журнал из-за нечитаемого инвентаря выглядит точно так же,
             # как «к калитке никто не подходил», а это разные вещи.
             logger.warning("Ни одной камеры контура калитки — журнал пуст не потому, что тихо")
+        state = gate_watcher.snapshot()
         records, opening = passes_from_events(
             events,
             cameras=cameras,
@@ -619,7 +678,17 @@ def run(*, once: bool = False) -> None:
             timezone=timezone,
             last_opening=opening,
             factors_for=_factors_for(config, presence),
+            approach_for=_approach_for(settings, first_boxes),
+            gate_state=state.value if state.known else GATE_STATE_UNKNOWN,
         )
+        # Состояние после прохода уточняется на следующих опросах, пока событие
+        # в окне наблюдения: створка часто шевелится уже после появления строки.
+        for record in records:
+            record_states.setdefault(record.frigate_event_id, state.value)
+        records = [
+            replace(record, gate_state_after=state.value if state.known else GATE_STATE_UNKNOWN)
+            for record in records
+        ]
         if records:
             with factory() as session:
                 # Исход прошлых опросов по этим же событиям: он решает, не
