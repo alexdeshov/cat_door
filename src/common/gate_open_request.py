@@ -52,9 +52,17 @@ def boot_id() -> str:
         return ""
 
 
+# Что открываем. Плату держит одна служба — иначе два процесса полезли бы в
+# один TCP-порт шлюза, а он в прозрачном режиме второго соединения может и не
+# принять. Поэтому просьба адресная, а исполнитель общий.
+TARGET_GATE = "gate"
+TARGET_CAT_DOOR = "cat_door"
+
+
 class OpenRequest(BaseModel):
     id: str
     requested_at: float
+    target: str = TARGET_GATE
     source: str = "admin"
     # Загрузка, в которой нажали кнопку. Пусто — система не даёт его знать.
     boot_id: str = ""

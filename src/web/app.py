@@ -61,6 +61,12 @@ from src.common.capture_mode import (
     load_capture_mode,
     save_capture_mode,
 )
+from src.common.cat_door_config import (
+    CatDoorConfig,
+    cat_door_config_path,
+    load_cat_door_config,
+    save_cat_door_config,
+)
 from src.common.circuits import (
     CIRCUIT_TITLES,
     RECORDING_TITLES,
@@ -102,6 +108,8 @@ from src.common.gate_access_config import (
     save_gate_access_config,
 )
 from src.common.gate_open_request import (
+    TARGET_CAT_DOOR,
+    TARGET_GATE,
     OpenRequest,
     OpenResult,
     boot_id,
@@ -424,6 +432,17 @@ class CircuitsPayload(BaseModel):
     enabled: bool | None = None
     exclusive: bool | None = None
     gate_recording: GateRecording | None = None
+
+
+class CatDoorPayload(BaseModel):
+    """Настройки дверцы из админки. Режим строкой — как у калитки."""
+
+    mode: str = "off"
+    relay: int = 2
+    hold_ms: int = 5000
+    allowed_cats: list[str] = Field(default_factory=list)
+    min_confidence: float = 0.9
+    cooldown_seconds: int = 30
 
 
 class GatePersonPayload(BaseModel):
@@ -820,6 +839,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         statuses = sorted(runs_root.glob("*/status.json"))
         return _read_status(statuses[-1]) if statuses else None
 
+    def current_cat_door() -> CatDoorConfig:
+        return load_cat_door_config(cat_door_config_path(settings.data_dir), CatDoorConfig())
+
     def current_gate_access() -> GateAccessConfig:
         return load_gate_access_config(
             gate_access_config_path(settings.data_dir), GateAccessConfig()
@@ -1128,6 +1150,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "stream_version": uuid4().hex,
                 "detection_config": current_detection_config(),
                 "notifications": _notifications_view(settings),
+                "cat_door": current_cat_door().model_dump(),
                 "prototypes_status": _latest_status(
                     settings.data_dir / "training" / "prototypes"
                 ),
@@ -1686,6 +1709,56 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # `catdoor-gate-access`, у веб-процесса прав на плату нет и не будет.
         return _gate_access_view(config)
 
+    def _request_open(target: str) -> dict[str, object]:
+        """Попросить службу открыть и дождаться ответа.
+
+        Общий путь для калитки и дверцы: плату держит один процесс, потому что
+        шлюз в прозрачном режиме второго соединения может не принять.
+        """
+        request = OpenRequest(
+            id=uuid4().hex,
+            requested_at=time(),
+            target=target,
+            source="admin",
+            # Загрузка, в которой нажали: после перезагрузки эта просьба уже не
+            # чья-то, и часам после обрыва питания верить нельзя.
+            boot_id=boot_id(),
+        )
+        try:
+            save_open_request(open_request_path(settings.data_dir), request)
+        except OSError as exc:
+            raise HTTPException(500, "Не удалось передать просьбу службе") from exc
+        result = _await_open_result(settings.data_dir, request.id)
+        if result is None:
+            # Служба смотрит файл раз в секунду; молчание дольше — это она не
+            # работает, и человеку надо сказать именно это.
+            raise HTTPException(504, "Служба не ответила: проверьте catdoor-gate-access")
+        if not result.ok:
+            raise HTTPException(502, result.detail)
+        return {"ok": True, "detail": result.detail, "pulse_ms": result.pulse_ms}
+
+    @app.get("/api/cat-door/settings")
+    def get_cat_door_settings() -> dict[str, object]:
+        return current_cat_door().model_dump()
+
+    @app.put("/api/cat-door/settings")
+    def update_cat_door_settings(payload: CatDoorPayload) -> dict[str, object]:
+        try:
+            config = CatDoorConfig.model_validate(payload.model_dump())
+        except ValidationError as exc:
+            raise HTTPException(422, "; ".join(_error_messages(exc))) from exc
+        try:
+            save_cat_door_config(cat_door_config_path(settings.data_dir), config)
+        except OSError as exc:
+            raise HTTPException(500, "Не удалось сохранить настройки дверцы") from exc
+        # Механику веб не трогает и здесь: файл читает служба.
+        return config.model_dump()
+
+    @app.post("/api/cat-door/open")
+    def open_cat_door() -> dict[str, object]:
+        """Тестовое открытие дверцы — тем же путём, что и калитка."""
+        return _request_open(TARGET_CAT_DOOR)
+
     @app.post("/api/gate/open")
     def open_gate() -> dict[str, object]:
         """Открыть калитку по кнопке в админке.
@@ -1699,28 +1772,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         config = current_gate_access()
         if not config.gates:
             raise HTTPException(422, "Канал реле калитки не настроен")
-        request = OpenRequest(
-            id=uuid4().hex,
-            requested_at=time(),
-            source="admin",
-            # Загрузка, в которой нажали: после перезагрузки эта просьба уже не
-            # чья-то, и часам после обрыва питания верить нельзя.
-            boot_id=boot_id(),
-        )
-        try:
-            save_open_request(open_request_path(settings.data_dir), request)
-        except OSError as exc:
-            raise HTTPException(500, "Не удалось передать просьбу службе") from exc
-        result = _await_open_result(settings.data_dir, request.id)
-        if result is None:
-            # Служба опрашивает файл раз в секунду; молчание дольше — это она
-            # не работает, и человеку надо сказать именно это.
-            raise HTTPException(
-                504, "Служба калитки не ответила: проверьте catdoor-gate-access"
-            )
-        if not result.ok:
-            raise HTTPException(502, result.detail)
-        return {"ok": True, "detail": result.detail, "pulse_ms": result.pulse_ms}
+        return _request_open(TARGET_GATE)
 
     @app.post("/api/gate/access-settings/preset")
     def apply_gate_preset(rollback: bool = False) -> dict[str, object]:
