@@ -445,6 +445,7 @@ class CatDoorPayload(BaseModel):
     allowed_cats: list[str] = Field(default_factory=list)
     min_confidence: float = 0.9
     cooldown_seconds: int = 30
+    open_delay_seconds: float = 5.0
 
 
 class GatePersonPayload(BaseModel):
