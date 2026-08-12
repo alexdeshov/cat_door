@@ -953,3 +953,55 @@ def test_an_unknown_approach_is_asked_again(runtime_path: Path) -> None:
     # Удачный ответ запоминается: он про первую рамку и меняться не может.
     assert third == ("far", pytest.approx(0.31))
     assert calls == ["a", "a"]
+
+
+def test_the_cat_door_is_opened_on_its_own_relay(runtime_path: Path) -> None:
+    """Одна служба пишет на плату — просьба адресная, исполнитель общий.
+
+    Два процесса полезли бы в один TCP-порт шлюза, а он в прозрачном режиме
+    второго соединения может и не принять.
+    """
+    from src.common.cat_door_config import CatDoorConfig
+    from src.common.gate_open_request import TARGET_CAT_DOOR
+
+    factory = _session(runtime_path)
+    opener = _FakeOpener(PulseResult(True, "Открыто 5000 мс на канал 2", 5000))
+
+    with factory() as session:
+        result = handle_open_request(
+            session,
+            request=OpenRequest(id="a", requested_at=1000.0, target=TARGET_CAT_DOOR),
+            config=_config(mode="off"),
+            opener=opener,
+            now=1000.1,
+            timezone=MOSCOW,
+            cat_door=CatDoorConfig(relay=2, hold_ms=5000),
+        )
+        session.commit()
+        stored = session.query(GatePass).one()
+
+    assert result.ok
+    assert opener.calls == [(2, 5000)]
+    assert stored.label == "cat_door"
+    assert "Дверца" in (stored.reason or "")
+
+
+def test_without_settings_the_door_is_not_guessed_at(runtime_path: Path) -> None:
+    """Нет настроек — нет и канала: угадывать, куда подать питание, нельзя."""
+    from src.common.gate_open_request import TARGET_CAT_DOOR
+
+    factory = _session(runtime_path)
+    opener = _FakeOpener(PulseResult(True, "ок", 5000))
+
+    with factory() as session:
+        result = handle_open_request(
+            session,
+            request=OpenRequest(id="a", requested_at=1000.0, target=TARGET_CAT_DOOR),
+            config=_config(mode="off"),
+            opener=opener,
+            now=1000.1,
+            timezone=MOSCOW,
+        )
+
+    assert result.ok is False
+    assert opener.calls == []

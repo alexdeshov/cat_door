@@ -37,6 +37,11 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from src.common.cat_door_config import (
+    CatDoorConfig,
+    cat_door_config_path,
+    load_cat_door_config,
+)
 from src.common.database import GatePass, create_session_factory
 from src.common.gate_access_config import (
     GateAccessConfig,
@@ -45,6 +50,7 @@ from src.common.gate_access_config import (
 )
 from src.common.gate_open_request import (
     REQUEST_TTL_SECONDS,
+    TARGET_CAT_DOOR,
     OpenRequest,
     OpenResult,
     boot_id,
@@ -468,6 +474,7 @@ def handle_open_request(
     opener: RelayOpener,
     now: float,
     timezone: ZoneInfo,
+    cat_door: CatDoorConfig | None = None,
     notify: Callable[[str], None] | None = None,
 ) -> OpenResult:
     """Исполнить нажатие кнопки «Открыть калитку».
@@ -503,15 +510,23 @@ def handle_open_request(
             detail="Просьба устарела: служба не успела её увидеть",
             finished_at=now,
         )
-    gate = config.gates[0] if config.gates else None
-    if gate is None:
-        return OpenResult(
-            id=request.id,
-            ok=False,
-            detail="Канал реле калитки не настроен",
-            finished_at=now,
-        )
-    pulse = opener.pulse(gate.relay, config.pulse_ms)
+    if request.target == TARGET_CAT_DOOR:
+        if cat_door is None:
+            return OpenResult(
+                id=request.id, ok=False, detail="Дверца не настроена", finished_at=now
+            )
+        channel, milliseconds, what = cat_door.relay, cat_door.hold_ms, "дверца"
+    else:
+        gate = config.gates[0] if config.gates else None
+        if gate is None:
+            return OpenResult(
+                id=request.id,
+                ok=False,
+                detail="Канал реле калитки не настроен",
+                finished_at=now,
+            )
+        channel, milliseconds, what = gate.relay, config.pulse_ms, "калитка"
+    pulse = opener.pulse(channel, milliseconds)
     moment = datetime.fromtimestamp(now, UTC)
     session.add(
         GatePass(
@@ -520,11 +535,12 @@ def handle_open_request(
             frigate_event_id=f"manual-{request.id}",
             created_at=moment,
             camera="",
+            label=request.target,
             decision="opened" if pulse.ok else "error",
             reason=(
-                f"Открыто вручную из админки. {pulse.detail}"
+                f"{what.capitalize()}: открыто вручную из админки. {pulse.detail}"
                 if pulse.ok
-                else f"Открыть вручную не удалось. {pulse.detail}"
+                else f"{what.capitalize()}: открыть вручную не удалось. {pulse.detail}"
             ),
             factors_json=json.dumps(
                 [{"name": "manual", "verdict": "for", "detail": request.source}],
@@ -540,7 +556,7 @@ def handle_open_request(
         local = moment.astimezone(timezone)
         try:
             notify(
-                f"Калитка: {'открыта' if pulse.ok else 'открыть не удалось'} "
+                f"{what.capitalize()}: {'открыта' if pulse.ok else 'открыть не удалось'} "
                 f"по кнопке в админке · {local.strftime('%H:%M')}"
             )
         except Exception as exc:  # noqa: BLE001
@@ -750,6 +766,9 @@ def run(*, once: bool = False) -> None:
                     opener=opener,
                     now=time.time(),
                     timezone=timezone,
+                    cat_door=load_cat_door_config(
+                        cat_door_config_path(settings.data_dir), CatDoorConfig()
+                    ),
                     notify=telegram,
                 )
                 session.commit()

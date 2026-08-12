@@ -3032,3 +3032,71 @@ def test_people_and_cars_are_counted_apart(runtime_path: Path, monkeypatch) -> N
     assert "А123ВС" in cars.text
     # В списке людей машины нет.
     assert "А123ВС" not in client.get("/gate?who=all").text
+
+
+def test_the_cat_door_panel_mirrors_the_gate(runtime_path: Path, monkeypatch) -> None:
+    """Порядок тот же, что у калитки: режим, тестовое открытие, список своих."""
+    client = make_client(runtime_path, monkeypatch)
+
+    page = client.get("/")
+
+    assert "Кошачья дверца" in page.text
+    assert 'id="test-cat-door"' in page.text
+    for mode in ("off", "dry", "on"):
+        assert f'data-mode="{mode}"' in page.text
+    assert client.get("/api/cat-door/settings").json()["mode"] == "off"
+
+
+def test_the_door_starts_locked_for_everyone(runtime_path: Path, monkeypatch) -> None:
+    """Умолчание — не открывать никому, пока человек не выбрал кому."""
+    client = make_client(runtime_path, monkeypatch)
+
+    settings = client.get("/api/cat-door/settings").json()
+
+    assert settings["mode"] == "off"
+    assert settings["allowed_cats"] == []
+    assert settings["relay"] == 2
+
+
+def test_the_latch_may_not_be_held_forever(runtime_path: Path, monkeypatch) -> None:
+    """Защёлка на 12 В кратковременного включения: держать дольше — греть катушку."""
+    client = make_client(runtime_path, monkeypatch)
+
+    response = client.put("/api/cat-door/settings", json={"hold_ms": 60000})
+
+    assert response.status_code == 422
+    assert client.get("/api/cat-door/settings").json()["hold_ms"] == 5000
+
+
+def test_opening_the_door_goes_through_the_service(runtime_path: Path, monkeypatch) -> None:
+    """Веб механикой не распоряжается и здесь: он кладёт просьбу, исполняет служба.
+
+    Плату держит один процесс: шлюз в прозрачном режиме второго соединения
+    может и не принять.
+    """
+    from src.common.gate_open_request import (
+        OpenResult,
+        load_open_request,
+        open_request_path,
+        open_result_path,
+        save_open_result,
+    )
+
+    client = make_client(runtime_path, monkeypatch)
+
+    def answer(seconds: float) -> None:
+        request = load_open_request(open_request_path(runtime_path))
+        assert request is not None
+        assert request.target == "cat_door"
+        save_open_result(
+            open_result_path(runtime_path),
+            OpenResult(id=request.id, ok=True, detail="Дверца открыта", finished_at=0.0,
+                       pulse_ms=5000),
+        )
+
+    monkeypatch.setattr("src.web.app.sleep", answer)
+
+    response = client.post("/api/cat-door/open")
+
+    assert response.status_code == 200
+    assert response.json()["pulse_ms"] == 5000
