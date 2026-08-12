@@ -236,6 +236,7 @@ def poster_path(data_dir: Path, event_id: int, view: str) -> Path:
 DISCOVERY_PROBE_LIMIT = 16
 DISCOVERY_PROBE_SECONDS = 6.0
 INTERRUPTED_MESSAGE = "Прерван без завершения: heartbeat не обновлялся более 10 минут"
+GONE_MESSAGE = "Прогон оборван: процесс не запущен, а состояние осталось рабочим"
 
 
 def _asset_version(path: Path):
@@ -368,14 +369,44 @@ def _expire_stale_evaluations(
     return expired
 
 
+def _process_is_gone(payload: dict[str, object]) -> bool:
+    """Жив ли процесс, записавший это состояние.
+
+    Отвечает «нет» только уверенно. Нет идентификатора — значит запись сделана
+    старой версией, и судить о ней нужно по времени, а не по догадке.
+    """
+    pid = payload.get("pid")
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        # Чужой процесс с этим номером: жив, хоть и не наш.
+        return False
+    return False
+
+
 def _expire_stale_training(
     status_path: Path,
     payload: dict[str, object],
     *,
     now: datetime | None = None,
 ) -> bool:
+    """Пометить брошенный прогон брошенным. `True` — пометили.
+
+    Два признака, и первый важнее. Процесс, которого нет, — это ответ сразу:
+    12 августа перезапуск веб-службы убил пересчёт эталонов, и восемь часов
+    подряд админка показывала «Готовлю кадры размеченных проходов», а кнопка
+    оставалась серой. Второй признак — молчание heartbeat — остаётся для
+    случаев, когда процесс жив, но работать перестал.
+    """
     if payload.get("state") not in ACTIVE_TRAINING_STATES:
         return False
+    if _process_is_gone(payload):
+        write_status(status_path, state="failed", message=GONE_MESSAGE)
+        return True
     try:
         fallback = datetime.fromtimestamp(status_path.stat().st_mtime, tz=UTC)
     except OSError:
@@ -863,8 +894,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return None
 
     def _latest_status(runs_root: Path) -> dict[str, object] | None:
+        """Последнее состояние прогона, с поправкой на оборванные.
+
+        Проверка живучести делается при чтении, а не по расписанию: иначе
+        оборванный прогон держал бы кнопку серой до тех пор, пока кто-нибудь не
+        попробует запустить новый — то есть ровно до того момента, когда
+        пробовать уже незачем.
+        """
         statuses = sorted(runs_root.glob("*/status.json"))
-        return _read_status(statuses[-1]) if statuses else None
+        if not statuses:
+            return None
+        payload = _read_status(statuses[-1])
+        if payload is not None and _expire_stale_training(statuses[-1], payload):
+            return _read_status(statuses[-1])
+        return payload
 
     def current_cat_door() -> CatDoorConfig:
         return load_cat_door_config(cat_door_config_path(settings.data_dir), CatDoorConfig())
@@ -2207,17 +2250,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except OSError as exc:
             write_status(status_path, state="failed", message="Не удалось запустить Python")
             raise HTTPException(500, "Не удалось запустить пересчёт эталонов") from exc
+        # Теперь состояние знает, за чьей жизнью следить. До первой записи
+        # самого процесса это единственный способ отличить «ещё запускается» от
+        # «умер на старте».
+        write_status(
+            status_path,
+            state="starting",
+            message="Запуск отдельного процесса",
+            pid=process.pid,
+        )
         return {"run_id": run_id, "pid": process.pid, "state": "starting"}
 
     @app.get("/api/identity/prototypes/status")
     def prototypes_status() -> dict[str, object]:
-        statuses = sorted((settings.data_dir / "training" / "prototypes").glob("*/status.json"))
-        if not statuses:
+        """Состояние пересчёта — то же, что видит страница, включая оборванные.
+
+        Кнопку на странице гасит именно этот ответ, поэтому врать он не имеет
+        права: состояние «готовлю кадры» от процесса, которого больше нет, —
+        это серая кнопка навсегда.
+        """
+        latest = _latest_status(settings.data_dir / "training" / "prototypes")
+        if latest is None:
             return {"state": "idle", "message": "Эталоны ещё не пересчитывались"}
-        try:
-            return json.loads(statuses[-1].read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise HTTPException(500, "Не удалось прочитать статус пересчёта") from exc
+        return latest
 
     @app.post("/api/evaluations", status_code=202)
     def start_evaluation(

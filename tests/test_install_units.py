@@ -299,3 +299,15 @@ def test_the_mqtt_script_waits_for_the_config_to_actually_change() -> None:
     assert '"$FRIGATE_CONFIG"' in text
     # Отказ примирителя больше не проглатывается молча.
     assert "|| true" not in text
+
+
+def test_the_web_unit_lets_its_long_jobs_finish() -> None:
+    """Пересчёт эталонов и офлайн-замер живут отдельными процессами.
+
+    По умолчанию systemd убивает всю контрольную группу службы, детей вместе с
+    родителем: 12 августа перезапуск админки убил часовой пересчёт эталонов
+    через четырнадцать секунд после того, как тот записал очередной шаг.
+    """
+    unit = (Path("install") / "catdoor-web.service").read_text(encoding="utf-8")
+
+    assert "KillMode=process" in unit
