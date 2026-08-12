@@ -7,6 +7,7 @@ are asserted here instead.
 
 import configparser
 import stat
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -235,3 +236,47 @@ def test_unit_waits_for_the_data_volume(name: str) -> None:
     )
     assert line is not None, f"{name} не ждёт своего тома"
     assert "/var/lib/catdoor" in line
+
+
+def test_the_mqtt_script_is_runnable_and_idempotent() -> None:
+    """Скрипт запускают руками на узле, и синтаксическая ошибка выяснится там.
+
+    Заодно проверяется главное свойство: повторный запуск не должен добавлять
+    сервис в compose второй раз и плодить дубли настроек в окружении.
+    """
+    script = INSTALL_DIR / "enable-mqtt.sh"
+    text = script.read_text(encoding="utf-8")
+
+    assert script.stat().st_mode & stat.S_IXUSR
+    subprocess.run(["bash", "-n", str(script)], check=True)
+    # Проверки «уже сделано» до каждого изменяющего действия.
+    assert 'grep -qE \'^\\s{2}mqtt:\' "$COMPOSE_FILE"' in text
+    assert 'sed -i "/^${1}=/d" "$CATDOOR_ENV"' in text
+
+
+def test_the_mqtt_script_never_restarts_frigate_silently() -> None:
+    """Перезапуск Frigate прерывает запись обоих контуров.
+
+    Такое не делается молча внутри скрипта, который человек запускает ради
+    брокера: сначала вопрос, потом действие.
+    """
+    text = (INSTALL_DIR / "enable-mqtt.sh").read_text(encoding="utf-8")
+    restart = text.index('systemctl restart "$FRIGATE_UNIT"')
+    question = text.index("Перезапустить Frigate сейчас?")
+
+    assert question < restart
+    # Брокер поднимается по имени сервиса, а не всем compose разом: иначе
+    # Frigate перезапустился бы заодно.
+    assert "up -d mqtt" in text
+
+
+def test_the_broker_listens_only_on_loopback() -> None:
+    """Наружу брокер не смотрит, поэтому и живёт без паролей.
+
+    Если порт когда-нибудь опубликуют шире, пароли становятся обязательными в
+    тот же день — и тест это заметит.
+    """
+    text = (INSTALL_DIR / "enable-mqtt.sh").read_text(encoding="utf-8")
+
+    assert '"127.0.0.1:1883:1883"' in text
+    assert '"1883:1883"' not in text.replace('"127.0.0.1:1883:1883"', "")
