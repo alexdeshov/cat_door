@@ -26,5 +26,17 @@
     {% if entry.reason and entry.decision != "denied_mode_off" %}
       <p class="muted" style="font-size: 13px">{{ entry.reason }}</p>
     {% endif %}
+    {# Обстоятельства: пока только наблюдаются, на решение не влияют. #}
+    {% if entry.approach or entry.gate_state_before %}
+      <p class="faint data" style="font-size: 12px">
+        {%- if entry.approach == "far" %}пришёл издалека
+        {%- elif entry.approach == "near" %}был вплотную
+        {%- else %}откуда — неизвестно{% endif -%}
+        {%- if entry.first_box_bottom is not none %} ({{ "%.2f" | format(entry.first_box_bottom) }}){% endif -%}
+        {%- set states = {"open": "открыта", "closed": "закрыта", "unknown": "неизвестно"} -%}
+        {%- if entry.gate_state_before %} · створка до: {{ states.get(entry.gate_state_before, entry.gate_state_before) }}{% endif -%}
+        {%- if entry.gate_state_after %} · после: {{ states.get(entry.gate_state_after, entry.gate_state_after) }}{% endif -%}
+      </p>
+    {% endif %}
   </div>
 </article>

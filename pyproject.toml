@@ -9,6 +9,10 @@ dependencies = [
     "jinja2>=3.1",
     "sqlalchemy>=2.0",
     "pydantic-settings>=2.7",
+    # Состояние створки калитки приходит только в MQTT: по HTTP Frigate его не
+    # отдаёт. Клиент лёгкий и нужен одной службе, но без него она молча теряет
+    # единственный источник правды о том, открылась ли калитка.
+    "paho-mqtt>=2.0",
 ]
 
 # Раскладка проекта плоская: `src` — обычный пакет, а не корень src-layout.
@@ -81,5 +85,5 @@ line-length = 100
 target-version = "py311"
 
 [[tool.mypy.overrides]]
-module = ["nncf", "nncf.*", "onnx", "onnxruntime", "openvino", "torchvision", "torchvision.*"]
+module = ["nncf", "nncf.*", "onnx", "onnxruntime", "openvino", "paho", "paho.*", "torchvision", "torchvision.*"]
 ignore_missing_imports = true

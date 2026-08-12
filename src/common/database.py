@@ -148,9 +148,18 @@ class GatePass(Base):
     pulse_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     modbus_ok: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     # Открылась ли калитка на самом деле. Геркона на ней нет — поля заведены
-    # заранее и остаются пустыми.
+    # заранее и остаются пустыми. Ответ на тот же вопрос приходит от
+    # классификатора Frigate и живёт в `gate_state_*`: смешивать источники в
+    # одном столбце нельзя, они ошибаются по-разному.
     reed_before: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     reed_after: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # Откуда человек пришёл: `far` — издалека, `near` — уже был вплотную,
+    # `unknown` — рамку узнать не удалось. Считается по первой рамке события.
+    approach: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    first_box_bottom: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Что классификатор Frigate говорил про створку до прохода и после него.
+    gate_state_before: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    gate_state_after: Mapped[str | None] = mapped_column(String(20), nullable=True)
 
 
 def apply_migrations(database_path: Path) -> None:
