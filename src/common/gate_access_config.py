@@ -121,6 +121,38 @@ class MovementRules(BaseModel):
         return self
 
 
+class SecondChanceRules(BaseModel):
+    """Второй импульс тому же человеку в том же событии.
+
+    Одно событие — один импульс: защита от качания, из-за которой 11 августа
+    калитка щёлкала каждые две секунды. У неё есть цена, и 12 августа она
+    предъявилась. Событие Лёши шло 55 секунд; импульс ушёл на третьей, когда
+    створка была ещё открыта от прошедшего перед ним человека, и пропал зря.
+    Через две секунды створка закрылась, а Лёша остался перед ней — и второго
+    импульса ему не полагалось, потому что Frigate, пока человек не вышел из
+    кадра, считает это всё тем же событием.
+
+    Отсюда правило: **створка закрылась, а свой всё ещё здесь — открыть ещё
+    раз.** Не «повторять, пока не сработает»: повтор без закрывшейся створки
+    вернул бы то самое качание.
+
+    Выключены по умолчанию, как и правила движения: свежая установка ведёт
+    себя так же, как до появления этой ветки.
+    """
+
+    enabled: bool = False
+    # Сколько всего импульсов позволено одному событию, включая первый.
+    max_pulses: int = Field(default=2, ge=1, le=5)
+    # Сколько ждать между импульсами. Створка после импульса успевает
+    # открыться и закрыться примерно за пять секунд — замерено 12 августа по
+    # классификатору: импульс 17:18:49, открыта 17:18:55, закрыта 17:18:58.
+    gap_seconds: int = Field(default=8, ge=1, le=120)
+    # Требовать ли, чтобы створка успела закрыться между импульсами. Это и есть
+    # само правило; выключать его стоит, только если классификатор состояния
+    # врёт, и тогда защитой остаётся один лишь `gap_seconds`.
+    require_closed: bool = True
+
+
 class GateAccessConfig(BaseModel):
     mode: Literal["off", "dry", "on"] = "off"
     gates: list[GateSpec] = Field(default_factory=list)
@@ -141,10 +173,15 @@ class GateAccessConfig(BaseModel):
     open_from: str = "07:00"
     open_to: str = "23:00"
     movement: MovementRules = Field(default_factory=MovementRules)
+    second_chance: SecondChanceRules = Field(default_factory=SecondChanceRules)
     # Что было до применения пресета. Хранится здесь же, чтобы откат не зависел
     # ни от чего, кроме этого файла: «вернуть как было» должно работать и после
     # перезагрузки узла, и через неделю.
     replaced_by_preset: dict[str, object] | None = None
+    # То же самое для пресета второго шанса. Отдельным полем, а не общим:
+    # пресеты накатываются и откатываются порознь, и общая ячейка означала бы,
+    # что откат одного втихую роняет другой.
+    replaced_by_chance_preset: dict[str, object] | None = None
 
     @field_validator("mode", mode="before")
     @classmethod
@@ -217,6 +254,41 @@ def rollback_movement_preset(config: GateAccessConfig) -> GateAccessConfig:
         else MovementRules()
     )
     return config.model_copy(update={"movement": restored, "replaced_by_preset": None})
+
+
+# Пресет «второй шанс» — ответ на разбор 12 августа: импульс, ушедший в уже
+# открытую створку, пропадал, и человек перед закрывшейся калиткой оставался ни
+# с чем до тех пор, пока не выйдет из кадра.
+SECOND_CHANCE_PRESET_NAME = "Второй шанс, 12 августа"
+SECOND_CHANCE_PRESET = SecondChanceRules(
+    enabled=True,
+    max_pulses=2,
+    gap_seconds=8,
+    require_closed=True,
+)
+
+
+def apply_second_chance_preset(config: GateAccessConfig) -> GateAccessConfig:
+    """Включить второй шанс, запомнив прежние правила для отката."""
+    return config.model_copy(
+        update={
+            "second_chance": SECOND_CHANCE_PRESET.model_copy(),
+            "replaced_by_chance_preset": config.second_chance.model_dump(),
+        }
+    )
+
+
+def rollback_second_chance_preset(config: GateAccessConfig) -> GateAccessConfig:
+    """Вернуть то, что было до пресета; если возвращать нечего — выключить."""
+    previous = config.replaced_by_chance_preset
+    restored = (
+        SecondChanceRules.model_validate(previous)
+        if isinstance(previous, dict)
+        else SecondChanceRules()
+    )
+    return config.model_copy(
+        update={"second_chance": restored, "replaced_by_chance_preset": None}
+    )
 
 
 def load_gate_access_config(path: Path, defaults: GateAccessConfig) -> GateAccessConfig:

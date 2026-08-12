@@ -46,6 +46,7 @@ from src.common.cat_door_config import (
 from src.common.database import GatePass, create_session_factory
 from src.common.gate_access_config import (
     GateAccessConfig,
+    SecondChanceRules,
     gate_access_config_path,
     load_gate_access_config,
 )
@@ -151,6 +152,10 @@ class GatePassRecord:
     # Какие факторы сказали «за», «против» и «не знаю». Без этого разбирать
     # отказы невозможно: видно решение, но не видно, чем оно вызвано.
     factors_json: str | None = None
+    # Сколько импульсов уже ушло по этому проходу и когда последний. Больше
+    # одного бывает только при включённом втором шансе.
+    pulses: int = 0
+    last_pulse_at: float | None = None
     # Когда Frigate закрыл событие. `None` — человек ещё в кадре. Отсюда
     # считается право на импульс: см. ACT_WITHIN_SECONDS.
     ended_at: float | None = None
@@ -169,6 +174,57 @@ def pass_snapshot_path(data_dir: Path, frigate_event_id: str) -> Path:
     """
     safe = _UNSAFE_IN_NAME.sub("_", frigate_event_id) or "unknown"
     return data_dir / "runtime" / "gate-passes" / f"{safe}.jpg"
+
+
+@dataclass(frozen=True)
+class PriorPass:
+    """Что уже случилось по этому событию на прошлых опросах.
+
+    Раньше хватало одного решения: «открыл» означало «больше не трогаем».
+    Второму шансу нужно ещё и сколько импульсов ушло и когда последний, —
+    иначе правило «не больше max_pulses» жило бы в памяти службы и терялось
+    при каждом перезапуске.
+    """
+
+    decision: str
+    pulses: int = 0
+    last_pulse_at: float | None = None
+
+
+def second_chance_allowed(
+    prior: PriorPass,
+    *,
+    rules: SecondChanceRules,
+    gate_closed_at: float | None,
+    now: float,
+) -> bool:
+    """Заслужил ли этот проход ещё один импульс.
+
+    Правило одно и произносится словами: створка закрылась **после** нашего
+    импульса, а человек всё ещё здесь. Всё остальное — предохранители к нему.
+
+    Без условия про закрывшуюся створку это выродилось бы в «повторять, пока не
+    сработает», то есть в то самое качание, ради избавления от которого один
+    импульс на событие и заводился.
+    """
+    if not rules.enabled:
+        return False
+    if prior.pulses >= rules.max_pulses:
+        return False
+    last = prior.last_pulse_at
+    if last is None:
+        # Импульс был, а когда — неизвестно: строка из времён до счётчика.
+        # Считать это «давно» нельзя, второй шанс держится именно на времени.
+        return False
+    waited = now - last
+    if waited < rules.gap_seconds or waited < 0:
+        # Отрицательное — часы шагнули назад. Тогда ждём ещё, а не открываем.
+        return False
+    if not rules.require_closed:
+        return True
+    # Створка должна была закрыться именно после импульса. Закрытие до него —
+    # это то самое состояние, из-за которого импульс и пропал зря.
+    return gate_closed_at is not None and gate_closed_at > last
 
 
 @dataclass(frozen=True)
@@ -298,7 +354,8 @@ def execute_openings(
     *,
     config: GateAccessConfig,
     opener: RelayOpener,
-    already: dict[str, str],
+    already: dict[str, PriorPass],
+    gate_closed_at: float | None = None,
     now: float | None = None,
     notify: Callable[[str], None] | None = None,
 ) -> list[GatePassRecord]:
@@ -322,11 +379,19 @@ def execute_openings(
         if record.decision != DECISION_DRY_RUN:
             executed.append(record)
             continue
-        outcome = already.get(record.frigate_event_id)
-        if outcome in TERMINAL_DECISIONS:
-            # Исход уже есть — несём его дальше, а не прежнее «открыл бы».
-            executed.append(replace(record, decision=outcome))
-            continue
+        prior = already.get(record.frigate_event_id)
+        repeat = False
+        if prior is not None and prior.decision in TERMINAL_DECISIONS:
+            if not second_chance_allowed(
+                prior,
+                rules=config.second_chance,
+                gate_closed_at=gate_closed_at,
+                now=moment,
+            ):
+                # Исход уже есть — несём его дальше, а не прежнее «открыл бы».
+                executed.append(replace(record, decision=prior.decision))
+                continue
+            repeat = True
         gone_for = moment - record.ended_at if record.ended_at is not None else 0.0
         if gone_for > ACT_WITHIN_SECONDS:
             executed.append(
@@ -341,17 +406,25 @@ def execute_openings(
             )
             continue
         pulse = opener.pulse(relay, config.pulse_ms)
+        sent = (prior.pulses if prior is not None else 0) + 1
+        if pulse.ok and repeat:
+            reason = (
+                f"{record.person_name}: открыто ещё раз — створка закрылась, "
+                f"а человек ещё здесь. {pulse.detail}"
+            )
+        elif pulse.ok:
+            reason = f"{record.person_name}: открыто по лицу. {pulse.detail}"
+        else:
+            reason = f"{record.person_name}: открыть не удалось. {pulse.detail}"
         executed.append(
             replace(
                 record,
                 decision="opened" if pulse.ok else "error",
-                reason=(
-                    f"{record.person_name}: открыто по лицу. {pulse.detail}"
-                    if pulse.ok
-                    else f"{record.person_name}: открыть не удалось. {pulse.detail}"
-                ),
+                reason=reason,
                 pulse_ms=pulse.pulse_ms,
                 modbus_ok=pulse.ok,
+                pulses=sent if pulse.ok else (prior.pulses if prior is not None else 0),
+                last_pulse_at=moment if pulse.ok else record.last_pulse_at,
             )
         )
         if notify is not None:
@@ -359,6 +432,7 @@ def execute_openings(
             notify(
                 f"Калитка: {'открыта' if pulse.ok else 'открыть не удалось'} "
                 f"по лицу — {record.person_name}"
+                + (" (второй раз: створка закрылась, а человек ещё здесь)" if repeat else "")
             )
     return executed
 
@@ -417,6 +491,8 @@ def record_passes(
                 gate_state_after=record.gate_state_after,
                 pulse_ms=record.pulse_ms,
                 modbus_ok=record.modbus_ok,
+                pulses=record.pulses,
+                last_pulse_at=record.last_pulse_at,
                 snapshot_path=snapshot(record) if snapshot is not None else None,
             )
             session.add(stored)
@@ -455,6 +531,20 @@ def record_passes(
             stored.decision = record.decision
             stored.reason = record.reason
             stored.factors_json = record.factors_json
+            stored.pulse_ms = record.pulse_ms
+            stored.modbus_ok = record.modbus_ok
+            changed = True
+        if record.pulses > (stored.pulses or 0):
+            # Второй импульс по тому же событию: решение не изменилось, оно и
+            # там и там «открыл», поэтому ветка выше эту строку не поймает.
+            logger.info(
+                "Проход %s: импульс %d по счёту",
+                record.frigate_event_id,
+                record.pulses,
+            )
+            stored.pulses = record.pulses
+            stored.last_pulse_at = record.last_pulse_at
+            stored.reason = record.reason
             stored.pulse_ms = record.pulse_ms
             stored.modbus_ok = record.modbus_ok
             changed = True
@@ -933,7 +1023,9 @@ def run(*, once: bool = False) -> None:
                 # Исход прошлых опросов по этим же событиям: он решает, не
                 # исполнено ли открытие уже.
                 already = {
-                    row.frigate_event_id: row.decision
+                    row.frigate_event_id: PriorPass(
+                        row.decision, row.pulses or 0, row.last_pulse_at
+                    )
                     for row in session.execute(
                         select(GatePass).where(
                             GatePass.frigate_event_id.in_(
@@ -949,6 +1041,7 @@ def run(*, once: bool = False) -> None:
                         config=config,
                         opener=opener,
                         already=already,
+                        gate_closed_at=state.closed_at,
                         now=time.time(),
                         notify=automatic.append,
                     )

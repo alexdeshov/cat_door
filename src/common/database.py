@@ -153,6 +153,10 @@ class GatePass(Base):
     # Что ушло на плату. Пусто: механика не подключена и кода записи нет.
     pulse_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     modbus_ok: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # Сколько импульсов ушло по этому проходу и когда последний. Больше одного
+    # бывает только при включённом втором шансе.
+    pulses: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    last_pulse_at: Mapped[float | None] = mapped_column(Float, nullable=True)
     # Открылась ли калитка на самом деле. Геркона на ней нет — поля заведены
     # заранее и остаются пустыми. Ответ на тот же вопрос приходит от
     # классификатора Frigate и живёт в `gate_state_*`: смешивать источники в

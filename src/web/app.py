@@ -98,13 +98,16 @@ from src.common.detection_stats import read_detection_stats
 from src.common.frigate_config import RECORDING_RETENTION, frigate_camera_name
 from src.common.gate_access_config import (
     MOVEMENT_PRESET_NAME,
+    SECOND_CHANCE_PRESET_NAME,
     GateAccessConfig,
     GateSpec,
     apply_movement_preset,
+    apply_second_chance_preset,
     gate_access_config_path,
     load_gate_access_config,
     mask_mac,
     rollback_movement_preset,
+    rollback_second_chance_preset,
     save_gate_access_config,
 )
 from src.common.gate_open_request import (
@@ -465,6 +468,13 @@ class MovementRulesPayload(BaseModel):
     return_window_seconds: int = 30
 
 
+class SecondChanceRulesPayload(BaseModel):
+    enabled: bool = False
+    max_pulses: int = 2
+    gap_seconds: int = 8
+    require_closed: bool = True
+
+
 class GateAccessPayload(BaseModel):
     """Настройки автооткрытия из админки.
 
@@ -484,6 +494,7 @@ class GateAccessPayload(BaseModel):
     open_from: str = "07:00"
     open_to: str = "23:00"
     movement: MovementRulesPayload | None = None
+    second_chance: SecondChanceRulesPayload | None = None
 
 
 class DiscoveryPayload(BaseModel):
@@ -617,9 +628,12 @@ def _gate_access_view(config: GateAccessConfig) -> dict[str, object]:
         "open_from": config.open_from,
         "open_to": config.open_to,
         "movement": config.movement.model_dump(),
+        "second_chance": config.second_chance.model_dump(),
         # Есть ли к чему возвращаться: кнопка отката без этого бессмысленна.
         "preset_applied": config.replaced_by_preset is not None,
         "preset_name": MOVEMENT_PRESET_NAME,
+        "chance_preset_applied": config.replaced_by_chance_preset is not None,
+        "chance_preset_name": SECOND_CHANCE_PRESET_NAME,
     }
 
 
@@ -650,13 +664,19 @@ def _merge_gate_access(
                 ),
             }
         )
-    values = payload.model_dump(exclude={"people", "movement"})
+    values = payload.model_dump(exclude={"people", "movement", "second_chance"})
     # Правила движения без них же остаются прежними: панель настроек и
     # переключатель пресета живут рядом и не должны затирать друг друга.
     values["movement"] = (
         payload.movement.model_dump() if payload.movement is not None else stored.movement.model_dump()
     )
+    values["second_chance"] = (
+        payload.second_chance.model_dump()
+        if payload.second_chance is not None
+        else stored.second_chance.model_dump()
+    )
     values["replaced_by_preset"] = stored.replaced_by_preset
+    values["replaced_by_chance_preset"] = stored.replaced_by_chance_preset
     return GateAccessConfig.model_validate({**values, "people": people})
 
 
@@ -1798,6 +1818,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         """
         stored = current_gate_access()
         config = rollback_movement_preset(stored) if rollback else apply_movement_preset(stored)
+        try:
+            save_gate_access_config(gate_access_config_path(settings.data_dir), config)
+        except OSError as exc:
+            raise HTTPException(500, "Не удалось сохранить настройки калитки") from exc
+        return _gate_access_view(config)
+
+    @app.post("/api/gate/access-settings/second-chance-preset")
+    def apply_gate_chance_preset(rollback: bool = False) -> dict[str, object]:
+        """Накатить пресет второго шанса или вернуть, как было.
+
+        Пресет отдельный от правил движения намеренно: они решают разные задачи
+        и включаются порознь. Правила движения отказывают уходящему, второй шанс
+        доводит до конца открытие тому, кто пришёл, — и владелец, откативший
+        одно, не должен вместе с ним терять другое.
+        """
+        stored = current_gate_access()
+        config = (
+            rollback_second_chance_preset(stored)
+            if rollback
+            else apply_second_chance_preset(stored)
+        )
         try:
             save_gate_access_config(gate_access_config_path(settings.data_dir), config)
         except OSError as exc:
