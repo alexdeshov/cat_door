@@ -18,6 +18,7 @@ COMPOSE_FILE=${COMPOSE_FILE:-/opt/gate_access/docker-compose.yml}
 MOSQUITTO_CONF=${MOSQUITTO_CONF:-/etc/mosquitto/catdoor.conf}
 CATDOOR_ENV=${CATDOOR_ENV:-/etc/catdoor/catdoor.env}
 FRIGATE_UNIT=${FRIGATE_UNIT:-frigate}
+FRIGATE_CONFIG=${FRIGATE_CONFIG:-/var/lib/frigate/config/config.yml}
 BROKER=${BROKER:-catdoor-mqtt}
 
 say() { printf '\n== %s\n' "$1"; }
@@ -36,14 +37,31 @@ set_env() {
 apply_config() {
     # Примиритель пересоберёт config.yml из инвентаря и настроек. Это тот же
     # путь, которым конфигурация меняется всегда, — своего у скрипта нет.
-    systemctl start catdoor-gate-sync.service || true
-    sleep 2
+    #
+    # Ждать обязательно, и по факту, а не по таймеру: 2026-08-12 скрипт прочитал
+    # файл через две секунды, а пересборка заняла четырнадцать — и показал
+    # человеку «enabled: false», хотя всё сработало. Примиритель к тому же
+    # запускается по своему таймеру раз в две минуты, и наш запуск может слиться
+    # с уже идущим.
+    systemctl start catdoor-gate-sync.service || printf 'примиритель уже работал\n'
+    for _ in $(seq 1 60); do
+        systemctl is-active --quiet catdoor-gate-sync.service || break
+        sleep 1
+    done
+    # И убеждаемся глазами по файлу: «служба отработала» и «настройка доехала» —
+    # разные утверждения.
+    for _ in $(seq 1 30); do
+        grep -qE "^\s+enabled: ${1}\s*$" <(sed -n '/^mqtt:/,/^[a-z]/p' "$FRIGATE_CONFIG") && return 0
+        sleep 2
+    done
+    printf 'предупреждение: в %s раздел mqtt не стал ожидаемым\n' "$FRIGATE_CONFIG" >&2
+    return 0
 }
 
 if [ "${1:-}" = "--disable" ]; then
     say "Выключаю публикацию в MQTT"
     set_env CATDOOR_GATE_MQTT_ENABLED false
-    apply_config
+    apply_config false
     printf 'Готово. Контейнер брокера оставлен — он никому не мешает.\n'
     printf 'Осталось перезапустить Frigate, когда будет удобно:\n'
     printf '  sudo systemctl restart %s\n' "$FRIGATE_UNIT"
@@ -112,10 +130,10 @@ fi
 
 say "Включаю публикацию в настройках CatDoor"
 set_env CATDOOR_GATE_MQTT_ENABLED true
-apply_config
+apply_config true
 
 say "Что получилось в конфигурации Frigate"
-sed -n '/^mqtt:/,/^[a-z]/p' /var/lib/frigate/config/config.yml | head -12
+sed -n '/^mqtt:/,/^[a-z]/p' "$FRIGATE_CONFIG" | head -12
 
 say "Остался перезапуск Frigate"
 cat <<'WARN'
