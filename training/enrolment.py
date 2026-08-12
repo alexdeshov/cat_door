@@ -201,15 +201,22 @@ def purge_old_runs(runs_root: Path, *, keep: int = KEEP_RUNS) -> list[str]:
     их всегда можно нарезать заново, а место они занимают гигабайтами.
     """
     removed = []
-    runs = sorted(
-        (path for path in runs_root.glob("*/status.json")),
+    # Считаются прогоны **со своими кадрами**, а не все подряд. Иначе пара
+    # прогонов без кропов — прерванный и тот, что взял чужие, — выталкивает из
+    # окна единственный годный набор, и переиспользовать становится нечего.
+    # Ровно это и случилось 2026-08-12: уборка снесла кропы, ради которых
+    # переиспользование и заводилось.
+    with_crops = sorted(
+        (
+            status.parent
+            for status in runs_root.glob("*/status.json")
+            if (status.parent / "dataset" / "dataset.jsonl").is_file()
+        ),
         reverse=True,
     )
-    for status in runs[keep:]:
-        dataset = status.parent / "dataset"
-        if dataset.is_dir():
-            shutil.rmtree(dataset, ignore_errors=True)
-            removed.append(status.parent.name)
+    for run in with_crops[keep:]:
+        shutil.rmtree(run / "dataset", ignore_errors=True)
+        removed.append(run.name)
     return removed
 
 

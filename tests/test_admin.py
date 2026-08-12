@@ -2865,11 +2865,13 @@ def test_prototype_rebuild_runs_outside_the_web_process(
     assert str(model.resolve()) in command
 
 
-def test_the_button_reuses_the_crops_of_the_last_run(runtime_path: Path, monkeypatch) -> None:
-    """Распаковка кадров стоит три четверти часа процессора узла.
+def test_fresh_crops_by_default_and_reuse_on_request(runtime_path: Path, monkeypatch) -> None:
+    """Обычный порядок работы — «разметил и нажал», и кадры нужны свежие.
 
-    Повторять её ради других настроек пересчёта — работа впустую, и первый же
-    повтор 2026-08-11 обошёлся в лишние 45 минут именно так.
+    Взять кропы прошлого прогона дешевле на три четверти часа, но тогда
+    свежая разметка молча не попадёт в расчёт. Поэтому по умолчанию нарезаем
+    заново, а переиспользование запрашивается явно — оно годится, когда
+    разметка не менялась.
     """
     from src.common.settings import Settings
 
@@ -2896,7 +2898,7 @@ def test_the_button_reuses_the_crops_of_the_last_run(runtime_path: Path, monkeyp
         )
     )
 
-    first = client.post("/api/identity/prototypes/rebuild")
+    first = client.post("/api/identity/prototypes/rebuild?reuse=true")
     assert first.status_code == 202, first.text
     reused = started["command"]
     started.clear()
@@ -2904,7 +2906,7 @@ def test_the_button_reuses_the_crops_of_the_last_run(runtime_path: Path, monkeyp
     # честный отказ «пересчёт уже выполняется».
     for status in (runtime_path / "training" / "prototypes").glob("*/status.json"):
         status.write_text('{"state": "completed"}', encoding="utf-8")
-    client.post("/api/identity/prototypes/rebuild?reuse=false")
+    client.post("/api/identity/prototypes/rebuild")
     fresh = started["command"]
 
     assert "--dataset" in reused
@@ -2917,6 +2919,10 @@ def test_old_crops_are_swept_but_reports_stay(runtime_path: Path) -> None:
 
     Отчёты остаются: по ним смотрят, что было. Кропы всегда можно нарезать
     заново.
+
+    Считаются прогоны **со своими кадрами**: 2026-08-12 уборка отсчитала два
+    последних подряд — прерванный и взявший чужие кропы, — и снесла
+    единственный годный набор, ради которого переиспользование и заводилось.
     """
     from training.enrolment import purge_old_runs
 
@@ -2925,10 +2931,15 @@ def test_old_crops_are_swept_but_reports_stay(runtime_path: Path) -> None:
         (runs / name / "dataset").mkdir(parents=True)
         (runs / name / "dataset" / "dataset.jsonl").write_text("{}", encoding="utf-8")
         (runs / name / "status.json").write_text('{"state": "completed"}', encoding="utf-8")
+    # Два прогона без кадров: прерванный и взявший чужие. Окно они не занимают.
+    for name in ("20260811-130000", "20260811-140000"):
+        (runs / name).mkdir(parents=True)
+        (runs / name / "status.json").write_text('{"state": "completed"}', encoding="utf-8")
 
     removed = purge_old_runs(runs, keep=2)
 
     assert removed == ["20260811-100000"]
+    assert (runs / "20260811-110000" / "dataset").is_dir()
     assert not (runs / "20260811-100000" / "dataset").exists()
     assert (runs / "20260811-100000" / "status.json").is_file()
     assert (runs / "20260811-120000" / "dataset").is_dir()

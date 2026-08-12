@@ -1981,7 +1981,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(500, "Не удалось прочитать статус обучения") from exc
 
     @app.post("/api/identity/prototypes/rebuild", status_code=202)
-    def rebuild_prototypes(reuse: bool = True, include: str = "") -> dict[str, object]:
+    def rebuild_prototypes(reuse: bool = False, include: str = "") -> dict[str, object]:
         """Пересчитать эталоны котов по свежей разметке — прямо на узле.
 
         Сеть при этом не обучается: размеченные проходы прогоняются через уже
@@ -2015,10 +2015,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         output_dir = runs_root / run_id
         status_path = output_dir / "status.json"
         write_status(status_path, state="starting", message="Запуск отдельного процесса")
-        # Распаковка кадров стоит три четверти часа процессора, и повторять её
-        # ради других настроек пересчёта — работа впустую. Кропы прошлого
-        # прогона годятся, пока не появилась новая разметка; когда появилась,
-        # `reuse=false` пересоберёт их заново.
+        # Кадры нарезаются заново по умолчанию, и это стоит часа процессора.
+        # Дешёвая альтернатива — взять кропы прошлого прогона — молча
+        # игнорировала бы разметку, сделанную после них, а обычный порядок
+        # работы именно такой: разметил и нажал. Поэтому `reuse=true`
+        # запрашивается явно и годится, когда разметка не менялась: например,
+        # чтобы пересчитать с другим набором котов.
         previous = _latest_dataset(runs_root) if reuse else None
         command = [
             sys.executable,
