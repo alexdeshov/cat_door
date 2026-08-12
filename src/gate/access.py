@@ -520,14 +520,23 @@ def _approach_for(
     """Откуда пришёл человек. Ответ на событие неизменен, поэтому запоминается."""
 
     def approach(event_id: str) -> tuple[str, float | None]:
-        if event_id not in cache:
-            bottom = fetch_first_box(settings.gate_api_url, event_id)
-            cache[event_id] = (approach_from_box(bottom), bottom)
-            if len(cache) > 200:
-                # Окно наблюдения — пять минут; двести событий с запасом
-                # перекрывают его, а расти без предела памяти незачем.
-                cache.pop(next(iter(cache)))
-        return cache[event_id]
+        if event_id in cache:
+            return cache[event_id]
+        bottom = fetch_first_box(settings.gate_api_url, event_id)
+        result = (approach_from_box(bottom), bottom)
+        if bottom is None:
+            # Не запоминаем неудачу. Frigate заводит запись таймлайна с
+            # задержкой, а мы спрашиваем на первом же опросе — на живом узле
+            # 2026-08-12 из-за этого все проходы получили «откуда неизвестно»
+            # навсегда. Событие живёт в окне наблюдения пять минут, и
+            # следующий опрос спросит снова.
+            return result
+        cache[event_id] = result
+        if len(cache) > 200:
+            # Окно наблюдения — пять минут; двести событий с запасом
+            # перекрывают его, а расти без предела памяти незачем.
+            cache.pop(next(iter(cache)))
+        return result
 
     return approach
 

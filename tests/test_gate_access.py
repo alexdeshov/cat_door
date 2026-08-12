@@ -900,3 +900,40 @@ def test_the_gate_state_after_is_refined_later(runtime_path: Path) -> None:
         stored = session.query(GatePass).one()
 
     assert stored.gate_state_after == "open"
+
+
+def test_an_unknown_approach_is_asked_again(runtime_path: Path) -> None:
+    """Frigate заводит запись таймлайна с задержкой, а мы спрашиваем сразу.
+
+    На живом узле 2026-08-12 из-за запомненной неудачи все проходы получили
+    «откуда неизвестно» навсегда, хотя через секунду ответ уже был. Событие
+    живёт в окне наблюдения пять минут — значит следующий опрос обязан спросить
+    снова.
+    """
+    from src.common.settings import Settings
+    from src.gate.access import _approach_for
+
+    answers = [None, 0.31]
+    calls: list[str] = []
+
+    def fake_fetch(api_url: str, event_id: str, **kwargs: object) -> float | None:
+        calls.append(event_id)
+        return answers[len(calls) - 1]
+
+    from src.gate import access
+
+    original = access.fetch_first_box
+    access.fetch_first_box = fake_fetch  # type: ignore[assignment]
+    try:
+        approach = _approach_for(Settings(data_dir=runtime_path), {})
+        first = approach("a")
+        second = approach("a")
+        third = approach("a")
+    finally:
+        access.fetch_first_box = original  # type: ignore[assignment]
+
+    assert first == ("unknown", None)
+    assert second == ("far", pytest.approx(0.31))
+    # Удачный ответ запоминается: он про первую рамку и меняться не может.
+    assert third == ("far", pytest.approx(0.31))
+    assert calls == ["a", "a"]
