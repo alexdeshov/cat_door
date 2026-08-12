@@ -1,6 +1,7 @@
 import json
 import logging
 import math
+import os
 import shutil
 import subprocess
 import threading
@@ -652,7 +653,12 @@ def create_macbook_export(
 
 def _write_status_unlocked(path: Path, values: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {"updated_at": datetime.now(UTC).isoformat(), **values}
+    # Каждая запись помечается процессом, который её сделал. Иначе оборванный
+    # прогон не отличить от идущего: состояние «готовлю кадры» выглядит
+    # одинаково и через минуту, и через восемь часов после смерти процесса.
+    # Явный `pid` в значениях сильнее: родитель, записавший «запускаюсь»,
+    # ставит туда идентификатор ребёнка, а не свой.
+    payload = {"updated_at": datetime.now(UTC).isoformat(), "pid": os.getpid(), **values}
     temporary = path.with_suffix(".tmp")
     temporary.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2),

@@ -3202,3 +3202,56 @@ def test_saving_settings_leaves_the_second_chance_alone(runtime_path: Path, monk
 
     assert saved["second_chance"]["enabled"] is True
     assert saved["chance_preset_applied"] is True
+
+
+def test_a_run_whose_process_died_stops_holding_the_button(runtime_path: Path, monkeypatch) -> None:
+    """12 августа перезапуск админки убил пересчёт эталонов.
+
+    Восемь часов после этого страница показывала «Готовлю кадры размеченных
+    проходов», а кнопка «Запомнить заново» оставалась серой: состояние осталось
+    рабочим, потому что никто не проверял, жив ли процесс.
+    """
+    from training.workflow import write_status
+
+    client = make_client(runtime_path, monkeypatch)
+    status_path = runtime_path / "training" / "prototypes" / "20260812-092900-dead" / "status.json"
+    # Номер, которого заведомо нет: ядро отдаёт номера по кругу, но нулевого
+    # процесса в пользовательском пространстве не бывает.
+    write_status(status_path, state="preparing", message="Готовлю кадры", pid=2**22)
+
+    answer = client.get("/api/identity/prototypes/status").json()
+
+    assert answer["state"] == "failed"
+    assert "оборван" in answer["message"]
+
+
+def test_a_living_run_still_holds_the_button(runtime_path: Path, monkeypatch) -> None:
+    """Живой процесс не должен объявляться мёртвым: это оборвало бы работу."""
+    import os
+
+    from training.workflow import write_status
+
+    client = make_client(runtime_path, monkeypatch)
+    status_path = runtime_path / "training" / "prototypes" / "20260812-100000-live" / "status.json"
+    write_status(status_path, state="preparing", message="Готовлю кадры", pid=os.getpid())
+
+    answer = client.get("/api/identity/prototypes/status").json()
+
+    assert answer["state"] == "preparing"
+
+
+def test_the_status_remembers_whose_process_it_is(tmp_path: Path) -> None:
+    """Без этого оборванный прогон не отличить от идущего."""
+    import os
+
+    from training.workflow import write_status
+
+    path = tmp_path / "status.json"
+    write_status(path, state="preparing", message="Готовлю кадры")
+    own = json.loads(path.read_text(encoding="utf-8"))
+    write_status(path, state="starting", message="Запуск", pid=4242)
+    explicit = json.loads(path.read_text(encoding="utf-8"))
+
+    assert own["pid"] == os.getpid()
+    # Явный номер сильнее: родитель записывает номер ребёнка, а не свой.
+    assert explicit["pid"] == 4242
