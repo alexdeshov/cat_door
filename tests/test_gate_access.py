@@ -15,6 +15,7 @@ from src.common.database import GatePass, create_session_factory
 from src.common.gate_access_config import GateAccessConfig
 from src.common.gate_open_request import REQUEST_TTL_SECONDS, OpenRequest
 from src.gate.access import (
+    ACT_WITHIN_SECONDS,
     GatePassRecord,
     LastOpening,
     execute_openings,
@@ -1043,3 +1044,52 @@ def test_a_slow_telegram_does_not_delay_the_answer(runtime_path: Path) -> None:
 
     # И отказ отправки ничего не отменяет.
     _notify_all(unreachable, collected)
+
+
+def test_a_pulse_never_chases_someone_who_has_left() -> None:
+    """Решение дозревает после ухода — калитке от этого открываться незачем.
+
+    12 августа так и вышло: человек подошёл в 16:41:14, получил отказ по паузе,
+    а когда пауза истекла, решение пересчиталось в «открыл» — и калитка
+    щёлкнула через пятьдесят секунд в пустоту.
+    """
+    opener = _FakeOpener(PulseResult(True, "ок", 500))
+    records, _ = _passes(
+        [_event(sub_label="Алексей", name_score=0.96, ended_at=1000.0)],
+        config=_config(mode="on"),
+    )
+
+    executed = execute_openings(
+        records,
+        config=_config(mode="on"),
+        opener=opener,
+        already={},
+        now=1000.0 + ACT_WITHIN_SECONDS + 1,
+    )
+
+    assert opener.calls == []
+    assert executed[0].decision == "denied_stale"
+    assert "ушёл из кадра" in (executed[0].reason or "")
+
+
+@pytest.mark.parametrize(
+    ("ended_at", "now"),
+    [
+        pytest.param(None, 1000.0, id="ещё в кадре"),
+        pytest.param(1000.0, 1000.0 + ACT_WITHIN_SECONDS - 1, id="только что вышел"),
+    ],
+)
+def test_a_pulse_still_goes_while_the_person_is_there(ended_at: float | None, now: float) -> None:
+    """Пока человек у калитки, опоздание решения не повод его не пускать."""
+    opener = _FakeOpener(PulseResult(True, "ок", 500))
+    records, _ = _passes(
+        [_event(sub_label="Алексей", name_score=0.96, ended_at=ended_at)],
+        config=_config(mode="on"),
+    )
+
+    executed = execute_openings(
+        records, config=_config(mode="on"), opener=opener, already={}, now=now
+    )
+
+    assert executed[0].decision == "opened"
+    assert opener.calls == [(2, 500)]

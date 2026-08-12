@@ -102,6 +102,23 @@ OPENING_DECISIONS = frozenset({DECISION_DRY_RUN, "opened"})
 # ушёл, и это факт о физическом мире. Переоценка того же события на следующем
 # опросе фактом не является и переписать его не может.
 TERMINAL_DECISIONS = frozenset({"opened", "error"})
+# Сколько импульс имеет право опоздать после того, как человек ушёл из кадра.
+#
+# Событие перечитывается всё окно наблюдения, и решение по нему честно меняется:
+# имя приезжает не сразу, направление проясняется, пауза истекает. Для журнала
+# это правильно — строка обязана дозреть. Для железа это ловушка.
+#
+# 2026-08-12, живой разбор: человек подошёл в 16:41:14, получил отказ по паузе
+# (двадцать секунд назад открыли другому), а в 16:42:04 пауза истекла, решение
+# пересчиталось в «открыл» — и калитка щёлкнула через пятьдесят секунд, когда у
+# неё уже никого не было. Владелец увидел ровно то, что и было: три прохода, и
+# никому не открылось.
+#
+# Поэтому право на импульс живёт отдельно от права на строку в журнале. Пока
+# человек в кадре — открываем. Ушёл больше чем на эти секунды — записываем
+# отказ и не трогаем плату: открытая калитка позади ушедшего не нужна никому.
+ACT_WITHIN_SECONDS = 15.0
+DECISION_STALE = "denied_stale"
 # Уборка старых строк — раз в час: чаще незачем, а раз в сутки означало бы, что
 # после долгого простоя чистка не случится вовсе.
 PURGE_INTERVAL_SECONDS = 3600.0
@@ -134,6 +151,9 @@ class GatePassRecord:
     # Какие факторы сказали «за», «против» и «не знаю». Без этого разбирать
     # отказы невозможно: видно решение, но не видно, чем оно вызвано.
     factors_json: str | None = None
+    # Когда Frigate закрыл событие. `None` — человек ещё в кадре. Отсюда
+    # считается право на импульс: см. ACT_WITHIN_SECONDS.
+    ended_at: float | None = None
     # Что реально ушло на плату. Пусто у всего, кроме исполненных открытий.
     pulse_ms: int | None = None
     modbus_ok: bool | None = None
@@ -214,6 +234,7 @@ def passes_from_events(
                     decision=DECISION_LOGGED,
                     reason="Машина у калитки — только запись",
                     has_snapshot=event.has_snapshot,
+                    ended_at=event.ended_at,
                     gate_state_before=gate_state,
                 )
             )
@@ -261,6 +282,7 @@ def passes_from_events(
                 factors_json=json.dumps(
                     [factor.as_dict() for factor in verdict.factors], ensure_ascii=False
                 ),
+                ended_at=event.ended_at,
                 approach=approach,
                 first_box_bottom=bottom,
                 movement=movement,
@@ -277,6 +299,7 @@ def execute_openings(
     config: GateAccessConfig,
     opener: RelayOpener,
     already: dict[str, str],
+    now: float | None = None,
     notify: Callable[[str], None] | None = None,
 ) -> list[GatePassRecord]:
     """Довести решение «открыл бы» до импульса, если режим это позволяет.
@@ -293,6 +316,7 @@ def execute_openings(
     if config.mode != "on" or not config.gates:
         return records
     relay = config.gates[0].relay
+    moment = time.time() if now is None else now
     executed = []
     for record in records:
         if record.decision != DECISION_DRY_RUN:
@@ -302,6 +326,19 @@ def execute_openings(
         if outcome in TERMINAL_DECISIONS:
             # Исход уже есть — несём его дальше, а не прежнее «открыл бы».
             executed.append(replace(record, decision=outcome))
+            continue
+        gone_for = moment - record.ended_at if record.ended_at is not None else 0.0
+        if gone_for > ACT_WITHIN_SECONDS:
+            executed.append(
+                replace(
+                    record,
+                    decision=DECISION_STALE,
+                    reason=(
+                        f"{record.person_name}: решение дозрело поздно — "
+                        f"человек ушёл из кадра {gone_for:.0f} с назад, импульс не подан"
+                    ),
+                )
+            )
             continue
         pulse = opener.pulse(relay, config.pulse_ms)
         executed.append(
@@ -912,6 +949,7 @@ def run(*, once: bool = False) -> None:
                         config=config,
                         opener=opener,
                         already=already,
+                        now=time.time(),
                         notify=automatic.append,
                     )
                 added, refined = record_passes(

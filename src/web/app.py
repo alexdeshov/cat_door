@@ -198,6 +198,7 @@ GATE_PASS_DECISIONS = {
     "denied_leaving": "уходит от калитки",
     "denied_not_approaching": "не идёт к калитке",
     "denied_movement_unknown": "куда идёт — пока не видно",
+    "denied_stale": "решение опоздало, человек ушёл",
     "logged": "машина, только запись",
     "error": "отказ",
 }
