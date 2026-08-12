@@ -1005,3 +1005,41 @@ def test_without_settings_the_door_is_not_guessed_at(runtime_path: Path) -> None
 
     assert result.ok is False
     assert opener.calls == []
+
+
+def test_a_slow_telegram_does_not_delay_the_answer(runtime_path: Path) -> None:
+    """Тот, кто стоит перед дверью, не должен ждать чата.
+
+    2026-08-12: защёлка щёлкнула мгновенно, а служба пятнадцать секунд ждала
+    недоступный Телеграм — и человек увидел «служба не ответила», хотя дверца
+    уже открылась. Порядок теперь такой: сработало → записали → ответили → и
+    только потом сообщаем.
+    """
+    from src.gate.access import _notify_all
+
+    factory = _session(runtime_path)
+    collected: list[str] = []
+
+    with factory() as session:
+        result = handle_open_request(
+            session,
+            request=OpenRequest(id="a", requested_at=1000.0),
+            config=_config(mode="off"),
+            opener=_FakeOpener(PulseResult(True, "ок", 500)),
+            now=1000.1,
+            timezone=MOSCOW,
+            notify=collected.append,
+        )
+        session.commit()
+
+    # Ответ готов, а сообщение ещё даже не отправлялось.
+    assert result.ok
+    assert collected == [
+        "Калитка: открыта по кнопке в админке · " + collected[0].split("· ")[1]
+    ]
+
+    def unreachable(_message: str) -> None:
+        raise OSError("Телеграм недоступен")
+
+    # И отказ отправки ничего не отменяет.
+    _notify_all(unreachable, collected)
