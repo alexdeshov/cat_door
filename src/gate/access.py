@@ -316,13 +316,10 @@ def execute_openings(
         )
         if notify is not None:
             # Уведомление на каждое открытие — условие разрешения владельца.
-            try:
-                notify(
-                    f"Калитка: {'открыта' if pulse.ok else 'открыть не удалось'} "
-                    f"по лицу — {record.person_name}"
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("Уведомление об открытии не ушло: %s", exc)
+            notify(
+                f"Калитка: {'открыта' if pulse.ok else 'открыть не удалось'} "
+                f"по лицу — {record.person_name}"
+            )
     return executed
 
 
@@ -554,13 +551,10 @@ def handle_open_request(
         # Уведомление на каждое срабатывание — условие разрешения владельца, а
         # не удобство. Отказ отправки не отменяет открытия и не роняет службу.
         local = moment.astimezone(timezone)
-        try:
-            notify(
-                f"{what.capitalize()}: {'открыта' if pulse.ok else 'открыть не удалось'} "
-                f"по кнопке в админке · {local.strftime('%H:%M')}"
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Уведомление об открытии не ушло: %s", exc)
+        notify(
+            f"{what.capitalize()}: {'открыта' if pulse.ok else 'открыть не удалось'} "
+            f"по кнопке в админке · {local.strftime('%H:%M')}"
+        )
     return OpenResult(
         id=request.id,
         ok=pulse.ok,
@@ -672,6 +666,17 @@ def _factors_for(
     return factors
 
 
+def _notify_all(send: Callable[[str], None] | None, messages: list[str]) -> None:
+    """Разослать накопленные сообщения. Отказ отправки ничего не отменяет."""
+    if send is None:
+        return
+    for message in messages:
+        try:
+            send(message)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Уведомление не ушло: %s", exc)
+
+
 def _telegram_sender(settings: Settings) -> Callable[[str], None] | None:
     """Отправитель уведомлений об открытии. `None` — бот не настроен.
 
@@ -758,6 +763,7 @@ def run(*, once: bool = False) -> None:
         request = load_open_request(request_path)
         done = load_open_result(result_path)
         if request is not None and (done is None or done.id != request.id):
+            pending: list[str] = []
             with factory() as session:
                 result = handle_open_request(
                     session,
@@ -769,12 +775,17 @@ def run(*, once: bool = False) -> None:
                     cat_door=load_cat_door_config(
                         cat_door_config_path(settings.data_dir), CatDoorConfig()
                     ),
-                    notify=telegram,
+                    notify=pending.append,
                 )
                 session.commit()
             # Ответ пишется после записи в журнал: админка, увидев «открыл»,
             # должна найти строку на месте.
             save_open_result(result_path, result)
+            # И только потом уведомления. 2026-08-12 порядок был обратный:
+            # защёлка щёлкнула мгновенно, а служба пятнадцать секунд ждала
+            # недоступный Телеграм — и человек у дверцы увидел «служба не
+            # ответила». Тот, кто стоит перед дверью, не должен ждать чата.
+            _notify_all(telegram, pending)
         # Окно наблюдения отсчитывается от текущего времени, а не от старта
         # службы: перезапуск не должен оставлять в журнале дыру. Повторов это
         # не даёт — строка обновляется по идентификатору события.
@@ -827,12 +838,13 @@ def run(*, once: bool = False) -> None:
                         )
                     ).scalars()
                 }
+                automatic: list[str] = []
                 records = execute_openings(
                     records,
                     config=config,
                     opener=opener,
                     already=already,
-                    notify=telegram,
+                    notify=automatic.append,
                 )
                 added, refined = record_passes(
                     session,
@@ -843,6 +855,10 @@ def run(*, once: bool = False) -> None:
                 session.commit()
             if added or refined:
                 logger.info("Журнал калитки: добавлено %d, уточнено %d", added, refined)
+            # Сообщения уходят после записи в журнал по той же причине:
+            # недоступный Телеграм не должен задерживать то, ради чего служба
+            # работает.
+            _notify_all(telegram, automatic)
         notifier.watchdog()
         now = time.monotonic()
         if settings.gate_access_retention_days and (
