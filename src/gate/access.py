@@ -68,6 +68,7 @@ from src.common.sd_notify import Notifier
 from src.common.settings import ConfigurationError, Settings, validate_runtime_paths
 from src.common.telegram import TelegramClient
 from src.gate.decision import DECISION_DRY_RUN, Factor, decide
+from src.gate.gate_state import OPEN as GATE_STATE_OPEN
 from src.gate.gate_state import UNKNOWN as GATE_STATE_UNKNOWN
 from src.gate.gate_state import GateStateWatcher
 from src.gate.movement import UNKNOWN as MOVEMENT_UNKNOWN
@@ -156,6 +157,9 @@ class GatePassRecord:
     # одного бывает только при включённом втором шансе.
     pulses: int = 0
     last_pulse_at: float | None = None
+    # Какой была створка в момент импульса: по этому второй шанс отличает
+    # пропавший зря импульс от использованного человеком.
+    pulse_gate_state: str | None = None
     # Когда Frigate закрыл событие. `None` — человек ещё в кадре. Отсюда
     # считается право на импульс: см. ACT_WITHIN_SECONDS.
     ended_at: float | None = None
@@ -189,6 +193,7 @@ class PriorPass:
     decision: str
     pulses: int = 0
     last_pulse_at: float | None = None
+    pulse_gate_state: str | None = None
 
 
 def second_chance_allowed(
@@ -200,14 +205,30 @@ def second_chance_allowed(
 ) -> bool:
     """Заслужил ли этот проход ещё один импульс.
 
-    Правило одно и произносится словами: створка закрылась **после** нашего
-    импульса, а человек всё ещё здесь. Всё остальное — предохранители к нему.
+    Правило произносится словами так: **наш импульс пропал зря, створка с тех
+    пор закрылась, а человек всё ещё здесь.**
 
-    Без условия про закрывшуюся створку это выродилось бы в «повторять, пока не
-    сработает», то есть в то самое качание, ради избавления от которого один
-    импульс на событие и заводился.
+    Первая часть добавлена 12 августа вечером и оказалась главной. Без неё
+    правило звучало «створка закрылась после импульса» — а это описывает и
+    неудачу, и удачу. Владелец прошёл в калитку, она закрылась за ним, и через
+    полминуты пикнула ему вслед:
+
+        17:46:31  импульс — створка была закрыта
+        17:46:36  створка открыта   ← человек прошёл
+        17:46:51  створка закрыта
+        17:46:51  импульс второй    ← лишний
+
+    Отличить одно от другого можно ровно по состоянию створки в момент
+    импульса. Закрыта — значит защёлку отпустили для человека, он открыл и
+    прошёл, всё сработало. Открыта — значит защёлка и так была отпущена, наш
+    импульс ничего не изменил, и когда створка закроется, человек останется
+    перед ней. Второй шанс полагается только этому случаю.
+
+    Неизвестное состояние — не повод открывать: незнание тут ближе к «сработало».
     """
     if not rules.enabled:
+        return False
+    if prior.pulse_gate_state != GATE_STATE_OPEN:
         return False
     if prior.pulses >= rules.max_pulses:
         return False
@@ -355,6 +376,7 @@ def execute_openings(
     config: GateAccessConfig,
     opener: RelayOpener,
     already: dict[str, PriorPass],
+    gate_state: str | None = None,
     gate_closed_at: float | None = None,
     now: float | None = None,
     notify: Callable[[str], None] | None = None,
@@ -425,6 +447,11 @@ def execute_openings(
                 modbus_ok=pulse.ok,
                 pulses=sent if pulse.ok else (prior.pulses if prior is not None else 0),
                 last_pulse_at=moment if pulse.ok else record.last_pulse_at,
+                pulse_gate_state=(
+                    (gate_state or record.gate_state_before)
+                    if pulse.ok
+                    else record.pulse_gate_state
+                ),
             )
         )
         if notify is not None:
@@ -493,6 +520,7 @@ def record_passes(
                 modbus_ok=record.modbus_ok,
                 pulses=record.pulses,
                 last_pulse_at=record.last_pulse_at,
+                pulse_gate_state=record.pulse_gate_state,
                 snapshot_path=snapshot(record) if snapshot is not None else None,
             )
             session.add(stored)
@@ -544,6 +572,7 @@ def record_passes(
             )
             stored.pulses = record.pulses
             stored.last_pulse_at = record.last_pulse_at
+            stored.pulse_gate_state = record.pulse_gate_state
             stored.reason = record.reason
             stored.pulse_ms = record.pulse_ms
             stored.modbus_ok = record.modbus_ok
@@ -1024,7 +1053,10 @@ def run(*, once: bool = False) -> None:
                 # исполнено ли открытие уже.
                 already = {
                     row.frigate_event_id: PriorPass(
-                        row.decision, row.pulses or 0, row.last_pulse_at
+                        row.decision,
+                        row.pulses or 0,
+                        row.last_pulse_at,
+                        row.pulse_gate_state,
                     )
                     for row in session.execute(
                         select(GatePass).where(
@@ -1041,6 +1073,7 @@ def run(*, once: bool = False) -> None:
                         config=config,
                         opener=opener,
                         already=already,
+                        gate_state=state.value if state.known else GATE_STATE_UNKNOWN,
                         gate_closed_at=state.closed_at,
                         now=time.time(),
                         notify=automatic.append,
