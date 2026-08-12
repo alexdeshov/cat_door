@@ -165,10 +165,13 @@ LABELED_FILTERS = {
 # Журнал калитки: те же чипы-фильтры, что и у проходов дверцы. «Неузнанные»
 # отдельным ключом не для симметрии — это самая интересная часть журнала: по
 # ней видно, кого система не узнала и почему у калитки набирали код руками.
+# Люди и машины разведены намеренно: в журнале они отвечают на разные вопросы —
+# «кого пустили» и «кто приезжал», — и общий счётчик не отвечает ни на один.
 GATE_PASS_FILTERS = {
-    "all": GatePass.id.is_not(None),
+    "all": GatePass.label.is_not("car"),
     "named": GatePass.person_name.is_not(None),
-    "unknown": GatePass.person_name.is_(None),
+    "unknown": (GatePass.person_name.is_(None)) & (GatePass.label.is_not("car")),
+    "cars": GatePass.label == "car",
 }
 # Решения журнала калитки по-русски. Коды заведены все сразу, включая те, что
 # появятся с функцией решения: словарь в шаблоне не должен молча показать
@@ -185,6 +188,7 @@ GATE_PASS_DECISIONS = {
     "denied_leaving": "уходит от калитки",
     "denied_not_approaching": "не идёт к калитке",
     "denied_movement_unknown": "куда идёт — пока не видно",
+    "logged": "машина, только запись",
     "error": "отказ",
 }
 # Состояние службы Frigate показывается в шапке каждой страницы, а узнаётся
@@ -1567,13 +1571,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # что сейчас на экране.
         summary_row = session.execute(
             select(
-                func.count(GatePass.id),
+                func.count(GatePass.id).filter(GatePass.label.is_not("car")),
                 func.count(GatePass.id).filter(GatePass.person_name.is_not(None)),
-                func.count(GatePass.id).filter(GatePass.person_name.is_(None)),
+                func.count(GatePass.id).filter(
+                    (GatePass.person_name.is_(None)) & (GatePass.label.is_not("car"))
+                ),
                 func.count(GatePass.id).filter(
                     GatePass.created_at >= today_bounds[0],
                     GatePass.created_at < today_bounds[1],
                 ),
+                func.count(GatePass.id).filter(GatePass.label == "car"),
             )
         ).one()
         person_names = session.scalars(
@@ -1635,6 +1642,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "named": summary_row[1],
                     "unknown": summary_row[2],
                     "today": summary_row[3],
+                    "cars": summary_row[4],
                 },
                 "pass_page": gpage,
                 "pass_pages": pages,

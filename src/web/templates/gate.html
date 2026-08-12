@@ -333,6 +333,10 @@
     <span class="tally-value">{{ pass_summary.unknown }}</span>
     <span class="tally-key">неузнанных</span>
   </a>
+  <a class="tally" href="/gate?who=cars#passes">
+    <span class="tally-value">{{ pass_summary.cars }}</span>
+    <span class="tally-key">машин</span>
+  </a>
 </div>
 
 <section class="panel" id="passes">
@@ -348,7 +352,7 @@
   </div>
   <div class="filter-chips" style="margin: 0 0 12px">
     {% for key, title in [
-      ("all", "все"), ("named", "узнанные"), ("unknown", "неузнанные"),
+      ("all", "люди"), ("named", "узнанные"), ("unknown", "неузнанные"), ("cars", "машины"),
     ] %}
       <a class="filter-chip{{ ' filter-chip-active' if pass_who == key and not pass_name }}"
         href="/gate?who={{ key }}{{ ('&day=' ~ pass_day) if pass_day else '' }}#passes">{{ title }}</a>

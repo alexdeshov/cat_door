@@ -14,7 +14,13 @@
   </div>
   <div class="pass-body">
     <div class="pass-head">
-      <strong>{{ entry.person_name or "неизвестный" }}</strong>
+      <strong>
+        {%- if entry.label == "car" -%}
+          {{ entry.plate or "машина" }}
+        {%- else -%}
+          {{ entry.person_name or "неизвестный" }}
+        {%- endif -%}
+      </strong>
       <span class="faint data">{{ entry.created_at | local_time }}</span>
     </div>
     <p class="muted" style="font-size: 13px">

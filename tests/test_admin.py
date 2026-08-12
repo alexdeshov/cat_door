@@ -2347,7 +2347,9 @@ def _gate_pass(runtime_path: Path, **overrides) -> int:
         "frigate_event_id": "1786171119.126838-b1jywn",
         "created_at": datetime.now(UTC),
         "camera": "gate",
+        "label": "person",
         "person_name": None,
+        "plate": None,
         "score": None,
         "zone": None,
         "decision": "denied_mode_off",
@@ -3004,3 +3006,29 @@ def test_the_rules_are_visible_and_switchable_in_the_admin(
     assert 'id="apply-preset"' in page.text
     # Откатывать нечего, пока пресет не накатили.
     assert 'id="rollback-preset" type="button" disabled' in page.text
+
+
+def test_people_and_cars_are_counted_apart(runtime_path: Path, monkeypatch) -> None:
+    """Они отвечают на разные вопросы: «кого пустили» и «кто приезжал».
+
+    Общий счётчик не отвечает ни на один, а машина в списке людей выглядит как
+    сбой распознавания.
+    """
+    client = make_client(runtime_path, monkeypatch)
+    _gate_pass(runtime_path, frigate_event_id="p", label="person", person_name="Алексей")
+    _gate_pass(
+        runtime_path,
+        frigate_event_id="c",
+        label="car",
+        decision="logged",
+        reason="Машина у калитки — только запись",
+        plate="А123ВС",
+    )
+
+    page = client.get("/gate")
+    cars = client.get("/gate?who=cars")
+
+    assert "машин" in page.text
+    assert "А123ВС" in cars.text
+    # В списке людей машины нет.
+    assert "А123ВС" not in client.get("/gate?who=all").text
