@@ -34,6 +34,7 @@ def test_initial_migration_is_applied_once() -> None:
         ("008_gate_passes_indexes",),
         ("009_gate_pass_context",),
         ("010_gate_pass_movement",),
+        ("011_gate_passes_repair",),
     ]
     assert "events" in tables
     assert {"model_versions", "event_predictions", "evaluation_runs"} <= tables
@@ -93,3 +94,33 @@ def test_indexes_survive_a_migration_torn_by_power_loss(runtime_path: Path) -> N
         "ix_gate_passes_person_name",
         "ix_gate_passes_decision",
     } <= indexes
+
+
+def test_a_migration_torn_in_the_middle_heals_itself(runtime_path: Path) -> None:
+    """Обрыв питания посреди миграции из нескольких команд.
+
+    Воспроизведено 2026-08-12: миграция 009 добавляет четыре столбца, и обрыв
+    оставлял один. Повтор упирался в «duplicate column» на первой команде, это
+    считалось признаком сделанной работы, и остальные три не выполнялись уже
+    никогда — а версия помечалась применённой. Служба после этого падала на
+    «no such column» при каждой записи прохода.
+    """
+    database_path = runtime_path / "catdoor.sqlite3"
+    create_session_factory(database_path)
+    torn = ("first_box_bottom", "gate_state_before", "gate_state_after", "area_ratio")
+
+    with sqlite3.connect(database_path) as connection:
+        for column in torn:
+            connection.execute(f"ALTER TABLE gate_passes DROP COLUMN {column}")
+        connection.execute(
+            "DELETE FROM schema_migrations WHERE version IN "
+            "('009_gate_pass_context', '010_gate_pass_movement', '011_gate_passes_repair')"
+        )
+        connection.commit()
+
+    create_session_factory(database_path)
+
+    with sqlite3.connect(database_path) as connection:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(gate_passes)")}
+
+    assert set(torn) <= columns

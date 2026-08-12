@@ -180,22 +180,47 @@ def apply_migrations(database_path: Path) -> None:
         for migration in sorted(migrations_dir.glob("*.sql")):
             if migration.stem in applied:
                 continue
-            try:
-                connection.executescript(migration.read_text(encoding="utf-8"))
-            except sqlite3.OperationalError as exc:
-                # `executescript` коммитит и работает вне транзакции, поэтому
-                # потеря питания между скриптом и записью версии оставляет
-                # миграцию применённой, но не отмеченной. При следующем старте
-                # повтор упирается в «duplicate column» — и раньше это клало
-                # обе службы в вечный рестарт до ручной правки базы. Такой
-                # повтор — свидетельство уже сделанной работы, а не ошибка.
-                if not _already_applied(exc):
-                    raise
+            # Команды выполняются по одной, а не скриптом целиком. Скрипт
+            # коммитит каждую команду сам, транзакции вокруг нет — и обрыв
+            # питания посреди миграции из нескольких `ALTER` оставлял часть
+            # столбцов недобавленными. При повторе первая же команда упиралась
+            # в «duplicate column», это считалось признаком сделанной работы, и
+            # **остальные команды не выполнялись никогда**. Версия при этом
+            # помечалась применённой, а служба падала на «no such column».
+            #
+            # Воспроизведено 2026-08-12 на миграции 009: из четырёх столбцов
+            # уцелел один. Поэтому «уже применено» решается для каждой команды
+            # отдельно, и обрыв лечится следующим запуском.
+            for statement in _statements(migration.read_text(encoding="utf-8")):
+                try:
+                    connection.execute(statement)
+                except sqlite3.OperationalError as exc:
+                    if not _already_applied(exc):
+                        raise
             connection.execute(
                 "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
                 (migration.stem, datetime.now(UTC).isoformat()),
             )
         connection.commit()
+
+
+def _statements(script: str) -> list[str]:
+    """Разбить миграцию на отдельные команды.
+
+    Миграции проекта — простой DDL без точек с запятой внутри строковых
+    литералов, поэтому деления по `;` достаточно. Пустые куски и остатки
+    комментариев отбрасываются: `execute` на них ругается.
+    """
+    parts = []
+    for chunk in script.split(";"):
+        meaningful = [
+            line
+            for line in chunk.splitlines()
+            if line.strip() and not line.strip().startswith("--")
+        ]
+        if meaningful:
+            parts.append(chunk.strip())
+    return parts
 
 
 def _already_applied(exc: sqlite3.OperationalError) -> bool:
