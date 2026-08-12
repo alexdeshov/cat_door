@@ -73,8 +73,10 @@ def test_config_is_valid_yaml_with_a_camera_per_entry() -> None:
     parsed = yaml.safe_load(build_config(inventory, NodeCircuits(cats=False, gate=True, nvr=True)))
 
     assert set(parsed["cameras"]) == {"gate_1", "yard_cam"}
-    # У калитки один вопрос — кто пришёл; регистратору участка нужны и машины.
-    assert parsed["cameras"]["gate_1"]["objects"]["track"] == ["person"]
+    # У калитки два вопроса: кто пришёл и кто приехал. Машины нужны только
+    # для отчёта, но пока их не было в списке, Frigate не создавал события
+    # и не читал номер, сколько бы хорошо тот ни был виден.
+    assert parsed["cameras"]["gate_1"]["objects"]["track"] == ["person", "car"]
     assert parsed["cameras"]["yard_cam"]["objects"]["track"] == ["person", "car"]
 
 

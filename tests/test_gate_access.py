@@ -96,7 +96,9 @@ def _record(**overrides: object) -> GatePassRecord:
         "frigate_event_id": "1786171119.126838-b1jywn",
         "created_at": datetime(2026, 8, 11, 9, 0, tzinfo=UTC),
         "camera": "gate",
+        "label": "person",
         "person_name": None,
+        "plate": None,
         "score": None,
         "zone": None,
         "decision": DECISION_MODE_OFF,
@@ -122,11 +124,25 @@ def test_only_the_gate_cameras_reach_the_journal() -> None:
     assert [record.frigate_event_id for record in records] == ["a"]
 
 
-def test_a_car_is_not_a_pass() -> None:
-    """Журнал про людей: машину лицом не открывают, а строка о ней — шум."""
-    records, _ = _passes([_event(id="a", label="car"), _event(id="b", label="person")])
+def test_a_car_is_logged_but_never_decided_about() -> None:
+    """Машины нужны для отчёта, а не для решений: калитку по номеру не открывают.
 
-    assert [record.frigate_event_id for record in records] == ["b"]
+    Отдельная ветка нужна не для порядка: пройди машина обычным путём, она
+    съедала бы паузу у людей и засоряла разбор отказов причинами, которых к ней
+    никто не предъявлял.
+    """
+    records, opening = _passes(
+        [_event(id="a", label="car", sub_label="А123ВС"), _event(id="b", label="person")]
+    )
+    car = next(r for r in records if r.frigate_event_id == "a")
+
+    assert [record.frigate_event_id for record in records] == ["a", "b"]
+    assert car.label == "car"
+    assert car.decision == "logged"
+    assert car.plate == "А123ВС"
+    assert car.person_name is None
+    # Машина не двигает паузу: она никого не открывала.
+    assert opening is None
 
 
 def test_a_stranger_is_written_down_too() -> None:

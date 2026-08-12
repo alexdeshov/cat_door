@@ -80,9 +80,13 @@ from src.gate.presence import PhonePresence
 
 logger = logging.getLogger("catdoor.gate-access")
 
-# Журнал ведётся про людей: машина у калитки лицом её не откроет, а строка о
-# ней утопила бы в шуме то, ради чего журнал заведён.
-PASS_LABELS = frozenset({"person"})
+# Кого пишем в журнал. Решения принимаются только по людям: калитку по номеру
+# не открывают, и машина здесь — строка отчёта, а не участник разговора.
+PASS_LABELS = frozenset({"person", "car"})
+DECIDED_LABELS = frozenset({"person"})
+# Что записывается про машину. Не отказ: отказывать ей не в чем, её просто
+# никто ни о чём не спрашивал.
+DECISION_LOGGED = "logged"
 # Решения, после которых считается пауза.
 OPENING_DECISIONS = frozenset({DECISION_DRY_RUN, "opened"})
 # Решения, за которыми стоит уже случившееся действие: импульс ушёл или не
@@ -102,7 +106,9 @@ class GatePassRecord:
     frigate_event_id: str
     created_at: datetime
     camera: str
+    label: str
     person_name: str | None
+    plate: str | None
     score: float | None
     zone: str | None
     decision: str
@@ -183,6 +189,26 @@ def passes_from_events(
         if not event.id:
             continue
         moment = datetime.fromtimestamp(event.started_at, UTC)
+        if event.label not in DECIDED_LABELS:
+            # Машина: пишем и идём дальше. Ни решения, ни паузы, ни факторов —
+            # иначе она съедала бы паузу у людей и мешала разбирать отказы.
+            records.append(
+                GatePassRecord(
+                    frigate_event_id=event.id,
+                    created_at=moment,
+                    camera=event.camera,
+                    label=event.label,
+                    person_name=None,
+                    plate=recognised_name(event),
+                    score=event.name_score,
+                    zone=", ".join(event.zones)[:100] or None,
+                    decision=DECISION_LOGGED,
+                    reason="Машина у калитки — только запись",
+                    has_snapshot=event.has_snapshot,
+                    gate_state_before=gate_state,
+                )
+            )
+            continue
         approach, bottom = (
             approach_for(event.id) if approach_for is not None else (APPROACH_UNKNOWN, None)
         )
@@ -215,7 +241,9 @@ def passes_from_events(
                 frigate_event_id=event.id,
                 created_at=moment,
                 camera=event.camera,
+                label=event.label,
                 person_name=name,
+                plate=None,
                 score=event.name_score,
                 zone=", ".join(event.zones)[:100] or None,
                 decision=verdict.decision,
@@ -330,7 +358,9 @@ def record_passes(
                 frigate_event_id=record.frigate_event_id,
                 created_at=record.created_at,
                 camera=record.camera,
+                label=record.label,
                 person_name=record.person_name,
+                plate=record.plate,
                 score=record.score,
                 zone=record.zone,
                 decision=record.decision,
@@ -350,6 +380,10 @@ def record_passes(
             added += 1
             continue
         changed = False
+        if record.plate and record.plate != stored.plate:
+            # Номер Frigate читает не сразу, как и имя.
+            stored.plate = record.plate
+            changed = True
         if record.person_name is not None and record.person_name != stored.person_name:
             logger.info(
                 "Проход %s опознан: %s", record.frigate_event_id, record.person_name

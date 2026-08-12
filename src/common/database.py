@@ -135,7 +135,13 @@ class GatePass(Base):
         DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True
     )
     camera: Mapped[str] = mapped_column(String(100))
+    # Что это было: `person` или `car`. Машины пишутся только для отчёта —
+    # решений по ним не принимается.
+    label: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
     person_name: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+    # Номер машины, если Frigate его прочитал. Отдельно от имени человека:
+    # столбец, где иногда лежит номер, врёт всем, кто его читает.
+    plate: Mapped[str | None] = mapped_column(String(20), nullable=True)
     score: Mapped[float | None] = mapped_column(Float, nullable=True)
     zone: Mapped[str | None] = mapped_column(String(100), nullable=True)
     decision: Mapped[str] = mapped_column(String(40), index=True)

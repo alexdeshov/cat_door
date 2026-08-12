@@ -35,6 +35,7 @@ def test_initial_migration_is_applied_once() -> None:
         ("009_gate_pass_context",),
         ("010_gate_pass_movement",),
         ("011_gate_passes_repair",),
+        ("012_gate_pass_label",),
     ]
     assert "events" in tables
     assert {"model_versions", "event_predictions", "evaluation_runs"} <= tables
