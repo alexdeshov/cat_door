@@ -91,11 +91,14 @@ from src.common.detection_config import (
 from src.common.detection_stats import read_detection_stats
 from src.common.frigate_config import RECORDING_RETENTION, frigate_camera_name
 from src.common.gate_access_config import (
+    MOVEMENT_PRESET_NAME,
     GateAccessConfig,
     GateSpec,
+    apply_movement_preset,
     gate_access_config_path,
     load_gate_access_config,
     mask_mac,
+    rollback_movement_preset,
     save_gate_access_config,
 )
 from src.common.gate_open_request import (
@@ -179,6 +182,9 @@ GATE_PASS_DECISIONS = {
     "denied_window": "вне разрешённых часов",
     "denied_cooldown": "пауза после прошлого",
     "denied_second_factor": "нет второго фактора",
+    "denied_leaving": "уходит от калитки",
+    "denied_not_approaching": "не идёт к калитке",
+    "denied_movement_unknown": "куда идёт — пока не видно",
     "error": "отказ",
 }
 # Состояние службы Frigate показывается в шапке каждой страницы, а узнаётся
@@ -424,6 +430,14 @@ class GatePersonPayload(BaseModel):
     phone_mac: str | None = None
 
 
+class MovementRulesPayload(BaseModel):
+    enabled: bool = False
+    approaching_ratio: float = 2.0
+    leaving_ratio: float = 0.5
+    open_when_still: bool = True
+    return_window_seconds: int = 30
+
+
 class GateAccessPayload(BaseModel):
     """Настройки автооткрытия из админки.
 
@@ -442,6 +456,7 @@ class GateAccessPayload(BaseModel):
     cooldown_seconds: int = 20
     open_from: str = "07:00"
     open_to: str = "23:00"
+    movement: MovementRulesPayload | None = None
 
 
 class DiscoveryPayload(BaseModel):
@@ -571,6 +586,10 @@ def _gate_access_view(config: GateAccessConfig) -> dict[str, object]:
         "cooldown_seconds": config.cooldown_seconds,
         "open_from": config.open_from,
         "open_to": config.open_to,
+        "movement": config.movement.model_dump(),
+        # Есть ли к чему возвращаться: кнопка отката без этого бессмысленна.
+        "preset_applied": config.replaced_by_preset is not None,
+        "preset_name": MOVEMENT_PRESET_NAME,
     }
 
 
@@ -601,9 +620,14 @@ def _merge_gate_access(
                 ),
             }
         )
-    return GateAccessConfig.model_validate(
-        {**payload.model_dump(exclude={"people"}), "people": people}
+    values = payload.model_dump(exclude={"people", "movement"})
+    # Правила движения без них же остаются прежними: панель настроек и
+    # переключатель пресета живут рядом и не должны затирать друг друга.
+    values["movement"] = (
+        payload.movement.model_dump() if payload.movement is not None else stored.movement.model_dump()
     )
+    values["replaced_by_preset"] = stored.replaced_by_preset
+    return GateAccessConfig.model_validate({**values, "people": people})
 
 
 def _apply_camera_payload(
@@ -1689,6 +1713,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not result.ok:
             raise HTTPException(502, result.detail)
         return {"ok": True, "detail": result.detail, "pulse_ms": result.pulse_ms}
+
+    @app.post("/api/gate/access-settings/preset")
+    def apply_gate_preset(rollback: bool = False) -> dict[str, object]:
+        """Накатить пресет правил движения или вернуть, как было.
+
+        Числа пресета подобраны разбором живых проходов 12 августа
+        (`docs/gate-direction-experiments.md`), и перебирать их руками человеку
+        незачем. Прежние правила запоминаются в том же файле, поэтому откат
+        работает и после перезагрузки узла, и через неделю.
+        """
+        stored = current_gate_access()
+        config = rollback_movement_preset(stored) if rollback else apply_movement_preset(stored)
+        try:
+            save_gate_access_config(gate_access_config_path(settings.data_dir), config)
+        except OSError as exc:
+            raise HTTPException(500, "Не удалось сохранить настройки калитки") from exc
+        return _gate_access_view(config)
 
     @app.get("/gate/passes/{pass_id}/snapshot")
     def gate_pass_snapshot(

@@ -63,6 +63,9 @@ class GateEvent:
     zones: tuple[str, ...] = ()
     # `None` значит «событие ещё идёт»: Frigate закрывает его позже.
     ended_at: float | None = None
+    # Площадь текущей рамки в долях кадра. Обновляется вместе с событием — по
+    # ней и её изменению видно, идёт человек к калитке или от неё.
+    area: float | None = None
 
 
 def gate_cameras(data_dir: Path) -> dict[str, str]:
@@ -127,6 +130,16 @@ def _optional_float(*values: object) -> float | None:
     return None
 
 
+def _box_area(box: object) -> float | None:
+    """Площадь рамки в долях кадра. Frigate отдаёт её как [x, y, ширина, высота]."""
+    if not isinstance(box, list) or len(box) != 4:
+        return None
+    width, height = _optional_float(box[2]), _optional_float(box[3])
+    if width is None or height is None:
+        return None
+    return width * height
+
+
 def _event_from_payload(item: dict[str, object]) -> GateEvent:
     """Событие Frigate из ответа API.
 
@@ -147,6 +160,7 @@ def _event_from_payload(item: dict[str, object]) -> GateEvent:
         name_score=_optional_float(data.get("sub_label_score"), item.get("sub_label_score")),
         zones=tuple(str(zone) for zone in zones) if isinstance(zones, list) else (),
         ended_at=_optional_float(item.get("end_time")),
+        area=_box_area(data.get("box") or item.get("box")),
     )
 
 
@@ -209,6 +223,13 @@ def fetch_first_box(api_url: str, event_id: str, *, timeout: float = 5.0) -> flo
     «откуда он взялся»: конечная появляется только по окончании прохода, то
     есть заведомо позже, чем нужно решать.
     """
+    box = _first_timeline_box(api_url, event_id, timeout=timeout)
+    if box is None:
+        return None
+    return float(box[1]) + float(box[3])
+
+
+def _first_timeline_box(api_url: str, event_id: str, *, timeout: float = 5.0) -> list | None:
     query = urllib.parse.urlencode({"source_id": event_id})
     url = f"{api_url.rstrip('/')}/api/timeline?{query}"
     try:
@@ -222,8 +243,14 @@ def fetch_first_box(api_url: str, event_id: str, *, timeout: float = 5.0) -> flo
     for row in payload:
         box = (row.get("data") or {}).get("box") if isinstance(row, dict) else None
         if isinstance(box, list) and len(box) == 4:
-            return float(box[1]) + float(box[3])
+            return box
     return None
+
+
+def fetch_first_area(api_url: str, event_id: str, *, timeout: float = 5.0) -> float | None:
+    """Площадь первой рамки события — то, с чем сравнивается текущая."""
+    box = _first_timeline_box(api_url, event_id, timeout=timeout)
+    return _box_area(box)
 
 
 def approach_from_box(bottom: float | None) -> str:

@@ -79,3 +79,34 @@ def test_losing_the_broker_means_losing_the_knowledge() -> None:
 def test_a_missing_broker_is_not_a_crash() -> None:
     """Служба обязана работать и без брокера: журнал проходов важнее."""
     assert GateStateWatcher("").start() is False
+
+
+def test_the_return_window_starts_when_the_gate_closes() -> None:
+    """Именно закрылась, а не «сейчас закрыта».
+
+    Открытая створка открытия не требует, а закрытая полдня назад ничего не
+    говорит о том, кто стоит перед ней.
+    """
+    now = [100.0]
+    watcher = _watcher(now)
+
+    _send(watcher, "Открыта")
+    assert watcher.snapshot().closed_within(30, now=now[0]) is False
+
+    now[0] = 105.0
+    _send(watcher, "Закрыта")
+    now[0] = 130.0
+    assert watcher.snapshot().closed_within(30, now=now[0]) is True
+    now[0] = 140.0
+    assert watcher.snapshot().closed_within(30, now=now[0]) is False
+
+
+def test_losing_the_broker_forgets_the_closing_too() -> None:
+    """За время без связи створку могли открыть и закрыть не один раз."""
+    now = [100.0]
+    watcher = _watcher(now)
+    _send(watcher, "Закрыта")
+
+    watcher._on_disconnect()
+
+    assert watcher.snapshot().closed_within(30, now=now[0]) is False

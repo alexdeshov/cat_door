@@ -50,10 +50,24 @@ class GateState:
 
     value: str
     at: float | None = None
+    # Когда створка в последний раз закрылась. Отсюда считается окно
+    # возвращения: человек вышел, закрыл за собой и хочет обратно.
+    closed_at: float | None = None
 
     @property
     def known(self) -> bool:
         return self.value in {OPEN, CLOSED}
+
+    def closed_within(self, seconds: float, *, now: float) -> bool:
+        """Закрывалась ли створка только что.
+
+        Именно закрывалась, а не «сейчас закрыта»: открытая створка не требует
+        открытия, а закрытая полдня назад ничего не говорит о том, кто стоит
+        перед ней.
+        """
+        if self.closed_at is None:
+            return False
+        return 0 <= now - self.closed_at <= seconds
 
 
 class GateStateWatcher:
@@ -118,7 +132,8 @@ class GateStateWatcher:
         logger.info("Слушаю состояние створки: %s", self.topic)
 
     def _on_disconnect(self, *_: object) -> None:
-        # Потеряв связь, перестаём утверждать что бы то ни было.
+        # Потеряв связь, перестаём утверждать что бы то ни было. Отметка о
+        # закрытии тоже уходит: за время без связи створку могли открыть.
         with self._lock:
             self._state = GateState(UNKNOWN)
         logger.warning("Связь с брокером потеряна: состояние створки неизвестно")
@@ -130,8 +145,10 @@ class GateStateWatcher:
         if value is None:
             logger.warning("Классификатор прислал незнакомое состояние: %r", text[:40])
             return
+        now = self._clock()
         with self._lock:
-            self._state = GateState(value, self._clock())
+            closed_at = now if value == CLOSED else self._state.closed_at
+            self._state = GateState(value, now, closed_at)
         logger.info("Створка: %s", text)
 
     def snapshot(self) -> GateState:
@@ -141,5 +158,5 @@ class GateStateWatcher:
         if not state.known or state.at is None:
             return GateState(UNKNOWN)
         if self._clock() - state.at > FRESH_FOR_SECONDS:
-            return GateState(UNKNOWN)
+            return GateState(UNKNOWN, closed_at=state.closed_at)
         return state

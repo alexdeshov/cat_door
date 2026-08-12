@@ -91,6 +91,36 @@ class Person(BaseModel):
         return mac
 
 
+class MovementRules(BaseModel):
+    """Правила направления: кого пускать по тому, куда он идёт.
+
+    Числа измерены 12 августа на живых проходах, разбор — в
+    `docs/gate-direction-experiments.md`. Меняются они не от вкуса, а когда
+    изменится геометрия: подвинули камеру — пороги перемеривают по журналу, там
+    отношение площадей пишется по каждому проходу.
+
+    Выключаются целиком, и это умолчание: свежая установка ведёт себя так же,
+    как до появления правил.
+    """
+
+    enabled: bool = False
+    # Во сколько раз выросла рамка, чтобы считать «идёт к калитке».
+    approaching_ratio: float = Field(default=2.0, gt=1.0, le=20.0)
+    # И во сколько упала, чтобы считать «уходит».
+    leaving_ratio: float = Field(default=0.5, gt=0.0, lt=1.0)
+    # Пускать ли того, кто стоит у калитки и никуда не идёт, — но только сразу
+    # после того, как створка закрылась. Это возвращение: вышел, закрыл за
+    # собой, развернулся.
+    open_when_still: bool = True
+    return_window_seconds: int = Field(default=30, ge=0, le=600)
+
+    @model_validator(mode="after")
+    def validate_ratios(self) -> MovementRules:
+        if self.leaving_ratio >= self.approaching_ratio:
+            raise ValueError("порог ухода должен быть меньше порога прихода")
+        return self
+
+
 class GateAccessConfig(BaseModel):
     mode: Literal["off", "dry", "on"] = "off"
     gates: list[GateSpec] = Field(default_factory=list)
@@ -110,6 +140,11 @@ class GateAccessConfig(BaseModel):
     # а ИК-подсветка даёт серое. Ложное срабатывание ночью — худший случай.
     open_from: str = "07:00"
     open_to: str = "23:00"
+    movement: MovementRules = Field(default_factory=MovementRules)
+    # Что было до применения пресета. Хранится здесь же, чтобы откат не зависел
+    # ни от чего, кроме этого файла: «вернуть как было» должно работать и после
+    # перезагрузки узла, и через неделю.
+    replaced_by_preset: dict[str, object] | None = None
 
     @field_validator("mode", mode="before")
     @classmethod
@@ -144,6 +179,44 @@ class GateAccessConfig(BaseModel):
             if person.name == name:
                 return person
         return None
+
+
+# Пресет «правила движения» — то, что измерено 12 августа 2026. Накатывается и
+# откатывается одним нажатием: числа подобраны разбором живых проходов, и
+# перебирать их руками человеку незачем.
+MOVEMENT_PRESET_NAME = "Правила движения, 12 августа"
+MOVEMENT_PRESET = MovementRules(
+    enabled=True,
+    approaching_ratio=2.0,
+    leaving_ratio=0.5,
+    open_when_still=True,
+    return_window_seconds=30,
+)
+
+
+def apply_movement_preset(config: GateAccessConfig) -> GateAccessConfig:
+    """Включить пресет, запомнив прежние правила для отката."""
+    return config.model_copy(
+        update={
+            "movement": MOVEMENT_PRESET.model_copy(),
+            "replaced_by_preset": config.movement.model_dump(),
+        }
+    )
+
+
+def rollback_movement_preset(config: GateAccessConfig) -> GateAccessConfig:
+    """Вернуть правила, которые были до пресета.
+
+    Если возвращать нечего — выключаем правила совсем: это заведомо то
+    поведение, которое было до их появления.
+    """
+    previous = config.replaced_by_preset
+    restored = (
+        MovementRules.model_validate(previous)
+        if isinstance(previous, dict)
+        else MovementRules()
+    )
+    return config.model_copy(update={"movement": restored, "replaced_by_preset": None})
 
 
 def load_gate_access_config(path: Path, defaults: GateAccessConfig) -> GateAccessConfig:

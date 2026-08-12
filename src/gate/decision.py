@@ -33,7 +33,12 @@ DECISION_LOW_SCORE = "denied_low_score"
 DECISION_WINDOW = "denied_window"
 DECISION_COOLDOWN = "denied_cooldown"
 DECISION_SECOND_FACTOR = "denied_second_factor"
+DECISION_LEAVING = "denied_leaving"
+DECISION_NOT_APPROACHING = "denied_not_approaching"
+DECISION_MOVEMENT_UNKNOWN = "denied_movement_unknown"
 DECISION_DRY_RUN = "dry_run"
+
+MOVEMENT_FACTOR = "movement"
 
 
 @dataclass(frozen=True)
@@ -72,6 +77,50 @@ def _within_window(moment: time, open_from: str, open_to: str) -> bool:
     return moment >= start or moment <= end
 
 
+def _movement_verdict(
+    config: GateAccessConfig,
+    movement: str,
+    *,
+    gate_just_closed: bool,
+) -> tuple[str, str, Factor] | None:
+    """Что говорит направление. `None` — возражений нет.
+
+    Правила умеют только запрещать. Единственное послабление — «стоит рядом
+    сразу после того, как створка закрылась»: это возвращение, ради которого
+    ветка и заведена.
+    """
+    rules = config.movement
+    if not rules.enabled:
+        return None
+    factor = Factor(MOVEMENT_FACTOR, "unknown", movement)
+    if movement == "leaving":
+        return (
+            DECISION_LEAVING,
+            "Человек уходит от калитки",
+            Factor(MOVEMENT_FACTOR, "against", "уходит"),
+        )
+    if movement == "approaching":
+        return None
+    if movement == "still":
+        if rules.open_when_still and gate_just_closed:
+            # Створка только что закрылась, а человек стоит перед ней: так
+            # выглядит возвращение — вышел, закрыл за собой, развернулся.
+            return None
+        return (
+            DECISION_NOT_APPROACHING,
+            "Человек не идёт к калитке, а створка давно не закрывалась",
+            Factor(MOVEMENT_FACTOR, "against", "стоит рядом"),
+        )
+    # Движение ещё неизвестно: событие обновляется раз в несколько секунд.
+    # Считать незнание разрешением значило бы открывать на первом же опросе —
+    # ровно та ошибка, из-за которой всё и затевалось.
+    return (
+        DECISION_MOVEMENT_UNKNOWN,
+        "Куда идёт человек, ещё не видно",
+        factor,
+    )
+
+
 def decide(
     *,
     camera: str,
@@ -82,6 +131,8 @@ def decide(
     now: datetime,
     last_opened_at: datetime | None = None,
     factors: Sequence[Factor] = (),
+    movement: str = "unknown",
+    gate_just_closed: bool = False,
 ) -> Decision:
     """Решение об одном событии. `now` — местное время, с зоной.
 
@@ -136,6 +187,9 @@ def decide(
                 f"Прошло {waited:.0f} с из {config.cooldown_seconds} с паузы",
                 known,
             )
+    verdict = _movement_verdict(config, movement, gate_just_closed=gate_just_closed)
+    if verdict is not None:
+        return Decision(verdict[0], verdict[1], (*known, verdict[2]))
     if config.require_second_factor:
         phone = next((item for item in known if item.name == PHONE_FACTOR), None)
         if phone is None or phone.verdict != "for":

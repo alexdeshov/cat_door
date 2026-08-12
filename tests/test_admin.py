@@ -2943,3 +2943,64 @@ def test_old_crops_are_swept_but_reports_stay(runtime_path: Path) -> None:
     assert not (runs / "20260811-100000" / "dataset").exists()
     assert (runs / "20260811-100000" / "status.json").is_file()
     assert (runs / "20260811-120000" / "dataset").is_dir()
+
+
+def test_the_preset_applies_and_rolls_back_in_one_move(runtime_path: Path, monkeypatch) -> None:
+    """Числа пресета подобраны разбором живых проходов, перебирать их незачем.
+
+    Откат должен работать и после перезагрузки узла, поэтому прежние правила
+    хранятся в том же файле настроек, а не в памяти процесса.
+    """
+    from src.common.gate_access_config import GateAccessConfig, gate_access_config_path
+
+    client = make_client(runtime_path, monkeypatch)
+    client.put(
+        "/api/gate/access-settings",
+        json={"movement": {"enabled": False, "return_window_seconds": 5}},
+    )
+
+    applied = client.post("/api/gate/access-settings/preset").json()
+    stored = GateAccessConfig.model_validate_json(
+        gate_access_config_path(runtime_path).read_text(encoding="utf-8")
+    )
+
+    assert applied["movement"]["enabled"] is True
+    assert applied["movement"]["return_window_seconds"] == 30
+    assert applied["preset_applied"] is True
+    assert stored.movement.enabled is True
+
+    back = client.post("/api/gate/access-settings/preset?rollback=true").json()
+
+    assert back["movement"]["enabled"] is False
+    assert back["movement"]["return_window_seconds"] == 5
+    assert back["preset_applied"] is False
+
+
+def test_saving_other_settings_does_not_disturb_the_rules(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    """Панель настроек и переключатель пресета живут рядом и не затирают друг друга."""
+    client = make_client(runtime_path, monkeypatch)
+    client.post("/api/gate/access-settings/preset")
+
+    client.put("/api/gate/access-settings", json={"mode": "dry", "min_score": 0.9})
+    settings = client.get("/api/gate/access-settings").json()
+
+    assert settings["movement"]["enabled"] is True
+    assert settings["preset_applied"] is True
+
+
+def test_the_rules_are_visible_and_switchable_in_the_admin(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    client = make_client(runtime_path, monkeypatch)
+
+    page = client.get("/gate")
+
+    assert "Куда идёт человек" in page.text
+    assert 'id="movement-enabled"' in page.text
+    assert 'id="apply-preset"' in page.text
+    # Откатывать нечего, пока пресет не накатили.
+    assert 'id="rollback-preset" type="button" disabled' in page.text
