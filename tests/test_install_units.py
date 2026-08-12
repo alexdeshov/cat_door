@@ -280,3 +280,22 @@ def test_the_broker_listens_only_on_loopback() -> None:
 
     assert '"127.0.0.1:1883:1883"' in text
     assert '"1883:1883"' not in text.replace('"127.0.0.1:1883:1883"', "")
+
+
+def test_the_mqtt_script_waits_for_the_config_to_actually_change() -> None:
+    """«Служба отработала» и «настройка доехала» — разные утверждения.
+
+    2026-08-12 скрипт прочитал конфигурацию через две секунды после запуска
+    примирителя, а пересборка заняла четырнадцать, — и показал человеку
+    «enabled: false», хотя всё сработало. Примиритель к тому же ходит по
+    собственному таймеру раз в две минуты, и наш запуск может слиться с уже
+    идущим.
+    """
+    text = (INSTALL_DIR / "enable-mqtt.sh").read_text(encoding="utf-8")
+
+    assert "systemctl is-active --quiet catdoor-gate-sync.service || break" in text
+    # Проверка по самому файлу, а не только по состоянию юнита.
+    assert "enabled: ${1}" in text
+    assert '"$FRIGATE_CONFIG"' in text
+    # Отказ примирителя больше не проглатывается молча.
+    assert "|| true" not in text
