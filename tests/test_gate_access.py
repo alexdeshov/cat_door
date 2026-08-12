@@ -18,6 +18,7 @@ from src.gate.access import (
     ACT_WITHIN_SECONDS,
     GatePassRecord,
     LastOpening,
+    PriorPass,
     execute_openings,
     handle_open_request,
     last_opening,
@@ -664,7 +665,7 @@ def test_an_event_is_opened_once_however_often_it_is_reread() -> None:
         records,
         config=_config(mode="on"),
         opener=opener,
-        already={records[0].frigate_event_id: "opened"},
+        already={records[0].frigate_event_id: PriorPass("opened", 1, 1000.0)},
     )
 
     assert opener.calls == [(2, 500)]
@@ -683,7 +684,7 @@ def test_a_failed_opening_is_not_retried_every_second() -> None:
         records,
         config=_config(mode="on"),
         opener=opener,
-        already={records[0].frigate_event_id: "error"},
+        already={records[0].frigate_event_id: PriorPass("error")},
     )
 
     assert executed[0].decision == "error"
@@ -744,7 +745,10 @@ def test_a_reread_event_does_not_reopen_the_gate(runtime_path: Path) -> None:
     for _ in range(4):
         records, _ = _passes([_event(sub_label="Алексей", name_score=0.96)], config=config)
         with factory() as session:
-            already = {row.frigate_event_id: row.decision for row in session.query(GatePass)}
+            already = {
+                row.frigate_event_id: PriorPass(row.decision, row.pulses or 0, row.last_pulse_at)
+                for row in session.query(GatePass)
+            }
             record_passes(
                 session,
                 execute_openings(records, config=config, opener=opener, already=already),
@@ -769,7 +773,10 @@ def test_a_failed_opening_is_not_downgraded_either(runtime_path: Path) -> None:
     for _ in range(3):
         records, _ = _passes([_event(sub_label="Алексей", name_score=0.96)], config=config)
         with factory() as session:
-            already = {row.frigate_event_id: row.decision for row in session.query(GatePass)}
+            already = {
+                row.frigate_event_id: PriorPass(row.decision, row.pulses or 0, row.last_pulse_at)
+                for row in session.query(GatePass)
+            }
             record_passes(
                 session,
                 execute_openings(records, config=config, opener=opener, already=already),
@@ -1093,3 +1100,113 @@ def test_a_pulse_still_goes_while_the_person_is_there(ended_at: float | None, no
 
     assert executed[0].decision == "opened"
     assert opener.calls == [(2, 500)]
+
+
+def _prior(**overrides: object) -> PriorPass:
+    values: dict[str, object] = {"decision": "opened", "pulses": 1, "last_pulse_at": 1000.0}
+    values.update(overrides)
+    return PriorPass(**values)  # type: ignore[arg-type]
+
+
+def _chance(**overrides: object) -> GateAccessConfig:
+    rules: dict[str, object] = {"enabled": True}
+    rules.update(overrides)
+    return _config(mode="on", second_chance=rules)
+
+
+def test_the_gate_opens_again_when_it_closed_and_the_person_is_still_there() -> None:
+    """Ради этого случая ветка и заведена.
+
+    12 августа событие Лёши шло 55 секунд: импульс ушёл на третьей, когда
+    створка была ещё открыта от прошедшего перед ним человека, и пропал зря.
+    Через две секунды створка закрылась, а Лёша остался перед ней — и второго
+    импульса ему не полагалось.
+    """
+    opener = _FakeOpener(PulseResult(True, "Импульс 500 мс на канал 2", 500))
+    records, _ = _passes([_event(sub_label="Алексей", name_score=0.96)], config=_chance())
+
+    executed = execute_openings(
+        records,
+        config=_chance(),
+        opener=opener,
+        already={records[0].frigate_event_id: _prior()},
+        gate_closed_at=1005.0,
+        now=1010.0,
+    )
+
+    assert opener.calls == [(2, 500)]
+    assert executed[0].decision == "opened"
+    assert executed[0].pulses == 2
+    assert executed[0].last_pulse_at == 1010.0
+    assert "ещё раз" in (executed[0].reason or "")
+
+
+@pytest.mark.parametrize(
+    ("prior", "config", "closed_at", "now", "why"),
+    [
+        pytest.param(
+            _prior(), _config(mode="on"), 1005.0, 1010.0, "выключено", id="ветка выключена"
+        ),
+        pytest.param(
+            _prior(pulses=2), _chance(), 1005.0, 1010.0, "потолок", id="импульсы исчерпаны"
+        ),
+        pytest.param(
+            _prior(), _chance(), 1005.0, 1003.0, "рано", id="пауза между импульсами"
+        ),
+        pytest.param(_prior(), _chance(), None, 1010.0, "створка", id="створка не закрывалась"),
+        pytest.param(
+            _prior(), _chance(), 999.0, 1010.0, "до импульса", id="закрылась до импульса"
+        ),
+        pytest.param(
+            _prior(last_pulse_at=None), _chance(), 1005.0, 1010.0, "когда", id="строка без времени"
+        ),
+    ],
+)
+def test_the_second_chance_has_its_limits(
+    prior: PriorPass,
+    config: GateAccessConfig,
+    closed_at: float | None,
+    now: float,
+    why: str,
+) -> None:
+    """Повтор без закрывшейся створки — это то самое качание, а не второй шанс."""
+    opener = _FakeOpener(PulseResult(True, "ок", 500))
+    records, _ = _passes([_event(sub_label="Алексей", name_score=0.96)], config=config)
+
+    executed = execute_openings(
+        records,
+        config=config,
+        opener=opener,
+        already={records[0].frigate_event_id: prior},
+        gate_closed_at=closed_at,
+        now=now,
+    )
+
+    assert opener.calls == [], why
+    assert executed[0].decision == "opened"
+
+
+def test_the_repeat_is_counted_in_the_journal(runtime_path: Path) -> None:
+    """Решение при повторе не меняется — оно и там и там «открыл».
+
+    Значит, ветка «решение изменилось» второй импульс не запишет, и счётчику
+    нужна своя. Без него потолок импульсов терялся бы при каждом перезапуске.
+    """
+    factory = _session(runtime_path)
+    opened = _record(decision="opened", person_name="Алексей", pulses=1, last_pulse_at=1000.0)
+
+    with factory() as session:
+        record_passes(session, [opened])
+        session.commit()
+    with factory() as session:
+        record_passes(
+            session,
+            [replace(opened, pulses=2, last_pulse_at=1010.0, reason="открыто ещё раз")],
+        )
+        session.commit()
+    with factory() as session:
+        row = session.query(GatePass).one()
+
+    assert row.pulses == 2
+    assert row.last_pulse_at == pytest.approx(1010.0)
+    assert row.reason == "открыто ещё раз"

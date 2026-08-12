@@ -3173,3 +3173,32 @@ def test_the_open_delay_is_saved_and_shown(runtime_path: Path, monkeypatch) -> N
     assert saved["open_delay_seconds"] == 3.5
     assert 'id="door-delay"' in page.text
     assert "ждать после опознания" in page.text
+
+
+def test_the_second_chance_preset_applies_and_rolls_back(runtime_path: Path, monkeypatch) -> None:
+    """Два пресета живут порознь: откат одного не роняет другой."""
+    client = make_client(runtime_path, monkeypatch)
+
+    client.post("/api/gate/access-settings/preset?rollback=false")
+    applied = client.post("/api/gate/access-settings/second-chance-preset?rollback=false").json()
+    rolled = client.post("/api/gate/access-settings/second-chance-preset?rollback=true").json()
+
+    assert applied["second_chance"]["enabled"] is True
+    assert applied["second_chance"]["max_pulses"] == 2
+    assert applied["chance_preset_applied"] is True
+    # Правила движения при этом остались накатанными.
+    assert applied["movement"]["enabled"] is True
+    assert rolled["second_chance"]["enabled"] is False
+    assert rolled["chance_preset_applied"] is False
+    assert rolled["movement"]["enabled"] is True
+
+
+def test_saving_settings_leaves_the_second_chance_alone(runtime_path: Path, monkeypatch) -> None:
+    """Панель настроек и переключатель пресета не должны затирать друг друга."""
+    client = make_client(runtime_path, monkeypatch)
+    client.post("/api/gate/access-settings/second-chance-preset?rollback=false")
+
+    saved = client.put("/api/gate/access-settings", json={"min_score": 0.95}).json()
+
+    assert saved["second_chance"]["enabled"] is True
+    assert saved["chance_preset_applied"] is True
