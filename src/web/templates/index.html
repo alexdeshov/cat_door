@@ -294,13 +294,23 @@
       <label for="door-cooldown">пауза, с</label>
       <input id="door-cooldown" type="number" min="0" max="3600"
         value="{{ cat_door.cooldown_seconds }}" title="Пока не действует: автоматики нет">
+      <label for="door-delay">ждать после опознания, с</label>
+      <input id="door-delay" type="number" min="0" max="30" step="0.5"
+        value="{{ cat_door.open_delay_seconds }}" title="Пока не действует: автоматики нет">
     </div>
     <p class="muted" style="font-size: 13px">
       Защёлка на 12 вольт кратковременного включения: держать её дольше
       нескольких секунд — греть катушку.
     </p>
+    <p class="muted" style="font-size: 13px">
+      Кот, узнанный на подходе, доходит до дверцы не мгновенно. Открыть сразу
+      значит израсходовать окно удержания вхолостую и запереть её перед носом;
+      подождать — раскрыть к его приходу. Пять секунд взяты с ваших слов и
+      подлежат замеру: к ним добавится собственная задержка распознавания,
+      которую видно будет только на живых проходах.
+    </p>
     <p class="notice notice-signal">
-      Порог опознания и пауза <strong>пока не действуют</strong>: автоматического
+      Порог опознания, пауза и задержка <strong>пока не действуют</strong>: автоматического
       открытия по коту ещё нет, а кнопка выше открывает без них — на то она и
       ручная. Настройки заведены заранее, чтобы не терять уже выбранные числа,
       когда автоматика появится.
@@ -760,6 +770,7 @@
           hold_ms: Number(document.querySelector("#door-hold").value),
           min_confidence: Number(document.querySelector("#door-confidence").value),
           cooldown_seconds: Number(document.querySelector("#door-cooldown").value),
+          open_delay_seconds: Number(document.querySelector("#door-delay").value),
           allowed_cats: doorCats
             .filter(chip => chip.getAttribute("aria-pressed") === "true")
             .map(chip => chip.dataset.name)

@@ -77,3 +77,19 @@ def test_only_the_named_cats_are_allowed() -> None:
     assert config.allows("Черныш") is True
     assert config.allows("Бася") is False
     assert config.allows(None) is False
+
+
+def test_the_delay_waits_for_the_cat_to_arrive() -> None:
+    """Кот, узнанный на подходе, доходит до дверцы не мгновенно.
+
+    Открыть сразу значит израсходовать окно удержания вхолостую и запереть
+    дверцу перед носом. Умолчание — пять секунд, по наблюдению владельца.
+    """
+    assert CatDoorConfig().open_delay_seconds == 5.0
+    assert CatDoorConfig(open_delay_seconds=0).open_delay_seconds == 0
+
+
+def test_the_delay_is_bounded() -> None:
+    """Полминуты ожидания — уже не задержка, а забытая настройка."""
+    with pytest.raises(ValueError, match="open_delay_seconds"):
+        CatDoorConfig(open_delay_seconds=60)

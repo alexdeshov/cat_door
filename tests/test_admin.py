@@ -3161,3 +3161,15 @@ def test_settings_that_do_nothing_say_so(runtime_path: Path, monkeypatch) -> Non
     page = client.get("/")
 
     assert "пока не действуют" in page.text
+
+
+def test_the_open_delay_is_saved_and_shown(runtime_path: Path, monkeypatch) -> None:
+    """Число подлежит замеру на живых проходах, поэтому его должно быть видно."""
+    client = make_client(runtime_path, monkeypatch)
+
+    saved = client.put("/api/cat-door/settings", json={"open_delay_seconds": 3.5}).json()
+    page = client.get("/")
+
+    assert saved["open_delay_seconds"] == 3.5
+    assert 'id="door-delay"' in page.text
+    assert "ждать после опознания" in page.text
