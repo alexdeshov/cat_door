@@ -1278,3 +1278,25 @@ def test_the_state_of_the_gate_at_the_pulse_is_remembered() -> None:
     )
 
     assert executed[0].pulse_gate_state == "open"
+
+
+def test_a_clock_behind_the_event_never_opens_the_gate() -> None:
+    """После обрыва питания часы узла какое-то время идут позади.
+
+    Событие «из будущего» выглядит вечно свежим, и старый проход получил бы
+    импульс на первом же опросе после включения. Незнание времени — не повод
+    трогать плату.
+    """
+    opener = _FakeOpener(PulseResult(True, "ок", 500))
+    records, _ = _passes(
+        [_event(sub_label="Алексей", name_score=0.96, ended_at=2000.0)],
+        config=_config(mode="on"),
+    )
+
+    executed = execute_openings(
+        records, config=_config(mode="on"), opener=opener, already={}, now=1000.0
+    )
+
+    assert opener.calls == []
+    assert executed[0].decision == "denied_stale"
+    assert "часы узла позади" in (executed[0].reason or "")

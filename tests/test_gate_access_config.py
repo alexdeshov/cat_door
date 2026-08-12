@@ -7,7 +7,11 @@ from pathlib import Path
 import pytest
 
 from src.common.gate_access_config import (
+    MOVEMENT_PRESET,
+    SECOND_CHANCE_PRESET,
     GateAccessConfig,
+    apply_movement_preset,
+    apply_second_chance_preset,
     gate_access_config_path,
     load_gate_access_config,
     mask_mac,
@@ -130,3 +134,63 @@ def test_a_mac_is_shown_by_its_tail_only() -> None:
     """Отличить свою запись от чужой можно, снять адрес с чужого экрана — нет."""
     assert mask_mac("aa:bb:cc:dd:ee:ff") == "··:··:··:··:ee:ff"
     assert mask_mac("") == ""
+
+
+def test_both_presets_survive_a_round_trip(tmp_path: Path) -> None:
+    """Пресеты и их резервные копии обязаны пережить перезапуск службы.
+
+    Настройки живут в одном файле, и служба перечитывает его на ходу. Потеря
+    любой из двух резервных копий означала бы, что кнопка «вернуть как было»
+    после перезагрузки узла возвращает не то, что было.
+    """
+    path = tmp_path / "gate-access.json"
+    config = apply_second_chance_preset(
+        apply_movement_preset(GateAccessConfig(mode="on", cooldown_seconds=10))
+    )
+
+    save_gate_access_config(path, config)
+    restored = load_gate_access_config(path, GateAccessConfig())
+
+    assert restored == config
+    assert restored.movement == MOVEMENT_PRESET
+    assert restored.second_chance == SECOND_CHANCE_PRESET
+    assert restored.cooldown_seconds == 10
+    # Резервные копии — то, к чему возвращает откат. Без них кнопка отката
+    # молча выключала бы правила вместо возврата прежних.
+    assert restored.replaced_by_preset is not None
+    assert restored.replaced_by_chance_preset is not None
+
+
+def test_a_torn_file_leaves_the_running_settings_alone(tmp_path: Path) -> None:
+    """Обрыв питания посреди записи не должен обнулить настройки.
+
+    Сама запись атомарна, и увидеть половину файла служба не может. Но если
+    файл всё же испорчен — диском, чужой рукой, чем угодно, — служба обязана
+    работать на прежних значениях и сказать об этом, а не откатиться к
+    умолчаниям молча.
+    """
+    path = tmp_path / "gate-access.json"
+    running = apply_second_chance_preset(GateAccessConfig(mode="on", cooldown_seconds=10))
+    save_gate_access_config(path, running)
+    text = path.read_text(encoding="utf-8")
+    path.write_text(text[: len(text) // 2], encoding="utf-8")
+
+    restored = load_gate_access_config(path, running)
+
+    assert restored == running
+    assert restored.second_chance.enabled is True
+
+
+def test_saving_leaves_no_debris_behind(tmp_path: Path) -> None:
+    """Временный файл записи не должен пережить саму запись.
+
+    Иначе каталог настроек обрастал бы обломками после каждого сохранения, а
+    разбирать, какой из них настоящий, пришлось бы человеку.
+    """
+    path = tmp_path / "gate-access.json"
+
+    for cooldown in (10, 20, 30):
+        save_gate_access_config(path, GateAccessConfig(cooldown_seconds=cooldown))
+
+    assert [item.name for item in tmp_path.iterdir()] == ["gate-access.json"]
+    assert load_gate_access_config(path, GateAccessConfig()).cooldown_seconds == 30

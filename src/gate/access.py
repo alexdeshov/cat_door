@@ -415,7 +415,11 @@ def execute_openings(
                 continue
             repeat = True
         gone_for = moment - record.ended_at if record.ended_at is not None else 0.0
-        if gone_for > ACT_WITHIN_SECONDS:
+        # Отрицательное — часы идут позади события. После обрыва питания так
+        # и бывает, пока время не синхронизировалось: событие «из будущего»
+        # выглядело бы вечно свежим, и старый проход получил бы импульс.
+        # Незнание времени — не повод трогать плату.
+        if gone_for > ACT_WITHIN_SECONDS or gone_for < 0:
             executed.append(
                 replace(
                     record,
@@ -423,6 +427,11 @@ def execute_openings(
                     reason=(
                         f"{record.person_name}: решение дозрело поздно — "
                         f"человек ушёл из кадра {gone_for:.0f} с назад, импульс не подан"
+                        if gone_for >= 0
+                        else (
+                            f"{record.person_name}: часы узла позади события "
+                            f"на {-gone_for:.0f} с, импульс не подан"
+                        )
                     ),
                 )
             )
