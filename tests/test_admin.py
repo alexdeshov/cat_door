@@ -950,7 +950,9 @@ def test_a_second_build_does_not_start_while_one_runs(runtime_path: Path, monkey
 
 def test_start_local_training_is_detached(runtime_path: Path, monkeypatch) -> None:
     client = make_client(runtime_path, monkeypatch)
-    page = client.get("/")
+    # Панели обучения переехали на страницу «Модели»: у инженерии другой ритм,
+    # чем у ежедневной разметки.
+    page = client.get("/models")
     assert 'id="training-report-state"' in page.text
     assert 'id="training-progress"' in page.text
     assert 'id="training-report-warnings"' in page.text
@@ -1852,7 +1854,8 @@ def test_counters_count_the_whole_base_not_the_page(runtime_path: Path, monkeypa
     assert '<span class="tally-value">11</span>' in page.text
     # Событие №1 лежит на второй странице, №11 — на первой; оба обязаны попасть
     # в счётчик набора для MacBook.
-    assert "на MacBook: 2" in page.text
+    models_page = client.get("/models")
+    assert "на MacBook: 2" in models_page.text
 
 
 def test_a_single_page_shows_no_pager(runtime_path: Path, monkeypatch) -> None:
@@ -2865,7 +2868,7 @@ def test_the_admin_offers_to_remember_cats_without_the_macbook(
     """Пересчёт эталонов — это запоминание, а не обучение, и живёт он на узле."""
     client = make_client(runtime_path, monkeypatch)
 
-    page = client.get("/")
+    page = client.get("/models")
 
     assert "Память о котах" in page.text
     assert 'id="rebuild-prototypes"' in page.text
@@ -3217,7 +3220,7 @@ def test_the_door_panel_says_what_actually_opens_the_latch(
 
     assert "пока не действуют" not in page.text
     assert "на камере\n      дверцы" in page.text or "камере дверцы" in page.text
-    assert "открывает без оглядки на эти настройки" in page.text
+    assert "без оглядки на эти настройки" in page.text
 
 
 def test_the_open_delay_is_saved_and_shown(runtime_path: Path, monkeypatch) -> None:
@@ -3402,7 +3405,7 @@ def test_the_training_panel_shows_models_and_dynamics(runtime_path: Path, monkey
         },
     )
 
-    page = client.get("/")
+    page = client.get("/models")
 
     assert "Динамика" in page.text
     assert "Пересчёт эталонов" in page.text
@@ -3410,6 +3413,7 @@ def test_the_training_panel_shows_models_and_dynamics(runtime_path: Path, monkey
     # Обе формы приведены к процентам «узнано / пущено».
     assert "71.5%" in page.text
     assert "61.0% / 1.0%" in page.text
-    assert "лучше" in page.text
+    # Отметка «не хуже» сжалась до галочки — клетка и так плотная.
+    assert "✓" in page.text
     # Сторож против сравнения строк между собой.
-    assert "экзамены разные" in page.text
+    assert "разные экзамены" in page.text

@@ -1,0 +1,339 @@
+{% extends "_base.html" %}
+{% set circuit = "cats" %}
+{% set page = "models" %}
+
+{% block title %}CatDoor — модели{% endblock %}
+
+{% block content %}
+{# Страница инженерии опознания. У неё другой ритм, чем у «Проходов»:
+   разметка — ежедневная работа, обучение — еженедельная, и им незачем делить
+   один экран. Лента — таблицы фактов, рейка — три кнопки долгих работ. #}
+<div class="work">
+<div class="work-feed">
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>Что стоит сейчас</h2>
+    <span class="muted">пороги правятся без переобучения</span>
+  </div>
+  <div class="panel-body scroll-x">
+    <table class="data-table">
+      <thead>
+        <tr><th>ракурс</th><th>вид</th><th>вход</th><th>порог</th><th>коты</th><th>файл от</th></tr>
+      </thead>
+      <tbody>
+        {% for model in installed_models %}
+          <tr>
+            <td>{{ "дверца" if model.role == "face" else "подход" }}</td>
+            {% if model.present %}
+              <td>{{ "эмбеддинги" if model.kind == "embedding" else "классификатор" }}</td>
+              <td class="data">{{ model.image_size }}</td>
+              <td class="data">{{ model.threshold }}</td>
+              <td>{{ model.labels | join(", ") }}</td>
+              <td class="data">{{ model.installed_at | local_time }}</td>
+            {% else %}
+              <td colspan="5" class="muted">модель не установлена</td>
+            {% endif %}
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <p class="muted" style="font-size: 13px">
+      Правила честного сравнения и вся история — <code>docs/model-benchmarks.md</code>.
+    </p>
+  </div>
+</section>
+
+{% if training_history %}
+<section class="panel">
+  <div class="panel-head">
+    <h2>Динамика</h2>
+    <span class="muted">строки — разные экзамены, между собой не сравнивать</span>
+  </div>
+  <div class="panel-body scroll-x">
+    <table class="data-table">
+      <thead>
+        <tr><th>когда</th><th>что</th><th>дверца</th><th>подход</th></tr>
+      </thead>
+      <tbody>
+        {% for row in training_history %}
+          <tr>
+            <td class="data">{{ row.at[:16] | replace("T", " ") if row.at else "—" }}</td>
+            <td>{{ row.title }}</td>
+            {% for role in ("face", "side") %}
+              <td class="data">
+                {% set view = row.views.get(role) %}
+                {% if view and view.new and view.installed %}
+                  {{ view.new.recognised }}% / {{ view.new.false_accepts }}%
+                  <span class="muted">(было {{ view.installed.recognised }}% /
+                    {{ view.installed.false_accepts }}%)</span>
+                  {{ "✓" if view.better }}
+                {% else %}
+                  <span class="muted">—</span>
+                {% endif %}
+              </td>
+            {% endfor %}
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <p class="muted" style="font-size: 13px">
+      В клетке: узнано своих / пущено чужих — новая модель, в скобках стоящая
+      на том же наборе.
+    </p>
+  </div>
+</section>
+{% endif %}
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>Текущий прогон</h2>
+    <span id="training-status" class="muted">
+      {% if local_status %}{{ local_status.message }}{% else %}Ещё не запускалось{% endif %}
+    </span>
+  </div>
+  <div class="panel-body">
+    <p id="training-report-state" class="notice">Обучение ещё не запускалось.</p>
+    <progress id="training-progress" max="100" value="0"></progress>
+    <div id="training-report-details" class="muted data" style="font-size: 13px"></div>
+    <div id="training-report-warnings" class="stack"></div>
+    <div id="prototypes-report" class="muted data" style="font-size: 13px"></div>
+  </div>
+</section>
+
+</div>
+<aside class="work-rail">
+
+<section class="panel" id="enrolment">
+  <div class="panel-head">
+    <h2>Память о котах</h2>
+    <span class="muted">минуты–часы</span>
+  </div>
+  <div class="panel-body">
+    <div class="controls">
+      <button id="rebuild-prototypes" type="button" class="primary">Запомнить заново</button>
+    </div>
+    <span id="prototypes-status" class="muted data" style="font-size: 12px">
+      {{ prototypes_status.message if prototypes_status else "Ещё не пересчитывались" }}
+    </span>
+    <p class="muted" style="font-size: 13px">
+      Прогоняет размеченные проходы через стоящую модель и пересчитывает
+      эталоны котов. Сеть не меняется, поэтому новый эталон применяется сам —
+      но только если оказался не хуже прежнего.
+    </p>
+  </div>
+</section>
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>Обучение на узле</h2>
+    <span class="muted">часы</span>
+  </div>
+  <div class="panel-body">
+    <div class="controls">
+      <button id="start-local-training" type="button"
+        {{ "disabled" if local_status and local_status.state in ["starting", "preparing", "training"] }}>
+        Обучить на узле
+      </button>
+    </div>
+    <p class="muted" style="font-size: 13px">
+      Полный цикл без макбука: набор по всей разметке, эмбеддинги
+      ({{ local_training_epochs }} эпох на процессоре), приёмка. Стоящая модель
+      сдаёт тот же экзамен, что и новая. Готовая модель
+      <strong>не применяется сама</strong> — решение о замене за владельцем.
+    </p>
+  </div>
+</section>
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>Набор для MacBook</h2>
+    <span class="muted">на MacBook: {{ target_counts.macbook }} · здесь: {{ target_counts.local }}</span>
+  </div>
+  <div class="panel-body">
+    <div class="controls">
+      <button id="build-export" type="button">Собрать</button>
+      <a class="button" href="/api/training/macbook/export">Скачать собранный</a>
+    </div>
+    <span id="export-status" class="muted data" style="font-size: 12px">
+      {{ export_status.message if export_status else "Набор ещё не собирался" }}
+    </span>
+    <p class="muted" style="font-size: 13px">
+      Сборка — фоновый процесс около часа; скачивание отдаёт последний готовый
+      архив и не мешает идущей сборке.
+    </p>
+  </div>
+</section>
+
+</aside>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  document.querySelector("#build-export")?.addEventListener("click", async event => {
+    const button = event.currentTarget;
+    const status = document.querySelector("#export-status");
+    button.disabled = true;
+    status.textContent = "…";
+    status.classList.remove("bad");
+    try {
+      const response = await fetch("/api/training/macbook/export", {method: "POST"});
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.detail || `ошибка ${response.status}`);
+      status.textContent = "Сборка запущена — это около часа";
+      const timer = setInterval(async () => {
+        const answer = await fetch("/api/training/macbook/export/status");
+        const state = await answer.json().catch(() => ({}));
+        status.textContent = state.message || state.state || "…";
+        if (["completed", "failed", "idle"].includes(state.state)) {
+          clearInterval(timer);
+          button.disabled = false;
+        }
+      }, 15000);
+    } catch (error) {
+      status.textContent = error.message;
+      status.classList.add("bad");
+      button.disabled = false;
+    }
+  });
+
+  const prototypesButton = document.querySelector("#rebuild-prototypes");
+  const prototypesStatus = document.querySelector("#prototypes-status");
+  const prototypesReport = document.querySelector("#prototypes-report");
+
+  function showPrototypes(status) {
+    if (!status) return;
+    prototypesStatus.textContent = status.message || status.state || "";
+    const busy = ["starting", "preparing", "running"].includes(status.state);
+    prototypesButton.disabled = busy;
+    const report = status.report;
+    if (!report || !report.views) { prototypesReport.textContent = ""; return; }
+    const lines = [];
+    for (const [view, data] of Object.entries(report.views)) {
+      if (data.skipped) { lines.push(`${view}: ${data.skipped}`); continue; }
+      const before = data.before || {}, after = data.after || {};
+      lines.push(
+        `${view}: узнано своих ${after.recognised} (было ${before.recognised}), ` +
+        `чужих пущено ${after.false_accepts} (было ${before.false_accepts}), ` +
+        `порог ${data.threshold}, ${data.applied ? "применено" : "оставлены прежние"}`
+      );
+      const thin = Object.entries(data.too_thin || {});
+      if (thin.length) {
+        lines.push(`  мало кадров: ${thin.map(([n, c]) => `${n} — ${c}`).join(", ")}`);
+      }
+      const unknown = Object.entries(data.unknown_to_model || {});
+      if (unknown.length) {
+        lines.push(
+          `  модель их не различает, нужен полный цикл обучения: ` +
+          unknown.map(([n, c]) => `${n} — ${c} кадров`).join(", ")
+        );
+      }
+    }
+    prototypesReport.textContent = lines.join("\n");
+  }
+
+  async function refreshPrototypes() {
+    try {
+      showPrototypes(await (await fetch("/api/identity/prototypes/status")).json());
+    } catch (error) {
+      prototypesStatus.textContent = error.message;
+    }
+  }
+
+  prototypesButton?.addEventListener("click", async () => {
+    prototypesButton.disabled = true;
+    prototypesStatus.textContent = "…";
+    try {
+      const response = await fetch("/api/identity/prototypes/rebuild", {method: "POST"});
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.detail || `ошибка ${response.status}`);
+      prototypesStatus.textContent = "Считаю эталоны…";
+    } catch (error) {
+      prototypesStatus.textContent = error.message;
+      prototypesButton.disabled = false;
+    }
+  });
+
+  if (prototypesButton) {
+    refreshPrototypes();
+    setInterval(refreshPrototypes, 5000);
+  }
+
+  const trainingButton = document.querySelector("#start-local-training");
+  trainingButton?.addEventListener("click", async () => {
+    const status = document.querySelector("#training-status");
+    trainingButton.disabled = true;
+    const response = await fetch("/api/training/local/start", {method: "POST"});
+    const result = await response.json();
+    status.textContent = response.ok
+      ? `Процесс запущен, PID ${result.pid}`
+      : `Не запустилось: ${result.detail}`;
+    if (!response.ok) {
+      trainingButton.disabled = false;
+    } else {
+      setTimeout(refreshTrainingStatus, 500);
+    }
+  });
+
+  function renderTrainingReport(result) {
+    const state = document.querySelector("#training-report-state");
+    const progress = document.querySelector("#training-progress");
+    const details = document.querySelector("#training-report-details");
+    const warnings = document.querySelector("#training-report-warnings");
+    state.textContent = result.message || result.state;
+    state.className = `notice ${result.state === "failed" ? "notice-bad" : ""}`;
+    const epoch = Number(result.epoch || 0);
+    const epochs = Number(result.epochs || 0);
+    progress.value = epochs ? Math.round(epoch / epochs * 100) : (
+      result.state === "completed" ? 100 : 0
+    );
+    const report = result.report || {};
+    const labels = Object.entries(report.events_per_label || {})
+      .map(([name, count]) => `${name === "__foreign__" ? "чужие коты" : name}: ${count}`)
+      .join(", ");
+    const views = Object.entries(report.views || {})
+      .map(([name, count]) => `${name}: ${count} кадров`)
+      .join(", ");
+    const parts = [];
+    if (report.events != null) parts.push(`Проходов: ${report.events}`);
+    if (labels) parts.push(`По котам: ${labels}`);
+    if (views) parts.push(`Ракурсы: ${views}`);
+    if (epochs) parts.push(`Эпоха: ${epoch}/${epochs}`);
+    if (result.loss != null) parts.push(`Loss: ${result.loss}`);
+    if (result.metrics) {
+      for (const [view, metric] of Object.entries(result.metrics)) {
+        if (metric.validation_accuracy != null) {
+          parts.push(
+            `${view} validation accuracy: ${(metric.validation_accuracy * 100).toFixed(1)}%`
+          );
+        }
+      }
+    }
+    details.textContent = parts.join(" · ") || "Данные появятся после подготовки датасета.";
+    warnings.replaceChildren();
+    for (const warning of report.warnings || []) {
+      const row = document.createElement("p");
+      row.className = "notice notice-bad";
+      row.textContent = `Предупреждение: ${warning}`;
+      warnings.appendChild(row);
+    }
+  }
+
+  async function refreshTrainingStatus() {
+    const response = await fetch("/api/training/local/status");
+    if (!response.ok) return;
+    const result = await response.json();
+    document.querySelector("#training-status").textContent = result.message;
+    renderTrainingReport(result);
+    if (["completed", "failed", "idle"].includes(result.state)) {
+      trainingButton.disabled = false;
+      return;
+    }
+    trainingButton.disabled = true;
+    setTimeout(refreshTrainingStatus, 3000);
+  }
+  refreshTrainingStatus();
+
+</script>
+{% endblock %}

@@ -1339,8 +1339,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "known_cat_names": known_cat_names,
                 "local_status": local_status,
                 "local_training_epochs": settings.local_training_epochs,
-                "installed_models": _installed_identity_models(),
-                "training_history": _training_history(),
+
                 "recorder_status": recorder_status,
                 "automatic_capture_enabled": recorder_enabled,
                 "automatic_capture_dry_run": recorder_dry_run,
@@ -1764,6 +1763,42 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # запускаемый от root по изменению этого файла, — вкладка увидит
         # результат при ближайшем обновлении состояния.
         return circuits_view(circuits)
+
+    @app.get("/models", response_class=HTMLResponse)
+    def models_page(request: Request) -> HTMLResponse:
+        """Инженерия опознания: модели, обучение, динамика.
+
+        Отдельно от «Проходов» по ритму работы: разметка ежедневная, обучение
+        еженедельное, и им незачем делить один экран.
+        """
+        runs_root = settings.data_dir / "training"
+        local_runs = sorted((runs_root / "local").glob("*/status.json"))
+        local_status = None
+        if local_runs:
+            payload = _read_status(local_runs[-1])
+            if payload is not None and _expire_stale_training(local_runs[-1], payload):
+                payload = _read_status(local_runs[-1])
+            local_status = payload or {"state": "unknown", "message": "Статус повреждён"}
+        with factory() as session:
+            summary_row = session.execute(
+                select(
+                    func.count(Event.id).filter(Event.training_target == "macbook"),
+                    func.count(Event.id).filter(Event.training_target == "local"),
+                )
+            ).one()
+        return templates.TemplateResponse(
+            request,
+            "models.html",
+            {
+                "local_status": local_status,
+                "local_training_epochs": settings.local_training_epochs,
+                "installed_models": _installed_identity_models(),
+                "training_history": _training_history(),
+                "prototypes_status": _latest_status(runs_root / "prototypes"),
+                "export_status": _latest_status(runs_root / "exports"),
+                "target_counts": {"macbook": summary_row[0], "local": summary_row[1]},
+            },
+        )
 
     @app.get("/gate", response_class=HTMLResponse)
     def gate_page(

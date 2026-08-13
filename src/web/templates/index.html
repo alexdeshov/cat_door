@@ -43,6 +43,12 @@
   </p>
 {% endif %}
 
+{# Двухколонная компоновка — пультовая метафора, доведённая до конца:
+   слева скроллится лента событий, справа — липкая приборная рейка с тем, что
+   должно быть под рукой всегда: превью, дверца, режим сбора. На узком экране
+   рейка встаёт первой: кнопка дверцы важнее ленты. #}
+<div class="work">
+<div class="work-feed">
 {# Счётчики — они же фильтры списка проходов: клик оставляет только свою
    категорию, повторный клик (или «проходов») возвращает всё. Ссылки ведут на
    тот же адрес без JS, чтобы фильтр жил в адресной строке и переживал F5. #}
@@ -70,79 +76,6 @@
     <span class="tally-key">ошибки записи</span>
   </span>
 </div>
-
-<section class="panel">
-  <div class="panel-head">
-    <h2>Камеры</h2>
-    <span class="muted" id="camera-layout-status"></span>
-    <div class="controls" style="margin-left: auto">
-      <button id="swap-cameras" type="button"
-        {{ "disabled" if not face_configured or not side_configured }}>
-        Поменять местами
-      </button>
-      <a class="button" href="/cameras">Настроить</a>
-    </div>
-  </div>
-  <div class="panel-body">
-    <div class="camera-pair">
-      <div class="viewport-frame">
-        {% if face_configured %}
-          <img id="primary-camera-stream" class="viewport" data-live-stream
-            data-stream-src="/stream/face.mjpeg?v={{ stream_version }}" alt="Живое изображение основной камеры">
-        {% else %}
-          <div class="viewport viewport-empty">Основной камере не назначен адрес</div>
-        {% endif %}
-        <div class="viewport-caption">
-          <strong id="primary-camera-title">Основная</strong>
-          {% if face_configured %}
-            <button class="rotate-camera" data-slot="primary" type="button">Повернуть на 90°</button>
-          {% endif %}
-        </div>
-      </div>
-      <div class="viewport-frame">
-        {% if side_configured %}
-          <img id="secondary-camera-stream" class="viewport" data-live-stream
-            data-stream-src="/stream/side.mjpeg?v={{ stream_version }}" alt="Живое изображение дополнительной камеры">
-        {% else %}
-          <div class="viewport viewport-empty">Дополнительной камере не назначен адрес</div>
-        {% endif %}
-        <div class="viewport-caption">
-          <strong id="secondary-camera-title">Дополнительная</strong>
-          {% if side_configured %}
-            <button class="rotate-camera" data-slot="secondary" type="button">Повернуть на 90°</button>
-          {% endif %}
-        </div>
-      </div>
-    </div>
-    {% if face_configured %}
-      <div class="controls">
-        <label class="row">Длительность
-          <input id="duration" type="number" min="3" max="30" value="{{ default_duration }}"
-            style="width: 5.5em"> сек.
-        </label>
-        <button id="capture" class="primary" type="button">Записать проход сейчас</button>
-        <span id="capture-status" class="muted"></span>
-      </div>
-    {% else %}
-      <p class="notice notice-bad">
-        Записывать нечем: роли <code>face</code> не назначена камера.
-        Назначьте её на <a href="/cameras">вкладке «Камеры»</a>.
-      </p>
-    {% endif %}
-  </div>
-</section>
-
-{% if door_configured %}
-<section class="panel" id="door">
-  <div class="panel-head">
-    <h2>Кошачья дверь</h2>
-    <span class="muted" id="door-updated"></span>
-  </div>
-  <div class="panel-body readouts" id="door-readouts">
-    <span class="muted">Опрашиваю контроллер…</span>
-  </div>
-</section>
-{% endif %}
 
 <section class="panel" id="labeling">
   <div class="panel-head">
@@ -253,6 +186,69 @@
 
 {# Дверца. Порядок тот же, что у калитки, и по той же причине: веб механикой не
    распоряжается — он кладёт просьбу файлом, исполняет служба. #}
+</div>
+<aside class="work-rail">
+<section class="panel">
+  <div class="panel-head">
+    <h2>Камеры</h2>
+    <span class="muted" id="camera-layout-status"></span>
+    <div class="controls" style="margin-left: auto">
+      <button id="swap-cameras" type="button"
+        {{ "disabled" if not face_configured or not side_configured }}>
+        Поменять местами
+      </button>
+      <a class="button" href="/cameras">Настроить</a>
+    </div>
+  </div>
+  <div class="panel-body">
+    <div class="camera-pair">
+      <div class="viewport-frame">
+        {% if face_configured %}
+          <img id="primary-camera-stream" class="viewport" data-live-stream
+            data-stream-src="/stream/face.mjpeg?v={{ stream_version }}" alt="Живое изображение основной камеры">
+        {% else %}
+          <div class="viewport viewport-empty">Основной камере не назначен адрес</div>
+        {% endif %}
+        <div class="viewport-caption">
+          <strong id="primary-camera-title">Основная</strong>
+          {% if face_configured %}
+            <button class="rotate-camera" data-slot="primary" type="button">Повернуть на 90°</button>
+          {% endif %}
+        </div>
+      </div>
+      <div class="viewport-frame">
+        {% if side_configured %}
+          <img id="secondary-camera-stream" class="viewport" data-live-stream
+            data-stream-src="/stream/side.mjpeg?v={{ stream_version }}" alt="Живое изображение дополнительной камеры">
+        {% else %}
+          <div class="viewport viewport-empty">Дополнительной камере не назначен адрес</div>
+        {% endif %}
+        <div class="viewport-caption">
+          <strong id="secondary-camera-title">Дополнительная</strong>
+          {% if side_configured %}
+            <button class="rotate-camera" data-slot="secondary" type="button">Повернуть на 90°</button>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+    {% if face_configured %}
+      <div class="controls">
+        <label class="row">Длительность
+          <input id="duration" type="number" min="3" max="30" value="{{ default_duration }}"
+            style="width: 5.5em"> сек.
+        </label>
+        <button id="capture" class="primary" type="button">Записать проход сейчас</button>
+        <span id="capture-status" class="muted"></span>
+      </div>
+    {% else %}
+      <p class="notice notice-bad">
+        Записывать нечем: роли <code>face</code> не назначена камера.
+        Назначьте её на <a href="/cameras">вкладке «Камеры»</a>.
+      </p>
+    {% endif %}
+  </div>
+</section>
+
 <section class="panel" id="cat-door">
   <div class="panel-head">
     <h2>Кошачья дверца</h2>
@@ -267,21 +263,37 @@
       <button type="button" class="door-mode" data-mode="on"
         aria-pressed="{{ 'true' if cat_door.mode == 'on' else 'false' }}">открывать</button>
     </div>
-    <p class="muted" style="font-size: 13px">
-      «Решать и записывать» — тот же приём, которым проверялась калитка: система
-      пишет «открыла бы», но защёлку не трогает. Он и здесь себя оправдал:
-      именно в этом режиме собирается статистика ложных опознаний.
-    </p>
-
     <div class="controls">
-      <button id="test-cat-door" type="button">Открыть дверцу</button>
+      <button id="test-cat-door" type="button" class="primary">Открыть дверцу</button>
       <span id="cat-door-status" class="muted data" style="font-size: 12px"></span>
     </div>
-    <p class="muted" style="font-size: 13px">
-      Тестовое открытие работает в любом режиме: режимы — про автоматику, а не
-      про человека, нажавшего сам. Каждое срабатывание попадает в уведомления.
-    </p>
 
+    <div class="filter-chips" id="door-cats" style="margin: 0 0 12px">
+      {% for name in known_cat_names %}
+        <button type="button" data-name="{{ name }}"
+          class="filter-chip door-cat{{ ' filter-chip-active' if name in cat_door.allowed_cats }}"
+          aria-pressed="{{ 'true' if name in cat_door.allowed_cats else 'false' }}">{{ name }}</button>
+      {% endfor %}
+    </div>
+    <div class="controls">
+      <button id="save-cat-door" type="button">Сохранить</button>
+      <span id="cat-door-save-status" class="muted data" style="font-size: 12px"></span>
+    </div>
+
+    {# Свёрнутая панель не прячет знание — она показывает главное его число в
+       заголовке. Раскрывается по нужде, живёт без джаваскрипта. #}
+    <details class="folded">
+      <summary>Точные настройки
+        <span class="state-line data">порог {{ cat_door.min_confidence }} ·
+          пауза {{ cat_door.cooldown_seconds }} с ·
+          задержка {{ cat_door.open_delay_seconds }} с</span>
+      </summary>
+    <p class="muted" style="font-size: 13px">
+      «Решать и записывать» — тот же приём, которым проверялась калитка: система
+      пишет «открыла бы», но защёлку не трогает; в нём собирается статистика
+      ложных опознаний. Тестовая кнопка работает в любом режиме — режимы про
+      автоматику, а не про человека, нажавшего сам.
+    </p>
     <div class="controls">
       <label for="door-relay">канал реле</label>
       <input id="door-relay" type="number" min="1" max="8" value="{{ cat_door.relay }}">
@@ -318,157 +330,24 @@
       Пустой список своих котов означает «никого» — как и у калитки. Решение
       принимается по живому кадру: опознание прохода попадает в базу, когда кот
       уже ушёл. Режим «наблюдение» пишет решения в журнал и защёлку не трогает.
-      Кнопка выше открывает без оглядки на эти настройки — на то она и ручная.
+      Кнопка открытия работает без оглядки на эти настройки — на то она и
+      ручная.
     </p>
-
-    <div class="filter-chips" id="door-cats" style="margin: 0 0 12px">
-      {% for name in known_cat_names %}
-        <button type="button" data-name="{{ name }}"
-          class="filter-chip door-cat{{ ' filter-chip-active' if name in cat_door.allowed_cats }}"
-          aria-pressed="{{ 'true' if name in cat_door.allowed_cats else 'false' }}">{{ name }}</button>
-      {% endfor %}
-    </div>
-    <div class="controls">
-      <button id="save-cat-door" type="button">Сохранить</button>
-      <span id="cat-door-save-status" class="muted data" style="font-size: 12px"></span>
-    </div>
+    </details>
   </div>
 </section>
 
-{# Запоминание котов. Не обучение: сеть не меняется, пересчитываются эталоны —
-   средние векторы размеченных кропов. Поэтому это минуты на узле, а не ночь на
-   макбуке, и поэтому новый кот заводится здесь же. #}
-<section class="panel" id="enrolment">
+{% if door_configured %}
+<section class="panel" id="door">
   <div class="panel-head">
-    <h2>Память о котах</h2>
-    <span class="muted">эталоны считаются на узле</span>
+    <h2>Кошачья дверь</h2>
+    <span class="muted" id="door-updated"></span>
   </div>
-  <div class="panel-body">
-    <div class="controls">
-      <button id="rebuild-prototypes" type="button">Запомнить заново</button>
-      <span id="prototypes-status" class="muted data" style="font-size: 12px">
-        {{ prototypes_status.message if prototypes_status else "Ещё не пересчитывались" }}
-      </span>
-    </div>
-    <p class="muted" style="font-size: 13px">
-      Кнопка прогоняет размеченные проходы через стоящую модель и пересчитывает
-      эталоны котов, которых модель знает. Сеть при этом не обучается и макбук
-      не нужен. Кадры нарезаются заново — это около часа работы узла, зато
-      свежая разметка попадает в расчёт целиком; детекция при этом не проседает.
-    </p>
-    <p class="muted" style="font-size: 13px">
-      Новые эталоны применяются, только если они не пускают больше чужих, чем
-      прежние. Если стало хуже — остаются старые, и здесь будет сказано почему.
-      Чего пересчёт не умеет: улучшить само зрение и завести кота, которого
-      модель не обучалась различать. Такому коту эталон не помогает — его векторы
-      лежат там же, где у всех чужих, — и в отчёте он будет назван отдельно.
-      Это работа для обучения на макбуке.
-    </p>
-    <div id="prototypes-report" class="muted data" style="font-size: 13px"></div>
+  <div class="panel-body readouts" id="door-readouts">
+    <span class="muted">Опрашиваю контроллер…</span>
   </div>
 </section>
-
-<section class="panel">
-  <div class="panel-head">
-    <h2>Обучение</h2>
-    <span class="muted">
-      на MacBook: {{ target_counts.macbook }} · здесь: {{ target_counts.local }}
-    </span>
-  </div>
-  <div class="panel-body">
-    <div class="controls">
-      <button id="build-export" type="button">Собрать набор для MacBook</button>
-      <a class="button" href="/api/training/macbook/export">Скачать собранный</a>
-      <span id="export-status" class="muted data" style="font-size: 12px">
-        {{ export_status.message if export_status else "Набор ещё не собирался" }}
-      </span>
-      <button id="start-local-training" type="button"
-        {{ "disabled" if local_status and local_status.state in ["starting", "preparing", "training"] }}>
-        Обучить на узле
-      </button>
-      <span id="training-status" class="muted">
-        {% if local_status %}{{ local_status.message }}{% else %}Ещё не запускалось{% endif %}
-      </span>
-    </div>
-    <p id="training-report-state" class="notice">Обучение ещё не запускалось.</p>
-    <progress id="training-progress" max="100" value="0"></progress>
-    <div id="training-report-details" class="muted data" style="font-size: 13px"></div>
-    <div id="training-report-warnings" class="stack"></div>
-    <p class="muted" style="font-size: 13px">
-      «Обучить на узле» — полный цикл без макбука: набор по всей разметке,
-      пространство эмбеддингов ({{ local_training_epochs }} эпох на процессоре —
-      это часы), приёмка. Каких котов учить, узел решает по стоящей модели, а её
-      саму сдаёт тому же экзамену, что и новую, — цифры двух разных экзаменов
-      несравнимы. Готовая модель <strong>не применяется сама</strong>: прогон
-      оставляет пакет и сравнение, менять или нет — решение владельца.
-    </p>
-
-    <h3 style="margin: 16px 0 8px; font-size: 15px">Что стоит сейчас</h3>
-    <table class="data" style="font-size: 13px">
-      <thead>
-        <tr><th>ракурс</th><th>вид</th><th>вход</th><th>порог</th><th>коты</th><th>файл от</th></tr>
-      </thead>
-      <tbody>
-        {% for model in installed_models %}
-          <tr>
-            <td>{{ model.role }}</td>
-            {% if model.present %}
-              <td>{{ "эмбеддинги" if model.kind == "embedding" else "классификатор" }}</td>
-              <td>{{ model.image_size }}</td>
-              <td class="data">{{ model.threshold }}</td>
-              <td>{{ model.labels | join(", ") }}</td>
-              <td>{{ model.installed_at | local_time }}</td>
-            {% else %}
-              <td colspan="5" class="muted">модель не установлена</td>
-            {% endif %}
-          </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-    <p class="muted" style="font-size: 13px">
-      Порог — рабочая точка, а не свойство модели: правится в метаданных рядом с
-      моделью без переобучения. Правила честного сравнения и вся история —
-      <code>docs/model-benchmarks.md</code>.
-    </p>
-
-    {% if training_history %}
-      <h3 style="margin: 16px 0 8px; font-size: 15px">Динамика</h3>
-      <table class="data" style="font-size: 13px">
-        <thead>
-          <tr><th>когда</th><th>что</th><th>дверца</th><th>подход</th></tr>
-        </thead>
-        <tbody>
-          {% for row in training_history %}
-            <tr>
-              <td class="data">{{ row.at[:16] | replace("T", " ") if row.at else "—" }}</td>
-              <td>{{ row.title }}</td>
-              {% for role in ("face", "side") %}
-                <td>
-                  {% set view = row.views.get(role) %}
-                  {% if view and view.new and view.installed %}
-                    {# Каждая строка — один экзамен: новая и стоящая модель на
-                       одних и тех же отложенных кропах. #}
-                    {{ view.new.recognised }}% / {{ view.new.false_accepts }}%
-                    <span class="muted">(было {{ view.installed.recognised }}% /
-                      {{ view.installed.false_accepts }}%)</span>
-                    {{ "✓ лучше" if view.better }}
-                  {% else %}
-                    <span class="muted">—</span>
-                  {% endif %}
-                </td>
-              {% endfor %}
-            </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-      <p class="muted" style="font-size: 13px">
-        В клетках: узнано своих / пущено чужих — новая модель, в скобках стоящая
-        на том же наборе. Сравнивать строки между собой нельзя: наборы растут и
-        экзамены разные.
-      </p>
-    {% endif %}
-  </div>
-</section>
+{% endif %}
 
 <section class="panel">
   <div class="panel-head">
@@ -495,6 +374,8 @@
     </p>
   </div>
 </section>
+</aside>
+</div>
 {% endblock %}
 
 {% block scripts %}
@@ -882,142 +763,6 @@
     }
   });
 
-  const prototypesButton = document.querySelector("#rebuild-prototypes");
-  const prototypesStatus = document.querySelector("#prototypes-status");
-  const prototypesReport = document.querySelector("#prototypes-report");
-
-  function showPrototypes(status) {
-    if (!status) return;
-    prototypesStatus.textContent = status.message || status.state || "";
-    const busy = ["starting", "preparing", "running"].includes(status.state);
-    prototypesButton.disabled = busy;
-    const report = status.report;
-    if (!report || !report.views) { prototypesReport.textContent = ""; return; }
-    const lines = [];
-    for (const [view, data] of Object.entries(report.views)) {
-      if (data.skipped) { lines.push(`${view}: ${data.skipped}`); continue; }
-      const before = data.before || {}, after = data.after || {};
-      lines.push(
-        `${view}: узнано своих ${after.recognised} (было ${before.recognised}), ` +
-        `чужих пущено ${after.false_accepts} (было ${before.false_accepts}), ` +
-        `порог ${data.threshold}, ${data.applied ? "применено" : "оставлены прежние"}`
-      );
-      const thin = Object.entries(data.too_thin || {});
-      if (thin.length) {
-        lines.push(`  мало кадров: ${thin.map(([n, c]) => `${n} — ${c}`).join(", ")}`);
-      }
-      const unknown = Object.entries(data.unknown_to_model || {});
-      if (unknown.length) {
-        lines.push(
-          `  модель их не различает, нужен полный цикл обучения: ` +
-          unknown.map(([n, c]) => `${n} — ${c} кадров`).join(", ")
-        );
-      }
-    }
-    prototypesReport.textContent = lines.join("\n");
-  }
-
-  async function refreshPrototypes() {
-    try {
-      showPrototypes(await (await fetch("/api/identity/prototypes/status")).json());
-    } catch (error) {
-      prototypesStatus.textContent = error.message;
-    }
-  }
-
-  prototypesButton?.addEventListener("click", async () => {
-    prototypesButton.disabled = true;
-    prototypesStatus.textContent = "…";
-    try {
-      const response = await fetch("/api/identity/prototypes/rebuild", {method: "POST"});
-      const result = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(result.detail || `ошибка ${response.status}`);
-      prototypesStatus.textContent = "Считаю эталоны…";
-    } catch (error) {
-      prototypesStatus.textContent = error.message;
-      prototypesButton.disabled = false;
-    }
-  });
-
-  if (prototypesButton) {
-    refreshPrototypes();
-    setInterval(refreshPrototypes, 5000);
-  }
-
-  const trainingButton = document.querySelector("#start-local-training");
-  trainingButton?.addEventListener("click", async () => {
-    const status = document.querySelector("#training-status");
-    trainingButton.disabled = true;
-    const response = await fetch("/api/training/local/start", {method: "POST"});
-    const result = await response.json();
-    status.textContent = response.ok
-      ? `Процесс запущен, PID ${result.pid}`
-      : `Не запустилось: ${result.detail}`;
-    if (!response.ok) {
-      trainingButton.disabled = false;
-    } else {
-      setTimeout(refreshTrainingStatus, 500);
-    }
-  });
-
-  function renderTrainingReport(result) {
-    const state = document.querySelector("#training-report-state");
-    const progress = document.querySelector("#training-progress");
-    const details = document.querySelector("#training-report-details");
-    const warnings = document.querySelector("#training-report-warnings");
-    state.textContent = result.message || result.state;
-    state.className = `notice ${result.state === "failed" ? "notice-bad" : ""}`;
-    const epoch = Number(result.epoch || 0);
-    const epochs = Number(result.epochs || 0);
-    progress.value = epochs ? Math.round(epoch / epochs * 100) : (
-      result.state === "completed" ? 100 : 0
-    );
-    const report = result.report || {};
-    const labels = Object.entries(report.events_per_label || {})
-      .map(([name, count]) => `${name === "__foreign__" ? "чужие коты" : name}: ${count}`)
-      .join(", ");
-    const views = Object.entries(report.views || {})
-      .map(([name, count]) => `${name}: ${count} кадров`)
-      .join(", ");
-    const parts = [];
-    if (report.events != null) parts.push(`Проходов: ${report.events}`);
-    if (labels) parts.push(`По котам: ${labels}`);
-    if (views) parts.push(`Ракурсы: ${views}`);
-    if (epochs) parts.push(`Эпоха: ${epoch}/${epochs}`);
-    if (result.loss != null) parts.push(`Loss: ${result.loss}`);
-    if (result.metrics) {
-      for (const [view, metric] of Object.entries(result.metrics)) {
-        if (metric.validation_accuracy != null) {
-          parts.push(
-            `${view} validation accuracy: ${(metric.validation_accuracy * 100).toFixed(1)}%`
-          );
-        }
-      }
-    }
-    details.textContent = parts.join(" · ") || "Данные появятся после подготовки датасета.";
-    warnings.replaceChildren();
-    for (const warning of report.warnings || []) {
-      const row = document.createElement("p");
-      row.className = "notice notice-bad";
-      row.textContent = `Предупреждение: ${warning}`;
-      warnings.appendChild(row);
-    }
-  }
-
-  async function refreshTrainingStatus() {
-    const response = await fetch("/api/training/local/status");
-    if (!response.ok) return;
-    const result = await response.json();
-    document.querySelector("#training-status").textContent = result.message;
-    renderTrainingReport(result);
-    if (["completed", "failed", "idle"].includes(result.state)) {
-      trainingButton.disabled = false;
-      return;
-    }
-    trainingButton.disabled = true;
-    setTimeout(refreshTrainingStatus, 3000);
-  }
-  refreshTrainingStatus();
 
   const captureStateNames = {off: "выключен", observe: "наблюдение", record: "запись"};
   const captureChoices = document.querySelectorAll(".capture-choice");
