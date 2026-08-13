@@ -71,8 +71,83 @@
   </div>
 </section>
 
+{# Дашборд: модули одним рядом, под ними — сегодняшняя работа обоих контуров
+   с отказами. Карточки модулей — те же группы сверки, что развёрнуты ниже
+   таблицами: дашборд их не подменяет, а даёт прочесть одним взглядом. #}
+<section class="panel">
+  <div class="panel-head">
+    <h2>Сегодня</h2>
+    <span class="muted">местные сутки · подробности — в таблицах ниже и в журналах</span>
+  </div>
+  <div class="panel-body">
+    <div class="dash-modules">
+      {% for group in health.groups %}
+        <a class="dash-module" href="#group-{{ loop.index }}">
+          <span class="beacon {{ tone[group.status] }}" aria-hidden="true"></span>
+          <span class="dash-module-title">{{ group.title }}</span>
+          <span class="dash-module-state muted">{{ verdicts[group.status] }}</span>
+        </a>
+      {% endfor %}
+      <span class="dash-module">
+        <span class="beacon {{ 'beacon-ok' if dashboard.gate.service_alive else 'beacon-bad' }}"
+          aria-hidden="true"></span>
+        <span class="dash-module-title">Служба калитки</span>
+        <span class="dash-module-state muted">
+          {{ "слушает просьбы" if dashboard.gate.service_alive else "heartbeat молчит" }}
+        </span>
+      </span>
+    </div>
+
+    <div class="dash-stats">
+      <div class="dash-stat">
+        <h3>Калитка: люди</h3>
+        <p class="dash-numbers data">
+          <b>{{ dashboard.gate.total }}</b> проходов ·
+          <b class="dash-ok">{{ dashboard.gate.opened }}</b> открыл ·
+          <b{% if dashboard.gate.denied %} class="dash-warn"{% endif %}>{{ dashboard.gate.denied }}</b> отказов
+        </p>
+        {% if dashboard.gate.people %}
+          <p class="muted" style="font-size: 12.5px">
+            открывалась:
+            {% for name, count in dashboard.gate.people %}{{ name }} ×{{ count }}{{ ", " if not loop.last }}{% endfor %}
+          </p>
+        {% endif %}
+        {% if dashboard.gate.denials %}
+          <p class="muted" style="font-size: 12.5px">
+            отказы:
+            {% for title, count in dashboard.gate.denials %}{{ title }} ×{{ count }}{{ ", " if not loop.last }}{% endfor %}
+          </p>
+        {% else %}
+          <p class="muted" style="font-size: 12.5px">отказов сегодня не было</p>
+        {% endif %}
+      </div>
+
+      <div class="dash-stat">
+        <h3>Дверца: коты</h3>
+        <p class="dash-numbers data">
+          <b>{{ dashboard.cats.events }}</b> проходов ·
+          <b>{{ dashboard.cats.uncertain }}</b> не уверена ·
+          <b{% if dashboard.cats.failed %} class="dash-warn"{% endif %}>{{ dashboard.cats.failed }}</b> ошибок записи
+        </p>
+        {% if dashboard.cats.recognised %}
+          <p class="muted" style="font-size: 12.5px">
+            узнала:
+            {% for name, count in dashboard.cats.recognised %}{{ name }} ×{{ count }}{{ ", " if not loop.last }}{% endfor %}
+          </p>
+        {% else %}
+          <p class="muted" style="font-size: 12.5px">узнанных проходов сегодня нет</p>
+        {% endif %}
+        <p class="muted" style="font-size: 12.5px">
+          «не уверена» — проходы, где модель не дотянула до порога: это и есть
+          отказы опознания.
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
 {% for group in health.groups %}
-  <section class="panel">
+  <section class="panel" id="group-{{ loop.index }}">
     <div class="panel-head">
       <span class="beacon {{ tone[group.status] }}" aria-hidden="true"></span>
       <h2>{{ group.title }}</h2>
