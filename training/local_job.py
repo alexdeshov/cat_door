@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import traceback
 from collections import defaultdict
 from pathlib import Path
@@ -113,6 +114,11 @@ def run_job(
     installed: dict[str, Path],
 ) -> None:
     status_path = output_dir / "status.json"
+    # Веса ImageNet torchvision скачивает в ~/.cache — а у службы нет ни дома
+    # (`/home/catdoor` не существует), ни доступа к нему (`ProtectHome=true` в
+    # юните). Кеш направляется в каталог данных: он у службы точно писуемый, и
+    # скачивание случается один раз, а не на каждый прогон.
+    os.environ.setdefault("TORCH_HOME", str(data_dir / "training" / "torch-cache"))
     heartbeat = StatusHeartbeat(status_path)
     heartbeat.start()
     try:
