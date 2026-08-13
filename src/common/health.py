@@ -67,6 +67,24 @@ WARN_MEMORY_USED_PERCENT = 85.0
 FAIL_MEMORY_USED_PERCENT = 95.0
 WARN_DISK_USED_PERCENT = 85.0
 FAIL_DISK_USED_PERCENT = 95.0
+# Тома, которые сами распоряжаются своим местом. Frigate не «заполняет диск», а
+# **держит его полным**: пишет, пока есть место, и стирает самое старое, когда
+# места не осталось. Полнота там — рабочее состояние, а не беда.
+#
+# Проверено на узле 13 августа: при 97% занятости 6 августа удалено целиком,
+# 5 августа стёрто до 150 МБ, 7 августа съедено со 130 до 23 ГБ. Уборка идёт.
+#
+# Мерить такой том общей меркой нельзя: 85% он перешагнёт в первый же день и
+# будет светиться жёлтым вечно. Постоянное предупреждение хуже, чем никакого, —
+# оно приучает не смотреть на страницу состояния.
+#
+# Смотреть надо не на занятость, а на то, **успевает ли уборка**: пока остаётся
+# запас свободного, всё идёт как задумано.
+SELF_MANAGED_DISK_MARKERS = ("frigate",)
+# Часовая запись четырёх камер — около 7 ГБ. Ниже этого уборка уже не успевает
+# за записью, и вот тогда стоит сказать человеку.
+WARN_SELF_MANAGED_FREE_GB = 5.0
+FAIL_SELF_MANAGED_FREE_GB = 2.0
 
 
 @dataclass(frozen=True)
@@ -317,16 +335,41 @@ def hardware_checks(metrics: Any, gpu_name: str | None) -> HealthGroup:
         ),
     ]
     for disk in metrics.disks:
-        checks.append(
-            Check(
-                f"disk_{disk.path}",
-                f"Диск {disk.path}",
-                f"занято до {WARN_DISK_USED_PERCENT}%",
-                f"{disk.used_percent}% занято, свободно {disk.free_gb} ГБ",
-                _threshold(disk.used_percent, WARN_DISK_USED_PERCENT, FAIL_DISK_USED_PERCENT),
-            )
-        )
+        checks.append(_disk_check(disk))
     return HealthGroup("Железо узла", checks)
+
+
+def _is_self_managed(path: str) -> bool:
+    lowered = path.lower()
+    return any(marker in lowered for marker in SELF_MANAGED_DISK_MARKERS)
+
+
+def _disk_check(disk: Any) -> Check:
+    """Строка про один том. Том с собственной уборкой меряется своей меркой."""
+    if not _is_self_managed(disk.path):
+        return Check(
+            f"disk_{disk.path}",
+            f"Диск {disk.path}",
+            f"занято до {WARN_DISK_USED_PERCENT}%",
+            f"{disk.used_percent}% занято, свободно {disk.free_gb} ГБ",
+            _threshold(disk.used_percent, WARN_DISK_USED_PERCENT, FAIL_DISK_USED_PERCENT),
+        )
+    # Свободного тем меньше, чем лучше работает уборка, поэтому пороги
+    # перевёрнуты: тревога внизу, а не наверху.
+    status: Status = "ok"
+    if disk.free_gb <= FAIL_SELF_MANAGED_FREE_GB:
+        status = "fail"
+    elif disk.free_gb <= WARN_SELF_MANAGED_FREE_GB:
+        status = "warn"
+    return Check(
+        f"disk_{disk.path}",
+        f"Диск {disk.path}",
+        f"полон — так и задумано, свободно от {WARN_SELF_MANAGED_FREE_GB} ГБ",
+        f"{disk.used_percent}% занято, свободно {disk.free_gb} ГБ",
+        status,
+        "Frigate держит диск полным и стирает самое старое. "
+        "Тревога здесь означает, что уборка не успевает за записью.",
+    )
 
 
 def gpu_occupancy_percent(
