@@ -1564,3 +1564,114 @@ def test_ongoing_events_are_fetched_without_an_age_filter(
 
     assert "in_progress=1" in seen[0]
     assert "after=" not in seen[0]
+
+
+def test_failed_attempts_throttle_through_the_journal(runtime_path: Path) -> None:
+    """Находка адверсарного ревью: троттлинг повторов работал ровно один раз.
+
+    Время неудачной попытки не доезжало до базы, каждый следующий опрос видел
+    «пауза выдержана» — и плата долбилась раз в секунду, а Телеграм получал
+    сообщение на каждый опрос. Здесь цикл прокручивается честно: execute →
+    record_passes → PriorPass из базы → следующий опрос.
+    """
+    from src.gate.access import ERROR_RETRY_SECONDS
+
+    factory = _session(runtime_path)
+    config = _config(mode="on")
+    opener = _FakeOpener(PulseResult(False, "Плата не ответила", 500))
+    attempts = 0
+
+    for tick in range(int(ERROR_RETRY_SECONDS * 3)):
+        now = NOON + tick
+        records, _ = _passes(
+            [_event(sub_label="Алексей", name_score=0.96)],
+            config=config,
+            now=datetime.fromtimestamp(now, UTC),
+        )
+        with factory() as session:
+            already = {
+                row.frigate_event_id: PriorPass(
+                    row.decision, row.pulses or 0, row.last_pulse_at, row.pulse_gate_state
+                )
+                for row in session.query(GatePass)
+            }
+            before = len(opener.calls)
+            executed, _ = execute_openings(
+                records, config=config, opener=opener, already=already, now=now
+            )
+            attempts += len(opener.calls) - before
+            record_passes(session, executed)
+            session.commit()
+
+    # 30 секунд у неотвечающей платы: первая попытка и по одной на каждые
+    # ERROR_RETRY_SECONDS — а не тридцать.
+    assert attempts == 1 + int(30 / ERROR_RETRY_SECONDS - 1)
+
+
+def test_a_failed_second_chance_does_not_demote_opened(runtime_path: Path) -> None:
+    """Неудачный второй шанс не разжалует «opened» и не открывает обход лимитов.
+
+    Находка ревью: запись «error» поверх успешного открытия и врала журналу, и
+    пускала следующий импульс через секунду мимо gap_seconds и max_pulses.
+    """
+    factory = _session(runtime_path)
+    config = _chance()
+    opener = _FakeOpener(PulseResult(False, "Плата не ответила", 500))
+    records, _ = _passes(
+        [_event(sub_label="Алексей", name_score=0.96)],
+        config=config,
+        now=datetime.fromtimestamp(NOON + 20, UTC),
+    )
+    prior = _prior(last_pulse_at=NOON)
+
+    executed, _ = execute_openings(
+        records,
+        config=config,
+        opener=opener,
+        already={records[0].frigate_event_id: prior},
+        gate_closed_at=NOON + 5,
+        now=NOON + 20,
+    )
+    with factory() as session:
+        record_passes(
+            session,
+            [
+                replace(
+                    executed[0],
+                    person_name="Алексей",
+                )
+            ],
+        )
+        session.commit()
+    with factory() as session:
+        row = session.query(GatePass).one()
+
+    assert executed[0].decision == "opened"  # исход не разжалован
+    assert row.decision == "opened"
+    # Время попытки записано: следующая ждёт нового закрытия створки.
+    assert row.last_pulse_at == pytest.approx(NOON + 20)
+
+
+def test_one_poll_batch_gets_one_pulse(runtime_path: Path) -> None:
+    """Два события в одной пачке — один импульс, второму пауза.
+
+    Находка ревью: пауза внутри опроса исчезла вместе с переездом отметки на
+    импульс, и реле щёлкало дважды подряд.
+    """
+    config = _config(mode="on", cooldown_seconds=10)
+    opener = _FakeOpener(PulseResult(True, "ок", 500))
+    records, _ = _passes(
+        [
+            _event(id="a", sub_label="Алексей", name_score=0.96),
+            _event(id="b", started_at=NOON + 1, sub_label="Алексей", name_score=0.97),
+        ],
+        config=config,
+        now=datetime.fromtimestamp(NOON + 2, UTC),
+    )
+
+    executed, _ = execute_openings(
+        records, config=config, opener=opener, already={}, now=NOON + 2
+    )
+
+    assert [record.decision for record in executed] == ["opened", "denied_cooldown"]
+    assert len(opener.calls) == 1
