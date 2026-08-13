@@ -2163,12 +2163,45 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         return {"run_id": run_id, "pid": process.pid, "state": "starting"}
 
+    def _ready_export() -> dict[str, object] | None:
+        """Самый свежий **собранный** набор, чей архив ещё лежит на диске.
+
+        Считается по всем прогонам, а не по последнему. Последний прогон
+        отвечает на вопрос «что происходит сейчас», и это разные вопросы:
+        13 августа рядом с законченной сборкой шла вторая, и по последнему
+        прогону выходило, что готового набора нет вовсе.
+        """
+        runs_root = settings.data_dir / "training" / "exports"
+        best: dict[str, object] | None = None
+        for path in sorted(runs_root.glob("*/status.json")):
+            payload = _read_status(path)
+            if payload is None or payload.get("state") != "completed":
+                continue
+            archive = payload.get("archive")
+            if not isinstance(archive, str) or not Path(archive).is_file():
+                # Архивы подчищаются: остаются три последних. Отчёт о
+                # собранном наборе переживает сам набор.
+                continue
+            best = payload
+        return best
+
     @app.get("/api/training/macbook/export/status")
     def macbook_export_status() -> dict[str, object]:
         latest = _latest_status(settings.data_dir / "training" / "exports")
-        if latest is None:
-            return {"state": "idle", "message": "Набор ещё не собирался"}
-        return latest
+        ready = _ready_export()
+        answer: dict[str, object] = (
+            dict(latest) if latest is not None
+            else {"state": "idle", "message": "Набор ещё не собирался"}
+        )
+        # Готовый набор — отдельное поле, а не подмена состояния: «идёт сборка»
+        # и «набор уже есть» бывают правдой одновременно.
+        if ready is not None:
+            answer["ready"] = {
+                "archive": Path(str(ready.get("archive"))).name,
+                "finished_at": ready.get("updated_at"),
+                "size_mb": ready.get("size_mb"),
+            }
+        return answer
 
     @app.get("/api/training/macbook/export")
     def export_for_macbook() -> FileResponse:
@@ -2177,15 +2210,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         Пока набор не собран, честнее ответить отказом с внятной причиной, чем
         начать часовую работу в ответ на запрос файла.
         """
-        latest = _latest_status(settings.data_dir / "training" / "exports") or {}
-        if latest.get("state") in ACTIVE_TRAINING_STATES:
-            raise HTTPException(409, "Набор ещё собирается — дождитесь окончания")
-        raw_archive = latest.get("archive")
-        if not isinstance(raw_archive, str):
+        ready = _ready_export()
+        if ready is None:
+            latest = _latest_status(settings.data_dir / "training" / "exports") or {}
+            if latest.get("state") in ACTIVE_TRAINING_STATES:
+                raise HTTPException(409, "Набор ещё собирается — дождитесь окончания")
             raise HTTPException(404, "Набор не собран: сначала запустите сборку")
-        archive = Path(raw_archive)
-        if not archive.is_file():
-            raise HTTPException(404, "Архив набора не найден — соберите заново")
+        # Идущая сборка отдать готовый набор не мешает: она делает следующий, а
+        # этот уже лежит целиком.
+        archive = Path(str(ready.get("archive")))
         return FileResponse(
             archive,
             media_type="application/zip",
