@@ -1358,3 +1358,46 @@ def test_a_row_with_a_pulse_behind_it_keeps_its_reason(runtime_path: Path) -> No
 
     assert row.decision == "opened"
     assert "открыто по лицу" in (row.reason or "")
+
+
+def test_a_reread_does_not_replace_the_pulse_report_with_a_guess(
+    runtime_path: Path,
+) -> None:
+    """Регрессия фикса #218, поймана 13 августа в 20:12 — через три часа.
+
+    Пересчёт перечитанного события несёт carried-«opened» с пересчитанной
+    dry-причиной «открыл бы», и ветка обновления причин затирала ею отчёт
+    «Импульс 500 мс на канал 1». Причина терминальной строки меняется только
+    вместе с новым импульсом.
+    """
+    factory = _session(runtime_path)
+    opened = _record(
+        decision="opened",
+        person_name="Леша",
+        reason="Леша: открыто по лицу. Импульс 500 мс на канал 1",
+        pulse_ms=500,
+        modbus_ok=True,
+        pulses=1,
+        last_pulse_at=1000.0,
+    )
+
+    with factory() as session:
+        record_passes(session, [opened])
+        session.commit()
+    with factory() as session:
+        record_passes(
+            session,
+            [
+                replace(
+                    opened,
+                    reason="Леша — открыл бы",
+                    pulse_ms=None,
+                    modbus_ok=None,
+                )
+            ],
+        )
+        session.commit()
+    with factory() as session:
+        row = session.query(GatePass).one()
+
+    assert "Импульс 500 мс" in (row.reason or "")
