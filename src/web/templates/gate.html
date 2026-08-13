@@ -26,8 +26,10 @@
       </span>
     </div>
     <div class="readout">
-      <span class="readout-key">механика</span>
-      <span class="readout-value">не управляется</span>
+      <span class="readout-key">открытие по лицу</span>
+      <span class="readout-value">
+        {{ {"off": "выключено", "dry": "наблюдение", "on": "включено"}[gate_access.mode] }}
+      </span>
     </div>
   </div>
   <div class="statusbar-switch">
