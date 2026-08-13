@@ -22,6 +22,24 @@ import numpy as np
 # записан в критериях приёмки: цена ошибки здесь не меняется от того, кто
 # считает — макбук или узел.
 TARGET_FALSE_ACCEPT_RATE = 0.01
+# Сколько чужих кропов нужно, чтобы доле в один процент вообще можно было
+# верить. Меньше сотни — и один процент округляется вниз до нуля: порог тогда
+# ставится выше **самого похожего** чужого кропа, то есть его назначает
+# один-единственный кадр.
+#
+# 13 августа так и вышло. Пространство развело котов прекрасно: свои сидели на
+# 0.85 от своего эталона, чужие — около нуля. Но у Ксюши нашёлся кроп с
+# похожестью 0.939 на Черныша, и порог уехал на 0.897 — выше, чем живут
+# собственные коты модели. До него дотягивали 57% кропов Черныша, и приёмка
+# честно её отвергла.
+MIN_STRANGERS_FOR_QUANTILE = 100
+# Куда опускать порог, когда чужих слишком мало для честной оценки: до уровня,
+# на котором остаются девять своих кропов из десяти.
+GENTLE_PERCENTILE = 10.0
+# ...но только если чужих при этом проходит не больше. Послабление не должно
+# превращаться в открытую дверь: пустить чужого кота в дом дороже, чем не
+# узнать своего, и в спорном случае выбор всегда в пользу закрытой дверцы.
+MAX_FALSE_ACCEPT_RATE = 0.02
 # Порог, когда чужих в наборе нет вовсе. Назначать его не из чего, и честнее
 # взять осторожное число, чем выдать удобное.
 FALLBACK_THRESHOLD = 0.55
@@ -91,14 +109,42 @@ def choose_threshold(
     if not len(other):
         threshold = FALLBACK_THRESHOLD
     else:
-        ranked = sorted(other, reverse=True)
-        allowed = int(len(ranked) * TARGET_FALSE_ACCEPT_RATE)
-        threshold = round(min(ranked[allowed] + 0.01, 0.95), 3)
+        threshold = _best_threshold(
+            np.asarray(same, dtype=np.float64), np.asarray(other, dtype=np.float64)
+        )
     stats["threshold"] = threshold
     stats["same_above_threshold"] = (
         float(np.mean([score >= threshold for score in same])) if len(same) else 0.0
     )
+    stats["other_above_threshold"] = (
+        float(np.mean([score >= threshold for score in other])) if len(other) else 0.0
+    )
     return threshold, stats
+
+
+def _best_threshold(same: np.ndarray, other: np.ndarray) -> float:
+    """Граница между своими и чужими по отложенному набору.
+
+    Основное правило прежнее и безопасное: порог ставится там, где чужих
+    проходит не больше дозволенной доли. Ослаблять его нельзя — пустить чужого
+    кота в дом дороже, чем не узнать своего.
+
+    Добавилась поправка на **маленькую выборку чужих**. Оценить долю в один
+    процент по нескольким десяткам кропов невозможно: цифра держится на одном
+    кадре, а один кадр — это чаще всего ошибка разметки или неудачный ракурс.
+    В таком случае порог не поднимается выше уровня, на котором остаются девять
+    своих кропов из десяти, — и то лишь если чужих при этом проходит не больше
+    `MAX_FALSE_ACCEPT_RATE`. Иначе остаётся строгий порог: модель, не умеющая
+    отличить чужого, должна отказывать, а не пускать.
+    """
+    ranked = np.sort(other)[::-1]
+    allowed = int(len(ranked) * TARGET_FALSE_ACCEPT_RATE)
+    strict = float(ranked[allowed]) + 0.01
+    if len(same) and len(ranked) < MIN_STRANGERS_FOR_QUANTILE:
+        gentle = float(np.percentile(same, GENTLE_PERCENTILE))
+        if gentle < strict and float(np.mean(other >= gentle)) <= MAX_FALSE_ACCEPT_RATE:
+            strict = gentle
+    return round(min(max(strict, 0.0), 0.95), 3)
 
 
 def match(
