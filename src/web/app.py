@@ -918,6 +918,124 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return _read_status(statuses[-1])
         return payload
 
+    def _quality_cell(value: object) -> dict[str, float] | None:
+        """Привести отчёт к паре «узнано своих / пущено чужих».
+
+        Формы две: пересчёт эталонов пишет доли `recognised`/`false_accepts`,
+        приёмка — `false_reject_rate`/`false_accept_rate`. Смысл один, и в
+        таблице он обязан выглядеть одинаково.
+        """
+        if not isinstance(value, dict):
+            return None
+        if "recognised" in value:
+            return {
+                "recognised": round(float(value["recognised"]) * 100, 1),
+                "false_accepts": round(float(value.get("false_accepts", 0.0)) * 100, 1),
+            }
+        if "false_reject_rate" in value:
+            return {
+                "recognised": round((1 - float(value["false_reject_rate"])) * 100, 1),
+                "false_accepts": round(float(value.get("false_accept_rate", 0.0)) * 100, 1),
+            }
+        return None
+
+    def _installed_identity_models() -> list[dict[str, object]]:
+        """Что стоит на узле: вид, вход, порог, коты, дата файла.
+
+        Читается из метаданных рядом с моделью — того же файла, который правит
+        пересчёт эталонов. Отдельного реестра нет намеренно: второй список
+        разошёлся бы с первым молча.
+        """
+        rows: list[dict[str, object]] = []
+        for role, path in (
+            ("face", settings.identity_face_model_path),
+            ("side", settings.identity_side_model_path),
+        ):
+            if path is None or not path.is_file():
+                rows.append({"role": role, "present": False})
+                continue
+            try:
+                payload = json.loads(
+                    path.with_suffix(".json").read_text(encoding="utf-8")
+                )
+            except (OSError, ValueError):
+                rows.append({"role": role, "present": False})
+                continue
+            rows.append(
+                {
+                    "role": role,
+                    "present": True,
+                    "kind": payload.get("kind", "logits"),
+                    "image_size": payload.get("image_size"),
+                    "threshold": payload.get("threshold"),
+                    "labels": payload.get("labels", []),
+                    "installed_at": datetime.fromtimestamp(
+                        path.stat().st_mtime, tz=UTC
+                    ),
+                }
+            )
+        return rows
+
+    def _training_history(limit: int = 8) -> list[dict[str, object]]:
+        """Прошлые прогоны — пересчёты эталонов и обучения на узле, вперемешку
+        по времени. Это и есть динамика: по строкам видно, двигается ли
+        качество, а не кажется ли, что двигается.
+        """
+        rows: list[dict[str, object]] = []
+        for status_path in (settings.data_dir / "training" / "prototypes").glob(
+            "*/status.json"
+        ):
+            payload = _read_status(status_path) or {}
+            report = payload.get("report")
+            if payload.get("state") != "completed" or not isinstance(report, dict):
+                continue
+            views = {}
+            raw_views = report.get("views")
+            if isinstance(raw_views, dict):
+                for role, view in raw_views.items():
+                    if isinstance(view, dict) and isinstance(view.get("before"), dict):
+                        views[role] = {
+                            "new": _quality_cell(view.get("after")),
+                            "installed": _quality_cell(view.get("before")),
+                            "better": bool(view.get("applied")),
+                        }
+            rows.append(
+                {
+                    "kind": "prototypes",
+                    "title": "Пересчёт эталонов",
+                    "run": status_path.parent.name,
+                    "at": payload.get("updated_at"),
+                    "views": views,
+                }
+            )
+        for status_path in (settings.data_dir / "training" / "local").glob(
+            "*/status.json"
+        ):
+            payload = _read_status(status_path) or {}
+            raw = payload.get("views")
+            if payload.get("state") != "completed" or not isinstance(raw, dict):
+                continue
+            views = {
+                role: {
+                    "new": _quality_cell(view.get("new")),
+                    "installed": _quality_cell(view.get("installed")),
+                    "better": bool(view.get("better")),
+                }
+                for role, view in raw.items()
+                if isinstance(view, dict)
+            }
+            rows.append(
+                {
+                    "kind": "training",
+                    "title": "Обучение на узле",
+                    "run": status_path.parent.name,
+                    "at": payload.get("updated_at"),
+                    "views": views,
+                }
+            )
+        rows.sort(key=lambda row: str(row.get("at") or ""), reverse=True)
+        return rows[:limit]
+
     def current_cat_door() -> CatDoorConfig:
         return load_cat_door_config(cat_door_config_path(settings.data_dir), CatDoorConfig())
 
@@ -1221,6 +1339,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "known_cat_names": known_cat_names,
                 "local_status": local_status,
                 "local_training_epochs": settings.local_training_epochs,
+                "installed_models": _installed_identity_models(),
+                "training_history": _training_history(),
                 "recorder_status": recorder_status,
                 "automatic_capture_enabled": recorder_enabled,
                 "automatic_capture_dry_run": recorder_dry_run,
@@ -2257,6 +2377,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "--epochs",
             str(settings.local_training_epochs),
         ]
+        # Автономное переобучение учит тех котов, которых узел уже знает, и
+        # сдаёт стоящую модель тому же экзамену, что и новую, — для честного
+        # сравнения в отчёте.
+        for role, path in (
+            ("face", settings.identity_face_model_path),
+            ("side", settings.identity_side_model_path),
+        ):
+            if path is not None and path.is_file():
+                command.extend([f"--{role}-model", str(path.resolve())])
         if settings.identity_pretrained_weights_path is not None:
             command.extend(
                 [
@@ -2275,17 +2404,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except OSError as exc:
             write_status(status_path, state="failed", message="Не удалось запустить Python")
             raise HTTPException(500, "Не удалось запустить процесс обучения") from exc
+        write_status(
+            status_path,
+            state="starting",
+            message="Запуск отдельного процесса",
+            pid=process.pid,
+        )
         return {"run_id": run_id, "pid": process.pid, "state": "starting"}
 
     @app.get("/api/training/local/status")
     def local_training_status() -> dict[str, object]:
-        statuses = sorted((settings.data_dir / "training" / "local").glob("*/status.json"))
-        if not statuses:
-            return {"state": "idle", "message": "Локальное обучение ещё не запускалось"}
-        try:
-            return json.loads(statuses[-1].read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise HTTPException(500, "Не удалось прочитать статус обучения") from exc
+        latest = _latest_status(settings.data_dir / "training" / "local")
+        if latest is None:
+            return {"state": "idle", "message": "Обучение на узле ещё не запускалось"}
+        return latest
 
     @app.post("/api/identity/prototypes/rebuild", status_code=202)
     def rebuild_prototypes(reuse: bool = False, include: str = "") -> dict[str, object]:

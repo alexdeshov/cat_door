@@ -221,7 +221,11 @@ class Settings(BaseSettings):
     gate_access_poll_seconds: float = Field(default=1.0, ge=0.5, le=60.0)
     # Сколько дней хранить строки журнала и снимки к ним. Ноль — не удалять.
     gate_access_retention_days: int = Field(default=30, ge=0, le=3650)
-    local_training_epochs: int = Field(default=2, ge=1, le=100)
+    # До 2026-08-13 здесь стояло 2: обучение на узле было проверкой конвейера.
+    # Теперь это полный цикл, и умолчание — рабочее число эпох макбучного
+    # обучения. На процессоре узла это часы, и это нормально: прогон идёт
+    # фоном и не трогает ни запись, ни детекцию.
+    local_training_epochs: int = Field(default=20, ge=1, le=100)
     web_host: str = "127.0.0.1"
     web_port: int = Field(default=8080, ge=1, le=65535)
     # Часовой пояс, в котором админка показывает время, а Frigate ведёт свой
