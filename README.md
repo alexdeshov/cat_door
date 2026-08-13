@@ -82,6 +82,7 @@ python -m scripts.identity_pipeline all --cats Черныш,Яся
 | Автоматический сбор проходов | `docs/automatic-capture.md` |
 | Обучение идентификации | `docs/identity-training.md` |
 | Метрики моделей | `docs/metrics.md` |
+| Замеры моделей и динамика | `docs/model-benchmarks.md` |
 | Контуры узла | `docs/two-circuits-plan.md` |
 | Брокер MQTT и состояние створки | `docs/mqtt-broker.md` |
 | Разборы поведения калитки | `docs/gate-direction-experiments.md` |
