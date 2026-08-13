@@ -3194,17 +3194,22 @@ def test_an_old_heartbeat_does_not_excuse_the_service(runtime_path: Path, monkey
     assert response.status_code == 504
 
 
-def test_settings_that_do_nothing_say_so(runtime_path: Path, monkeypatch) -> None:
+def test_the_door_panel_says_what_actually_opens_the_latch(
+    runtime_path: Path, monkeypatch
+) -> None:
     """Настройка, которая ничего не делает, врёт человеку.
 
-    Порог опознания и пауза у дверцы заведены под будущую автоматику, а ручная
-    кнопка открывает без них. Пока автоматики нет, панель обязана это сказать.
+    До 13 августа порог, пауза и задержка были заведены под будущую автоматику,
+    и панель честно говорила «пока не действуют». Теперь они работают, и панель
+    обязана сказать главное условие: открывается по коту **у камеры дверцы**.
     """
     client = make_client(runtime_path, monkeypatch)
 
     page = client.get("/")
 
-    assert "пока не действуют" in page.text
+    assert "пока не действуют" not in page.text
+    assert "на камере\n      дверцы" in page.text or "камере дверцы" in page.text
+    assert "открывает без оглядки на эти настройки" in page.text
 
 
 def test_the_open_delay_is_saved_and_shown(runtime_path: Path, monkeypatch) -> None:
