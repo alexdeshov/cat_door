@@ -1104,3 +1104,37 @@ details.folded > summary:focus-visible {
   margin-top: -1px;
   white-space: nowrap;
 }
+
+/* ── Дашборд на «Состоянии» ─────────────────────────────────────────── */
+.dash-modules {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+.dash-module {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-sunken);
+  text-decoration: none;
+  color: var(--text);
+  font-size: 13px;
+}
+a.dash-module:hover { border-color: var(--line-strong); }
+.dash-module-title { font-weight: 600; }
+.dash-module-state { font-size: 12px; }
+.dash-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: var(--gap);
+}
+.dash-stat h3 { margin: 0 0 6px; font-size: 14px; }
+.dash-numbers { margin: 0 0 6px; font-size: 14px; }
+.dash-numbers b { font-size: 19px; font-weight: 650; }
+.dash-ok { color: var(--ok); }
+.dash-warn { color: var(--signal); }
+.dash-stat p { margin: 0 0 4px; }

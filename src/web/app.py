@@ -1690,12 +1690,101 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def health_api() -> dict[str, object]:
         return current_health()
 
+    def _health_dashboard(session: Session) -> dict[str, object]:
+        """Сводка для дашборда «Состояния»: модули, проходы, отказы.
+
+        Всё за сегодняшние местные сутки: вопрос владельца к этой странице —
+        «как дела сейчас», а не «как дела вообще». Итоги за всё время живут на
+        своих страницах — в журнале калитки и в проходах.
+        """
+        day_start = (
+            datetime.now(display_timezone).replace(hour=0, minute=0, second=0, microsecond=0)
+        ).astimezone(UTC)
+
+        opened = func.count(GatePass.id).filter(GatePass.decision == "opened")
+        gate_row = session.execute(
+            select(func.count(GatePass.id), opened).where(
+                GatePass.created_at >= day_start, GatePass.label == "person"
+            )
+        ).one()
+        denial_rows = session.execute(
+            select(GatePass.decision, func.count(GatePass.id))
+            .where(
+                GatePass.created_at >= day_start,
+                GatePass.label == "person",
+                GatePass.decision.notin_(("opened", "dry_run", "logged")),
+            )
+            .group_by(GatePass.decision)
+            .order_by(func.count(GatePass.id).desc())
+        ).all()
+        gate_people = session.execute(
+            select(GatePass.person_name, func.count(GatePass.id))
+            .where(
+                GatePass.created_at >= day_start,
+                GatePass.decision == "opened",
+                GatePass.person_name.is_not(None),
+            )
+            .group_by(GatePass.person_name)
+            .order_by(func.count(GatePass.id).desc())
+        ).all()
+
+        events_row = session.execute(
+            select(
+                func.count(Event.id),
+                func.count(Event.id).filter(Event.status == "failed"),
+            ).where(Event.created_at >= day_start)
+        ).one()
+        # Опознания — глазами модели, а не разметки: свежие проходы владелец
+        # ещё не размечал, а вопрос дашборда — «кого узнала автоматика».
+        cat_rows = session.execute(
+            select(EventPrediction.predicted_name, func.count(func.distinct(Event.id)))
+            .join(Event, Event.id == EventPrediction.event_id)
+            .where(
+                Event.created_at >= day_start,
+                EventPrediction.origin == "online",
+            )
+            .group_by(EventPrediction.predicted_name)
+        ).all()
+        recognised = {name: count for name, count in cat_rows if name}
+        uncertain = sum(count for name, count in cat_rows if not name)
+
+        heartbeat = heartbeat_age(heartbeat_path(settings.data_dir))
+        return {
+            "gate": {
+                "total": gate_row[0],
+                "opened": gate_row[1],
+                "denied": sum(count for _, count in denial_rows),
+                "denials": [
+                    (GATE_PASS_DECISIONS.get(code, code), count)
+                    for code, count in denial_rows[:4]
+                ],
+                "people": gate_people[:5],
+                "service_alive": heartbeat is not None
+                and heartbeat <= HEARTBEAT_FRESH_SECONDS,
+            },
+            "cats": {
+                "events": events_row[0],
+                "failed": events_row[1],
+                "recognised": sorted(
+                    recognised.items(), key=lambda item: item[1], reverse=True
+                )[:5],
+                "uncertain": uncertain,
+            },
+        }
+
     @app.get("/health", response_class=HTMLResponse)
-    def health_page(request: Request) -> HTMLResponse:
+    def health_page(
+        request: Request,
+        session: Annotated[Session, Depends(get_session)],
+    ) -> HTMLResponse:
         return templates.TemplateResponse(
             request,
             "health.html",
-            {"circuit": "health", "health": current_health()},
+            {
+                "circuit": "health",
+                "health": current_health(),
+                "dashboard": _health_dashboard(session),
+            },
         )
 
     @app.get("/api/recorder/status")

@@ -3417,3 +3417,23 @@ def test_the_training_panel_shows_models_and_dynamics(runtime_path: Path, monkey
     assert "✓" in page.text
     # Сторож против сравнения строк между собой.
     assert "разные экзамены" in page.text
+
+
+def test_the_health_dashboard_counts_todays_work(runtime_path: Path, monkeypatch) -> None:
+    """Дашборд отвечает на «как дела сегодня»: проходы, открытия, отказы.
+
+    Отказы калитки считаются по кодам решений и показываются по-русски; коты —
+    глазами модели (онлайн-предсказания), потому что свежую разметку владелец
+    ещё не делал.
+    """
+    client = make_client(runtime_path, monkeypatch)
+    _gate_pass(runtime_path, frigate_event_id="a", decision="opened", person_name="Алиса")
+    _gate_pass(runtime_path, frigate_event_id="b", decision="denied_not_allowed")
+
+    page = client.get("/health")
+
+    assert "Калитка: люди" in page.text
+    assert "Дверца: коты" in page.text
+    assert "открывалась:" in page.text and "Алиса" in page.text
+    assert "не в списке ×1" in page.text
+    assert "Служба калитки" in page.text
