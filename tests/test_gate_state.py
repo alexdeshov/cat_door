@@ -11,8 +11,10 @@ def _watcher(now: list[float]) -> GateStateWatcher:
     return GateStateWatcher("127.0.0.1", clock=lambda: now[0])
 
 
-def _send(watcher: GateStateWatcher, text: str) -> None:
-    watcher._on_message(None, None, SimpleNamespace(payload=text.encode("utf-8")))
+def _send(watcher: GateStateWatcher, text: str, topic: str = "frigate/cam/classification/gate") -> None:
+    watcher._on_message(
+        None, None, SimpleNamespace(payload=text.encode("utf-8"), topic=topic)
+    )
 
 
 def test_nothing_is_known_before_the_gate_moves() -> None:
@@ -46,19 +48,42 @@ def test_an_unfamiliar_state_is_ignored_not_guessed() -> None:
     assert watcher.snapshot().value == OPEN
 
 
-def test_knowledge_goes_stale() -> None:
-    """«Закрыта пять минут назад» и «закрыта сейчас» — разные утверждения.
+def test_knowledge_survives_quiet_hours_while_the_chain_holds() -> None:
+    """Решение владельца 2026-08-14: доверие по цепочке, а не по секундомеру.
 
-    Створку могли открыть, пока подписка лежала.
+    Пятиминутный срок годности делал створку «неизвестной» большую часть суток
+    (ночь, затишья), и второй шанс молчал именно тогда, когда импульсы чаще
+    пропадают. Пока связь с брокером цела и Frigate жив, событий о створке не
+    было — классификатор публикует каждое её движение, и молчание означает
+    «не шевелилась», а не «неизвестно».
     """
     now = [100.0]
     watcher = _watcher(now)
     _send(watcher, "Закрыта")
 
-    now[0] = 100.0 + 299
+    now[0] = 100.0 + 8 * 3600  # восемь часов тишины
     assert watcher.snapshot().value == CLOSED
-    now[0] = 100.0 + 301
+
+
+def test_frigate_going_offline_breaks_the_trust_chain() -> None:
+    """Завещание Frigate — обрыв нити: движение створки за простой потеряно.
+
+    Забывается и отметка закрытия — она кормит окно возвращения и второй шанс.
+    """
+    now = [100.0]
+    watcher = _watcher(now)
+    _send(watcher, "Закрыта")
+
+    _send(watcher, "offline", topic="frigate/available")
+
+    state = watcher.snapshot()
+    assert state.value == UNKNOWN
+    assert state.closed_at is None
+    # «online» сам по себе доверия не возвращает: нужно свежее срабатывание.
+    _send(watcher, "online", topic="frigate/available")
     assert watcher.snapshot().value == UNKNOWN
+    _send(watcher, "Открыта")
+    assert watcher.snapshot().value == "open"
 
 
 def test_losing_the_broker_means_losing_the_knowledge() -> None:

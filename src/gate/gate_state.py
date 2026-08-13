@@ -5,17 +5,21 @@
 отказались: тот сказал бы то же самое, но проводом.
 
 **Состояние не запоминается брокером.** Проверено 2026-08-12: свежая подписка не
-получает ничего, пока створка не шевельнётся. Отсюда два следствия, и оба важнее,
-чем кажется.
+получает ничего, пока створка не шевельнётся. Поэтому после запуска службы
+состояние неизвестно — и это надо говорить прямо, а не подставлять «закрыта»:
+«не знаю» и «закрыта» ведут к разным решениям.
 
-Во-первых, после запуска службы состояние неизвестно — и это надо говорить
-прямо, а не подставлять «закрыта». «Не знаю» и «закрыта» ведут к разным
-решениям: на первом нельзя основывать вывод «калитка не открылась, значит замок
-заклинил».
-
-Во-вторых, известное состояние стареет. Створку могли открыть, пока подписка
-лежала, и тогда наше «закрыта» — воспоминание, а не факт. Поэтому у состояния
-есть срок годности.
+**Известному состоянию доверяем по цепочке, а не по секундомеру.** До
+2026-08-14 состояние протухало за пять минут — и большую часть суток (ночь,
+затишья) створка была «неизвестна», а второй шанс молчал. Решение владельца:
+последнее состояние верно, пока непрерывна цепочка доставки — узел не
+перезагружался (память процесса пуста после рестарта сама по себе), связь с
+брокером не рвалась (disconnect сбрасывает), и Frigate не перезапускался (его
+завещание `frigate/available: offline` — retained, ловится подпиской). Порвалась
+любая нить — «не знаю» до первого свежего срабатывания классификатора. Событие
+о створке, случившееся в дыру доставки, потеряно навсегда, и никакой срок
+годности этого не чинил; целая же цепочка гарантирует, что событий не было —
+классификатор публикует каждое движение створки.
 
 По HTTP этого нет вовсе: `/api/classification/<модель>` отвечает 405, маршрут
 существует только для управления обучением.
@@ -38,10 +42,9 @@ UNKNOWN = "unknown"
 # Что публикует классификатор. Названия задал владелец при обучении, и они
 # по-русски — сверяем без учёта регистра и лишних пробелов.
 _LABELS = {"открыта": OPEN, "закрыта": CLOSED}
-# Сколько живёт последнее известное состояние. Створка меняется редко, но
-# «закрыта пять минут назад» и «закрыта сейчас» — разные утверждения, и
-# основывать на первом вывод о заклинившем замке нельзя.
-FRESH_FOR_SECONDS = 300.0
+# Завещание Frigate: retained-флаг его живости. `offline` означает дыру в
+# доставке — движение створки за время простоя потеряно навсегда.
+AVAILABILITY_TOPIC = "frigate/available"
 
 
 @dataclass(frozen=True)
@@ -85,12 +88,14 @@ class GateStateWatcher:
         port: int = 1883,
         *,
         topic: str = "frigate/+/classification/+",
+        availability_topic: str = AVAILABILITY_TOPIC,
         clock: Callable[[], float] = time.time,
         client_id: str = "catdoor-gate-access",
     ) -> None:
         self.host = host
         self.port = port
         self.topic = topic
+        self.availability_topic = availability_topic
         self._clock = clock
         self._client_id = client_id
         self._lock = threading.Lock()
@@ -129,6 +134,7 @@ class GateStateWatcher:
 
     def _on_connect(self, client: object, *_: object) -> None:
         client.subscribe(self.topic)  # type: ignore[attr-defined]
+        client.subscribe(self.availability_topic)  # type: ignore[attr-defined]
         logger.info("Слушаю состояние створки: %s", self.topic)
 
     def _on_disconnect(self, *_: object) -> None:
@@ -141,6 +147,15 @@ class GateStateWatcher:
     def _on_message(self, _client: object, _userdata: object, message: object) -> None:
         payload = getattr(message, "payload", b"")
         text = payload.decode("utf-8", "replace").strip().lower()
+        if getattr(message, "topic", "") == self.availability_topic:
+            if text == "offline":
+                # Frigate умер — движение створки за его простой потеряно.
+                # Забываем всё, включая отметку закрытия: она кормит окно
+                # возвращения и второй шанс, и врать им нельзя.
+                with self._lock:
+                    self._state = GateState(UNKNOWN)
+                logger.warning("Frigate offline: состояние створки неизвестно")
+            return
         value = _LABELS.get(text)
         if value is None:
             logger.warning("Классификатор прислал незнакомое состояние: %r", text[:40])
@@ -152,11 +167,15 @@ class GateStateWatcher:
         logger.info("Створка: %s", text)
 
     def snapshot(self) -> GateState:
-        """Текущее знание о створке. Устаревшее превращается в «не знаю»."""
+        """Текущее знание о створке.
+
+        Секундомера здесь больше нет: состояние верно, пока целы все нити
+        доставки, а за их обрывами следят обработчики — disconnect брокера,
+        завещание Frigate, пустая память после собственного рестарта. Возраст
+        состояния остаётся в `at` для журнала, но решением не управляет.
+        """
         with self._lock:
             state = self._state
         if not state.known or state.at is None:
             return GateState(UNKNOWN)
-        if self._clock() - state.at > FRESH_FOR_SECONDS:
-            return GateState(UNKNOWN, closed_at=state.closed_at)
         return state
