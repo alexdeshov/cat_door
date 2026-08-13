@@ -1018,6 +1018,12 @@ body:not(.previews-on) .preview-queued { display: none; }
   overflow-y: auto;
   scrollbar-width: thin;
 }
+/* Флекс-колонка с потолком высоты по умолчанию СЖИМАЕТ детей, а не даёт им
+ * переполниться: scrollHeight равнялся clientHeight, прокручивать было
+ * «нечего», а содержимое панелей резалось об их сжатые края. Замерено в
+ * браузере на живом узле. Детям рейки сжиматься запрещено — пусть честно
+ * переполняют колонку, тогда прокрутке есть что прокручивать. */
+.work-rail > * { flex-shrink: 0; }
 .work-rail .panel { margin: 0; }
 .work-rail .camera-pair { grid-template-columns: 1fr; }
 @media (max-width: 960px) {
