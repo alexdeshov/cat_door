@@ -1011,6 +1011,12 @@ body:not(.previews-on) .preview-queued { display: none; }
   flex-direction: column;
   gap: var(--gap);
   min-width: 0;
+  /* Липкий столбец длиннее экрана недостижим ниже сгиба: страница скроллится,
+     а он стоит, и его низ не увидеть никогда. Поэтому рейка скроллится сама.
+     Тонкая полоса прокрутки — честное «здесь есть ещё». */
+  max-height: calc(100vh - 24px);
+  overflow-y: auto;
+  scrollbar-width: thin;
 }
 .work-rail .panel { margin: 0; }
 .work-rail .camera-pair { grid-template-columns: 1fr; }
