@@ -37,340 +37,11 @@
   </div>
 </section>
 
-<section class="panel">
-  <div class="panel-head">
-    <h2>Камеры калитки</h2>
-    <a class="button" href="/cameras" style="margin-left: auto">Настроить камеры</a>
-  </div>
-  <div class="panel-body">
-    {% if gate_cameras %}
-      <div class="passes">
-        {% for camera in gate_cameras %}
-          <article class="pass" data-camera-id="{{ camera.id }}">
-            <div class="pass-media">
-              {% if camera.configured and camera.enabled %}
-                <img class="viewport" data-live-stream
-                  alt="Живое изображение камеры {{ camera.display_title }}"
-                  data-stream-src="/stream/camera/{{ camera.id }}.mjpeg?v={{ stream_version }}">
-              {% else %}
-                <div class="viewport viewport-empty">
-                  {{ "Адрес не задан" if not camera.configured else "Камера выключена" }}
-                </div>
-              {% endif %}
-            </div>
-            <div class="pass-body">
-              <div class="pass-head">
-                <strong>{{ camera.display_title }}</strong>
-                <span class="faint data">{{ camera.id }}</span>
-                {% if not camera.detect_stream_path %}
-                  <span class="signal">без субпотока</span>
-                {% endif %}
-              </div>
-              <p class="muted" style="font-size: 13px">
-                {{ camera.note or "Пишется клипами вокруг детекций: люди и машины." }}
-              </p>
-            </div>
-          </article>
-        {% endfor %}
-      </div>
-    {% else %}
-      <p class="muted">
-        В контуре калитки нет ни одной камеры. Камеры заводятся и переводятся
-        между контурами на <a href="/cameras">вкладке «Камеры»</a>.
-      </p>
-    {% endif %}
-  </div>
-</section>
-
-{# Автооткрытие по лицу. Режимов два: `off` — ни одной команды на плату, `dry` —
-   решение принимается и пишется в журнал, реле не трогается. Значения `on` в
-   системе нет: управление замком требует письменного разрешения владельца, и
-   кода исполнения ещё не существует. #}
-<section class="panel" id="access">
-  <div class="panel-head">
-    <h2>Открытие по лицу</h2>
-    <span class="muted">механика не подключена</span>
-  </div>
-  <div class="panel-body">
-    <div class="segmented" role="group" aria-label="Режим автооткрытия">
-      <button type="button" class="mode-choice" data-mode="off"
-        aria-pressed="{{ 'true' if gate_access.mode == 'off' else 'false' }}">
-        выключено
-      </button>
-      <button type="button" class="mode-choice" data-mode="dry"
-        aria-pressed="{{ 'true' if gate_access.mode == 'dry' else 'false' }}">
-        решать и записывать
-      </button>
-      <button type="button" class="mode-choice" data-mode="on"
-        aria-pressed="{{ 'true' if gate_access.mode == 'on' else 'false' }}">
-        открывать
-      </button>
-    </div>
-    <p class="muted" style="font-size: 13px">
-      «Решать и записывать» — это тот же приём, которым проверялась кошачья
-      дверца: система пишет в журнал «открыл бы», но реле не трогает. Он даёт
-      настоящую статистику ложных распознаваний на реальных людях у реальной
-      калитки, и выходить из него стоит не по календарю, а по четырём условиям
-      из <code>docs/gate-access-plan.md</code>: ни одного «открыл бы» на чужих,
-      все свои приходы в журнале, измеренная задержка и понятный объём выборки.
-    </p>
-    <p class="muted" style="font-size: 13px">
-      В режиме «открывать» лицо открывает калитку само. Помните, чем оно не
-      является: распознавание обманывается фотографией на экране телефона, и
-      порог с белым списком этого не меняют. Если сомневаетесь — вернитесь в
-      «решать и записывать», журнал продолжит копиться.
-    </p>
-
-    {# Ручное открытие. Разрешено владельцем письменно (`AGENTS.md`), в отличие
-       от автооткрытия, которое остаётся в `dry`. Импульс уходит не отсюда:
-       веб кладёт просьбу файлом, исполняет служба. #}
-    <div class="controls">
-      <button id="open-gate" type="button" {{ "disabled" if not gate_access.gates }}>
-        Открыть калитку
-      </button>
-      <span id="open-gate-status" class="muted data" style="font-size: 12px">
-        {{ "" if gate_access.gates else "сначала задайте канал реле" }}
-      </span>
-    </div>
-    <p class="muted" style="font-size: 13px">
-      Кнопка замыкает вход «кнопка выхода» контроллера на калитке — то же самое,
-      что нажать её во дворе. Замком по-прежнему распоряжается сам контроллер.
-      Каждое нажатие попадает в журнал ниже и в Телеграм. Работает независимо от
-      режима автооткрытия: режимы относятся к автоматике, а не к человеку.
-    </p>
-
-    <div class="controls">
-      <label for="access-relay">канал реле</label>
-      <input id="access-relay" type="number" min="1" max="8"
-        value="{{ gate_access.gates[0].relay if gate_access.gates else 1 }}">
-      <label for="access-pulse">импульс, мс</label>
-      <input id="access-pulse" type="number" min="100" max="5000" step="100"
-        value="{{ gate_access.pulse_ms }}">
-    </div>
-    <p class="muted" style="font-size: 13px">
-      Канал — тот, к которому подключена кнопка выхода. Импульс задаётся одной
-      командой, которая сама размыкает контакт: смерть процесса не оставит
-      калитку разомкнутой.
-    </p>
-
-    <div class="controls">
-      <label for="access-camera">камера калитки</label>
-      <select id="access-camera">
-        <option value="">не выбрана</option>
-        {# Значение — имя камеры во Frigate, а не идентификатор инвентаря:
-           события приходят с ним, и `test-cam` против `test_cam` дал бы
-           «камера не назначена калиткой» на каждый проход. #}
-        {% for camera in gate_cameras %}
-          <option value="{{ camera.frigate_name }}"
-            {{ 'selected' if gate_access.gates
-               and gate_access.gates[0].camera == camera.frigate_name }}>
-            {{ camera.display_title }}
-          </option>
-        {% endfor %}
-      </select>
-      <label for="access-zone">зона</label>
-      <input id="access-zone" type="text" placeholder="вся картинка"
-        value="{{ gate_access.gates[0].zone if gate_access.gates else '' }}">
-    </div>
-    <p class="muted" style="font-size: 13px">
-      Зона нужна, чтобы узнанное лицо на террасе не открывало калитку с другой
-      стороны участка. Пусто — вся картинка камеры.
-    </p>
-
-    <div class="controls">
-      <label for="access-min-score">порог узнавания</label>
-      <input id="access-min-score" type="number" min="0" max="1" step="0.01"
-        value="{{ gate_access.min_score }}">
-      <label for="access-cooldown">пауза, с</label>
-      <input id="access-cooldown" type="number" min="0" max="3600"
-        value="{{ gate_access.cooldown_seconds }}">
-      <label for="access-from">с</label>
-      <input id="access-from" type="time" value="{{ gate_access.open_from }}">
-      <label for="access-to">до</label>
-      <input id="access-to" type="time" value="{{ gate_access.open_to }}">
-    </div>
-    <p class="muted" style="font-size: 13px">
-      Frigate ставит имя при 0.9 — свой порог выше намеренно. Пауза защищает от
-      очереди импульсов на одного человека: обратной связи от геркона нет.
-    </p>
-
-    <h3 style="margin: 16px 0 8px; font-size: 15px">Куда идёт человек</h3>
-    <p class="muted" style="font-size: 13px">
-      Правила направления умеют только запрещать. Уходящему калитка не
-      открывается никогда; стоящему у калитки — только сразу после того, как
-      створка закрылась, и это возвращение: вышел, закрыл за собой, развернулся.
-      Числа измерены на живых проходах, разбор в
-      <code>docs/gate-direction-experiments.md</code>.
-    </p>
-    <div class="controls">
-      <label class="controls" style="font-size: 13px">
-        <input id="movement-enabled" type="checkbox"
-          {{ "checked" if gate_access.movement.enabled }}>
-        учитывать направление
-      </label>
-      <label class="controls" style="font-size: 13px">
-        <input id="movement-still" type="checkbox"
-          {{ "checked" if gate_access.movement.open_when_still }}>
-        пускать вернувшегося
-      </label>
-    </div>
-    <div class="controls">
-      <label for="movement-approaching">идёт к калитке, если вырос в</label>
-      <input id="movement-approaching" type="number" min="1.1" max="20" step="0.1"
-        value="{{ gate_access.movement.approaching_ratio }}">
-      <label for="movement-leaving">уходит, если упал до</label>
-      <input id="movement-leaving" type="number" min="0.05" max="0.95" step="0.05"
-        value="{{ gate_access.movement.leaving_ratio }}">
-      <label for="movement-window">окно возвращения, с</label>
-      <input id="movement-window" type="number" min="0" max="600"
-        value="{{ gate_access.movement.return_window_seconds }}">
-    </div>
-    <div class="controls">
-      <button id="apply-preset" type="button">Накатить пресет «{{ gate_access.preset_name }}»</button>
-      <button id="rollback-preset" type="button" {{ "" if gate_access.preset_applied else "disabled" }}>
-        Вернуть как было
-      </button>
-      <span id="preset-status" class="muted data" style="font-size: 12px">
-        {{ "пресет применён" if gate_access.preset_applied else "" }}
-      </span>
-    </div>
-    <p class="muted" style="font-size: 13px">
-      Пресет — это те самые измеренные числа одним движением. Прежние правила
-      запоминаются в том же файле настроек, поэтому «вернуть как было» работает
-      и после перезагрузки узла.
-    </p>
-
-    <h3 style="margin: 16px 0 8px; font-size: 15px">Второй шанс</h3>
-    <p class="muted" style="font-size: 13px">
-      Одно событие — один импульс: это защита от качания, из-за которой калитка
-      однажды щёлкала каждые две секунды. У неё есть цена. Если импульс попал в
-      уже открытую створку, он пропал зря, а человек перед закрывшейся калиткой
-      остаётся ни с чем, пока не выйдет из кадра: для Frigate он всё ещё то же
-      событие. Правило говорит: <strong>наш импульс пропал зря, створка с тех
-      пор закрылась, а человек всё ещё здесь — открыть ещё раз.</strong>
-    </p>
-    <p class="muted" style="font-size: 13px">
-      «Пропал зря» проверяется по состоянию створки в момент импульса. Закрыта —
-      значит защёлку отпустили для человека, он открыл и прошёл. Открыта —
-      значит защёлка и так была отпущена, и наш импульс ничего не изменил.
-      Второй шанс полагается только этому случаю: без такой проверки калитка
-      пикает вслед прошедшему, что она 12 августа и делала.
-    </p>
-    <div class="controls">
-      <label class="controls" style="font-size: 13px">
-        <input id="chance-enabled" type="checkbox"
-          {{ "checked" if gate_access.second_chance.enabled }}>
-        давать второй шанс
-      </label>
-      <label class="controls" style="font-size: 13px">
-        <input id="chance-closed" type="checkbox"
-          {{ "checked" if gate_access.second_chance.require_closed }}>
-        только если створка закрылась
-      </label>
-    </div>
-    <div class="controls">
-      <label for="chance-max">импульсов на проход</label>
-      <input id="chance-max" type="number" min="1" max="5"
-        value="{{ gate_access.second_chance.max_pulses }}">
-      <label for="chance-gap">пауза между ними, с</label>
-      <input id="chance-gap" type="number" min="1" max="120"
-        value="{{ gate_access.second_chance.gap_seconds }}">
-    </div>
-    <div class="controls">
-      <button id="apply-chance-preset" type="button">
-        Накатить пресет «{{ gate_access.chance_preset_name }}»
-      </button>
-      <button id="rollback-chance-preset" type="button"
-        {{ "" if gate_access.chance_preset_applied else "disabled" }}>
-        Вернуть как было
-      </button>
-      <span id="chance-preset-status" class="muted data" style="font-size: 12px">
-        {{ "пресет применён" if gate_access.chance_preset_applied else "" }}
-      </span>
-    </div>
-    <p class="muted" style="font-size: 13px">
-      Пресет отдельный от правил движения намеренно: они решают разные задачи.
-      Правила движения отказывают уходящему, второй шанс доводит до конца
-      открытие тому, кто пришёл. Откат одного не роняет другой.
-      {% if not gate_access.second_chance.require_closed %}
-        <strong>Условие про створку выключено</strong> — единственной защитой от
-        очереди импульсов осталась пауза между ними.
-      {% endif %}
-    </p>
-
-    <h3 style="margin: 16px 0 8px; font-size: 15px">Кому открывать</h3>
-    {% if face_library is none %}
-      <p class="notice notice-signal">
-        Библиотеку лиц Frigate спросить не удалось — список имён показан таким,
-        каким он сохранён. Это не то же самое, что «лиц не заведено».
-      </p>
-    {% elif not face_library %}
-      <p class="muted">
-        В библиотеке лиц Frigate пока никого нет. Имена заводятся в его
-        интерфейсе — здесь они только выбираются.
-      </p>
-    {% endif %}
-    <div class="filter-chips" id="access-names" style="margin: 0 0 12px">
-      {% for name in face_library or gate_access.allowed_names %}
-        <button type="button" data-name="{{ name }}"
-          class="filter-chip access-name{{ ' filter-chip-active' if name in gate_access.allowed_names }}"
-          aria-pressed="{{ 'true' if name in gate_access.allowed_names else 'false' }}">
-          {{ name }}
-        </button>
-      {% endfor %}
-    </div>
-    {% if orphan_names %}
-      <p class="notice notice-bad">
-        В разрешённых остались имена, которых нет в библиотеке лиц:
-        {{ orphan_names | join(", ") }}. Такая настройка не сработает никогда —
-        уберите её или заведите лицо во Frigate.
-      </p>
-    {% endif %}
-
-    <h3 style="margin: 16px 0 8px; font-size: 15px">Телефон как второй фактор</h3>
-    <p class="muted" style="font-size: 13px">
-      Лицо — удобство, а не фактор безопасности: распознавание обманывается
-      фотографией на экране. Телефон рядом с именем закрывает этот случай, но не
-      закрывает подготовленного человека — MAC подделывается одной командой, — и
-      присутствие в сети не означает присутствия у калитки. Главный практический
-      риск — ложные отказы, поэтому фактор сперва наблюдается и только потом
-      включается.
-    </p>
-    <div id="access-people">
-      {% for person in gate_access.people %}
-        <div class="controls access-person" data-name="{{ person.name }}">
-          <strong style="min-width: 120px">{{ person.name }}</strong>
-          <label for="phone-ip-{{ loop.index }}">адрес</label>
-          <input id="phone-ip-{{ loop.index }}" class="phone-ip" type="text"
-            value="{{ person.phone_ip }}" placeholder="192.168.х.х">
-          <label for="phone-mac-{{ loop.index }}">MAC</label>
-          <input id="phone-mac-{{ loop.index }}" class="phone-mac" type="text"
-            placeholder="{{ person.phone_mac or 'не задан' }}">
-        </div>
-      {% else %}
-        <p class="muted">
-          Телефоны привязываются к разрешённым именам: отметьте человека выше и
-          сохраните — его строка появится здесь.
-        </p>
-      {% endfor %}
-    </div>
-    <p class="muted" style="font-size: 13px">
-      Пустое поле MAC означает «оставить сохранённый»: наружу он выходит только
-      хвостом. Адреса и MAC — персональные данные семьи: они живут в файле на
-      узле и в репозиторий не попадают.
-    </p>
-    <label class="controls" style="font-size: 13px">
-      <input id="access-second-factor" type="checkbox"
-        {{ 'checked' if gate_access.require_second_factor }}>
-      требовать телефон обязательно
-    </label>
-
-    <div class="controls">
-      <button id="save-access-settings" type="button">Сохранить</button>
-      <span id="access-status" class="muted data" style="font-size: 12px"></span>
-    </div>
-  </div>
-</section>
+{# Двухколонная компоновка, как на «Проходах»: слева журнал — то, ради чего
+   страница открывается каждый день; справа рейка с камерами и управлением.
+   Настройки — складными панелями со строкой живого состояния. #}
+<div class="work">
+<div class="work-feed">
 
 {# Журнал проходов: кто подошёл к калитке и что система решила. Пишет его
    отдельная служба `catdoor-gate-access`; механики в ней нет, поэтому решение
@@ -577,6 +248,368 @@
     <span id="recording-status" class="muted data" style="font-size: 12px"></span>
   </div>
 </section>
+</div>
+<aside class="work-rail">
+<section class="panel">
+  <div class="panel-head">
+    <h2>Камеры калитки</h2>
+    <a class="button" href="/cameras" style="margin-left: auto">Настроить камеры</a>
+  </div>
+  <div class="panel-body">
+    {% if gate_cameras %}
+      <div class="passes">
+        {% for camera in gate_cameras %}
+          <article class="pass" data-camera-id="{{ camera.id }}">
+            <div class="pass-media">
+              {% if camera.configured and camera.enabled %}
+                <img class="viewport" data-live-stream
+                  alt="Живое изображение камеры {{ camera.display_title }}"
+                  data-stream-src="/stream/camera/{{ camera.id }}.mjpeg?v={{ stream_version }}">
+              {% else %}
+                <div class="viewport viewport-empty">
+                  {{ "Адрес не задан" if not camera.configured else "Камера выключена" }}
+                </div>
+              {% endif %}
+            </div>
+            <div class="pass-body">
+              <div class="pass-head">
+                <strong>{{ camera.display_title }}</strong>
+                <span class="faint data">{{ camera.id }}</span>
+                {% if not camera.detect_stream_path %}
+                  <span class="signal">без субпотока</span>
+                {% endif %}
+              </div>
+              <p class="muted" style="font-size: 13px">
+                {{ camera.note or "Пишется клипами вокруг детекций: люди и машины." }}
+              </p>
+            </div>
+          </article>
+        {% endfor %}
+      </div>
+    {% else %}
+      <p class="muted">
+        В контуре калитки нет ни одной камеры. Камеры заводятся и переводятся
+        между контурами на <a href="/cameras">вкладке «Камеры»</a>.
+      </p>
+    {% endif %}
+  </div>
+</section>
+
+<section class="panel" id="access">
+  <div class="panel-head">
+    <h2>Открытие по лицу</h2>
+    <span class="muted">реле {{ gate_access.gates[0].relay if gate_access.gates else "—" }}</span>
+  </div>
+  <div class="panel-body">
+    <div class="segmented" role="group" aria-label="Режим автооткрытия">
+      <button type="button" class="mode-choice" data-mode="off"
+        aria-pressed="{{ 'true' if gate_access.mode == 'off' else 'false' }}">
+        выключено
+      </button>
+      <button type="button" class="mode-choice" data-mode="dry"
+        aria-pressed="{{ 'true' if gate_access.mode == 'dry' else 'false' }}">
+        решать и записывать
+      </button>
+      <button type="button" class="mode-choice" data-mode="on"
+        aria-pressed="{{ 'true' if gate_access.mode == 'on' else 'false' }}">
+        открывать
+      </button>
+    </div>
+    {# Ручное открытие. Разрешено владельцем письменно (`AGENTS.md`), в отличие
+       от автооткрытия, которое остаётся в `dry`. Импульс уходит не отсюда:
+       веб кладёт просьбу файлом, исполняет служба. #}
+    <div class="controls">
+      <button id="open-gate" type="button" {{ "disabled" if not gate_access.gates }}>
+        Открыть калитку
+      </button>
+      <span id="open-gate-status" class="muted data" style="font-size: 12px">
+        {{ "" if gate_access.gates else "сначала задайте канал реле" }}
+      </span>
+    </div>
+    <p class="muted" style="font-size: 13px">
+      Кнопка замыкает вход «кнопка выхода» контроллера на калитке — то же самое,
+      что нажать её во дворе. Замком по-прежнему распоряжается сам контроллер.
+      Каждое нажатие попадает в журнал ниже и в Телеграм. Работает независимо от
+      режима автооткрытия: режимы относятся к автоматике, а не к человеку.
+    </p>
+
+
+    <details class="folded">
+      <summary>Кому открывать и пороги
+        <span class="state-line data">{{ gate_access.allowed_names | length }} имён ·
+          порог {{ gate_access.min_score }} · пауза {{ gate_access.cooldown_seconds }} с ·
+          {{ gate_access.open_from }}–{{ gate_access.open_to }}</span>
+      </summary>
+    <p class="muted" style="font-size: 13px">
+      «Решать и записывать» — это тот же приём, которым проверялась кошачья
+      дверца: система пишет в журнал «открыл бы», но реле не трогает. Он даёт
+      настоящую статистику ложных распознаваний на реальных людях у реальной
+      калитки, и выходить из него стоит не по календарю, а по четырём условиям
+      из <code>docs/gate-access-plan.md</code>: ни одного «открыл бы» на чужих,
+      все свои приходы в журнале, измеренная задержка и понятный объём выборки.
+    </p>
+    <p class="muted" style="font-size: 13px">
+      В режиме «открывать» лицо открывает калитку само. Помните, чем оно не
+      является: распознавание обманывается фотографией на экране телефона, и
+      порог с белым списком этого не меняют. Если сомневаетесь — вернитесь в
+      «решать и записывать», журнал продолжит копиться.
+    </p>
+
+    <h3 style="margin: 16px 0 8px; font-size: 15px">Кому открывать</h3>
+    {% if face_library is none %}
+      <p class="notice notice-signal">
+        Библиотеку лиц Frigate спросить не удалось — список имён показан таким,
+        каким он сохранён. Это не то же самое, что «лиц не заведено».
+      </p>
+    {% elif not face_library %}
+      <p class="muted">
+        В библиотеке лиц Frigate пока никого нет. Имена заводятся в его
+        интерфейсе — здесь они только выбираются.
+      </p>
+    {% endif %}
+    <div class="filter-chips" id="access-names" style="margin: 0 0 12px">
+      {% for name in face_library or gate_access.allowed_names %}
+        <button type="button" data-name="{{ name }}"
+          class="filter-chip access-name{{ ' filter-chip-active' if name in gate_access.allowed_names }}"
+          aria-pressed="{{ 'true' if name in gate_access.allowed_names else 'false' }}">
+          {{ name }}
+        </button>
+      {% endfor %}
+    </div>
+    {% if orphan_names %}
+      <p class="notice notice-bad">
+        В разрешённых остались имена, которых нет в библиотеке лиц:
+        {{ orphan_names | join(", ") }}. Такая настройка не сработает никогда —
+        уберите её или заведите лицо во Frigate.
+      </p>
+    {% endif %}
+
+    <div class="controls">
+      <label for="access-min-score">порог узнавания</label>
+      <input id="access-min-score" type="number" min="0" max="1" step="0.01"
+        value="{{ gate_access.min_score }}">
+      <label for="access-cooldown">пауза, с</label>
+      <input id="access-cooldown" type="number" min="0" max="3600"
+        value="{{ gate_access.cooldown_seconds }}">
+      <label for="access-from">с</label>
+      <input id="access-from" type="time" value="{{ gate_access.open_from }}">
+      <label for="access-to">до</label>
+      <input id="access-to" type="time" value="{{ gate_access.open_to }}">
+    </div>
+    <p class="muted" style="font-size: 13px">
+      Frigate ставит имя при 0.9 — свой порог выше намеренно. Пауза защищает от
+      очереди импульсов на одного человека: обратной связи от геркона нет.
+    </p>
+
+    <div class="controls">
+      <label for="access-relay">канал реле</label>
+      <input id="access-relay" type="number" min="1" max="8"
+        value="{{ gate_access.gates[0].relay if gate_access.gates else 1 }}">
+      <label for="access-pulse">импульс, мс</label>
+      <input id="access-pulse" type="number" min="100" max="5000" step="100"
+        value="{{ gate_access.pulse_ms }}">
+    </div>
+    <p class="muted" style="font-size: 13px">
+      Канал — тот, к которому подключена кнопка выхода. Импульс задаётся одной
+      командой, которая сама размыкает контакт: смерть процесса не оставит
+      калитку разомкнутой.
+    </p>
+
+    <div class="controls">
+      <label for="access-camera">камера калитки</label>
+      <select id="access-camera">
+        <option value="">не выбрана</option>
+        {# Значение — имя камеры во Frigate, а не идентификатор инвентаря:
+           события приходят с ним, и `test-cam` против `test_cam` дал бы
+           «камера не назначена калиткой» на каждый проход. #}
+        {% for camera in gate_cameras %}
+          <option value="{{ camera.frigate_name }}"
+            {{ 'selected' if gate_access.gates
+               and gate_access.gates[0].camera == camera.frigate_name }}>
+            {{ camera.display_title }}
+          </option>
+        {% endfor %}
+      </select>
+      <label for="access-zone">зона</label>
+      <input id="access-zone" type="text" placeholder="вся картинка"
+        value="{{ gate_access.gates[0].zone if gate_access.gates else '' }}">
+    </div>
+    <p class="muted" style="font-size: 13px">
+      Зона нужна, чтобы узнанное лицо на террасе не открывало калитку с другой
+      стороны участка. Пусто — вся картинка камеры.
+    </p>
+
+    <h3 style="margin: 16px 0 8px; font-size: 15px">Телефон как второй фактор</h3>
+    <p class="muted" style="font-size: 13px">
+      Лицо — удобство, а не фактор безопасности: распознавание обманывается
+      фотографией на экране. Телефон рядом с именем закрывает этот случай, но не
+      закрывает подготовленного человека — MAC подделывается одной командой, — и
+      присутствие в сети не означает присутствия у калитки. Главный практический
+      риск — ложные отказы, поэтому фактор сперва наблюдается и только потом
+      включается.
+    </p>
+    <div id="access-people">
+      {% for person in gate_access.people %}
+        <div class="controls access-person" data-name="{{ person.name }}">
+          <strong style="min-width: 120px">{{ person.name }}</strong>
+          <label for="phone-ip-{{ loop.index }}">адрес</label>
+          <input id="phone-ip-{{ loop.index }}" class="phone-ip" type="text"
+            value="{{ person.phone_ip }}" placeholder="192.168.х.х">
+          <label for="phone-mac-{{ loop.index }}">MAC</label>
+          <input id="phone-mac-{{ loop.index }}" class="phone-mac" type="text"
+            placeholder="{{ person.phone_mac or 'не задан' }}">
+        </div>
+      {% else %}
+        <p class="muted">
+          Телефоны привязываются к разрешённым именам: отметьте человека выше и
+          сохраните — его строка появится здесь.
+        </p>
+      {% endfor %}
+    </div>
+    <p class="muted" style="font-size: 13px">
+      Пустое поле MAC означает «оставить сохранённый»: наружу он выходит только
+      хвостом. Адреса и MAC — персональные данные семьи: они живут в файле на
+      узле и в репозиторий не попадают.
+    </p>
+    <label class="controls" style="font-size: 13px">
+      <input id="access-second-factor" type="checkbox"
+        {{ 'checked' if gate_access.require_second_factor }}>
+      требовать телефон обязательно
+    </label>
+
+    <div class="controls">
+      <button id="save-access-settings" type="button">Сохранить</button>
+      <span id="access-status" class="muted data" style="font-size: 12px"></span>
+    </div>
+
+    </details>
+
+    <details class="folded">
+      <summary>Правила движения
+        <span class="state-line data">
+          {{ "включены" if gate_access.movement.enabled else "выключены" }} ·
+          пресет {{ "накачен" if gate_access.preset_applied else "не накачен" }}</span>
+      </summary>
+    <h3 style="margin: 16px 0 8px; font-size: 15px">Куда идёт человек</h3>
+    <p class="muted" style="font-size: 13px">
+      Правила направления умеют только запрещать. Уходящему калитка не
+      открывается никогда; стоящему у калитки — только сразу после того, как
+      створка закрылась, и это возвращение: вышел, закрыл за собой, развернулся.
+      Числа измерены на живых проходах, разбор в
+      <code>docs/gate-direction-experiments.md</code>.
+    </p>
+    <div class="controls">
+      <label class="controls" style="font-size: 13px">
+        <input id="movement-enabled" type="checkbox"
+          {{ "checked" if gate_access.movement.enabled }}>
+        учитывать направление
+      </label>
+      <label class="controls" style="font-size: 13px">
+        <input id="movement-still" type="checkbox"
+          {{ "checked" if gate_access.movement.open_when_still }}>
+        пускать вернувшегося
+      </label>
+    </div>
+    <div class="controls">
+      <label for="movement-approaching">идёт к калитке, если вырос в</label>
+      <input id="movement-approaching" type="number" min="1.1" max="20" step="0.1"
+        value="{{ gate_access.movement.approaching_ratio }}">
+      <label for="movement-leaving">уходит, если упал до</label>
+      <input id="movement-leaving" type="number" min="0.05" max="0.95" step="0.05"
+        value="{{ gate_access.movement.leaving_ratio }}">
+      <label for="movement-window">окно возвращения, с</label>
+      <input id="movement-window" type="number" min="0" max="600"
+        value="{{ gate_access.movement.return_window_seconds }}">
+    </div>
+    <div class="controls">
+      <button id="apply-preset" type="button">Накатить пресет «{{ gate_access.preset_name }}»</button>
+      <button id="rollback-preset" type="button" {{ "" if gate_access.preset_applied else "disabled" }}>
+        Вернуть как было
+      </button>
+      <span id="preset-status" class="muted data" style="font-size: 12px">
+        {{ "пресет применён" if gate_access.preset_applied else "" }}
+      </span>
+    </div>
+    <p class="muted" style="font-size: 13px">
+      Пресет — это те самые измеренные числа одним движением. Прежние правила
+      запоминаются в том же файле настроек, поэтому «вернуть как было» работает
+      и после перезагрузки узла.
+    </p>
+
+
+    </details>
+
+    <details class="folded">
+      <summary>Второй шанс
+        <span class="state-line data">
+          {{ "включён" if gate_access.second_chance.enabled else "выключен" }} ·
+          {{ gate_access.second_chance.max_pulses }} имп ·
+          {{ gate_access.second_chance.gap_seconds }} с</span>
+      </summary>
+    <h3 style="margin: 16px 0 8px; font-size: 15px">Второй шанс</h3>
+    <p class="muted" style="font-size: 13px">
+      Одно событие — один импульс: это защита от качания, из-за которой калитка
+      однажды щёлкала каждые две секунды. У неё есть цена. Если импульс попал в
+      уже открытую створку, он пропал зря, а человек перед закрывшейся калиткой
+      остаётся ни с чем, пока не выйдет из кадра: для Frigate он всё ещё то же
+      событие. Правило говорит: <strong>наш импульс пропал зря, створка с тех
+      пор закрылась, а человек всё ещё здесь — открыть ещё раз.</strong>
+    </p>
+    <p class="muted" style="font-size: 13px">
+      «Пропал зря» проверяется по состоянию створки в момент импульса. Закрыта —
+      значит защёлку отпустили для человека, он открыл и прошёл. Открыта —
+      значит защёлка и так была отпущена, и наш импульс ничего не изменил.
+      Второй шанс полагается только этому случаю: без такой проверки калитка
+      пикает вслед прошедшему, что она 12 августа и делала.
+    </p>
+    <div class="controls">
+      <label class="controls" style="font-size: 13px">
+        <input id="chance-enabled" type="checkbox"
+          {{ "checked" if gate_access.second_chance.enabled }}>
+        давать второй шанс
+      </label>
+      <label class="controls" style="font-size: 13px">
+        <input id="chance-closed" type="checkbox"
+          {{ "checked" if gate_access.second_chance.require_closed }}>
+        только если створка закрылась
+      </label>
+    </div>
+    <div class="controls">
+      <label for="chance-max">импульсов на проход</label>
+      <input id="chance-max" type="number" min="1" max="5"
+        value="{{ gate_access.second_chance.max_pulses }}">
+      <label for="chance-gap">пауза между ними, с</label>
+      <input id="chance-gap" type="number" min="1" max="120"
+        value="{{ gate_access.second_chance.gap_seconds }}">
+    </div>
+    <div class="controls">
+      <button id="apply-chance-preset" type="button">
+        Накатить пресет «{{ gate_access.chance_preset_name }}»
+      </button>
+      <button id="rollback-chance-preset" type="button"
+        {{ "" if gate_access.chance_preset_applied else "disabled" }}>
+        Вернуть как было
+      </button>
+      <span id="chance-preset-status" class="muted data" style="font-size: 12px">
+        {{ "пресет применён" if gate_access.chance_preset_applied else "" }}
+      </span>
+    </div>
+    <p class="muted" style="font-size: 13px">
+      Пресет отдельный от правил движения намеренно: они решают разные задачи.
+      Правила движения отказывают уходящему, второй шанс доводит до конца
+      открытие тому, кто пришёл. Откат одного не роняет другой.
+      {% if not gate_access.second_chance.require_closed %}
+        <strong>Условие про створку выключено</strong> — единственной защитой от
+        очереди импульсов осталась пауза между ними.
+      {% endif %}
+    </p>
+
+
+    </details>
+  </div>
+</section>
+</aside>
+</div>
 {% endblock %}
 
 {% block scripts %}
