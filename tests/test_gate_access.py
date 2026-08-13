@@ -623,7 +623,7 @@ def test_the_on_mode_turns_a_decision_into_a_pulse() -> None:
     )
     sent: list[str] = []
 
-    executed = execute_openings(
+    executed, _ = execute_openings(
         records,
         config=_config(mode="on"),
         opener=opener,
@@ -642,7 +642,7 @@ def test_the_dry_mode_still_touches_nothing() -> None:
     opener = _FakeOpener(PulseResult(True, "ок", 500))
     records, _ = _passes([_event(sub_label="Алексей", name_score=0.96)], config=_config())
 
-    executed = execute_openings(records, config=_config(), opener=opener, already={})
+    executed, _ = execute_openings(records, config=_config(), opener=opener, already={})
 
     assert executed[0].decision == DECISION_DRY_RUN
     assert opener.calls == []
@@ -679,7 +679,7 @@ def test_a_failed_opening_is_not_retried_every_second() -> None:
         config=_config(mode="on"),
     )
 
-    executed = execute_openings(records, config=_config(mode="on"), opener=opener, already={})
+    executed, _ = execute_openings(records, config=_config(mode="on"), opener=opener, already={})
     execute_openings(
         records,
         config=_config(mode="on"),
@@ -697,7 +697,7 @@ def test_a_refused_decision_never_reaches_the_board() -> None:
     opener = _FakeOpener(PulseResult(True, "ок", 500))
     records, _ = _passes([_event(sub_label=None)], config=_config(mode="on"))
 
-    executed = execute_openings(records, config=_config(mode="on"), opener=opener, already={})
+    executed, _ = execute_openings(records, config=_config(mode="on"), opener=opener, already={})
 
     assert executed[0].decision != "opened"
     assert opener.calls == []
@@ -709,7 +709,7 @@ def test_what_went_to_the_board_reaches_the_journal(runtime_path: Path) -> None:
         [_event(sub_label="Алексей", name_score=0.96)],
         config=_config(mode="on"),
     )
-    executed = execute_openings(
+    executed, _ = execute_openings(
         records,
         config=_config(mode="on"),
         opener=_FakeOpener(PulseResult(True, "ок", 500)),
@@ -751,7 +751,7 @@ def test_a_reread_event_does_not_reopen_the_gate(runtime_path: Path) -> None:
             }
             record_passes(
                 session,
-                execute_openings(records, config=config, opener=opener, already=already),
+                execute_openings(records, config=config, opener=opener, already=already)[0],
             )
             session.commit()
 
@@ -779,7 +779,7 @@ def test_a_failed_opening_is_not_downgraded_either(runtime_path: Path) -> None:
             }
             record_passes(
                 session,
-                execute_openings(records, config=config, opener=opener, already=already),
+                execute_openings(records, config=config, opener=opener, already=already)[0],
             )
             session.commit()
 
@@ -1066,7 +1066,7 @@ def test_a_pulse_never_chases_someone_who_has_left() -> None:
         config=_config(mode="on"),
     )
 
-    executed = execute_openings(
+    executed, _ = execute_openings(
         records,
         config=_config(mode="on"),
         opener=opener,
@@ -1094,7 +1094,7 @@ def test_a_pulse_still_goes_while_the_person_is_there(ended_at: float | None, no
         config=_config(mode="on"),
     )
 
-    executed = execute_openings(
+    executed, _ = execute_openings(
         records, config=_config(mode="on"), opener=opener, already={}, now=now
     )
 
@@ -1132,7 +1132,7 @@ def test_the_gate_opens_again_when_it_closed_and_the_person_is_still_there() -> 
     opener = _FakeOpener(PulseResult(True, "Импульс 500 мс на канал 2", 500))
     records, _ = _passes([_event(sub_label="Алексей", name_score=0.96)], config=_chance())
 
-    executed = execute_openings(
+    executed, _ = execute_openings(
         records,
         config=_chance(),
         opener=opener,
@@ -1196,7 +1196,7 @@ def test_the_second_chance_has_its_limits(
     opener = _FakeOpener(PulseResult(True, "ок", 500))
     records, _ = _passes([_event(sub_label="Алексей", name_score=0.96)], config=config)
 
-    executed = execute_openings(
+    executed, _ = execute_openings(
         records,
         config=config,
         opener=opener,
@@ -1250,7 +1250,7 @@ def test_the_gate_does_not_beep_after_someone_who_got_in() -> None:
     opener = _FakeOpener(PulseResult(True, "ок", 500))
     records, _ = _passes([_event(sub_label="Алексей", name_score=0.96)], config=_chance())
 
-    executed = execute_openings(
+    executed, _ = execute_openings(
         records,
         config=_chance(),
         opener=opener,
@@ -1268,7 +1268,7 @@ def test_the_state_of_the_gate_at_the_pulse_is_remembered() -> None:
     opener = _FakeOpener(PulseResult(True, "ок", 500))
     records, _ = _passes([_event(sub_label="Алексей", name_score=0.96)], config=_chance())
 
-    executed = execute_openings(
+    executed, _ = execute_openings(
         records,
         config=_chance(),
         opener=opener,
@@ -1293,7 +1293,7 @@ def test_a_clock_behind_the_event_never_opens_the_gate() -> None:
         config=_config(mode="on"),
     )
 
-    executed = execute_openings(
+    executed, _ = execute_openings(
         records, config=_config(mode="on"), opener=opener, already={}, now=1000.0
     )
 
@@ -1401,3 +1401,166 @@ def test_a_reread_does_not_replace_the_pulse_report_with_a_guess(
         row = session.query(GatePass).one()
 
     assert "Импульс 500 мс" in (row.reason or "")
+
+
+# ── Правки 13 августа: настоящее «сейчас», пауза от импульса, повтор ──
+
+# Дневная база: окно 07:00–23:00 в решении настоящее, и полночь 1970 года
+# честно получала бы denied_window вместо проверяемого кода.
+NOON = datetime(2026, 8, 13, 12, 0, tzinfo=MOSCOW).timestamp()
+
+
+def test_the_pause_ends_in_the_real_world_not_in_the_events_world() -> None:
+    """Проход 17:14:11 простоял в denied_cooldown до смерти в denied_stale.
+
+    Решению передавалось начало события, и оно замерзало: «прошло 5 с из 10 с»
+    навсегда. Теперь решение получает настоящее «сейчас», и пауза кончается.
+    """
+    config = _config(mode="on", cooldown_seconds=10)
+    event = _event(id="b", started_at=NOON + 5, sub_label="Алексей", name_score=0.96)
+    opened_at = LastOpening("a", datetime.fromtimestamp(NOON, UTC))
+
+    early, _ = _passes(
+        [event], config=config, last_opening=opened_at,
+        now=datetime.fromtimestamp(NOON + 6, UTC),
+    )
+    later, _ = _passes(
+        [event], config=config, last_opening=opened_at,
+        now=datetime.fromtimestamp(NOON + 11, UTC),
+    )
+
+    assert early[0].decision == "denied_cooldown"
+    # То же событие, тот же журнал — но мир успел прожить паузу.
+    assert later[0].decision == DECISION_DRY_RUN
+
+
+def test_a_later_opening_does_not_lock_an_earlier_event_forever() -> None:
+    """Отрицательная пауза: событие Б началось раньше открытия для В.
+
+    Раньше waited = начало_Б − открытие_В < 0 запирало Б намертво. С настоящим
+    «сейчас» возраст паузы не бывает отрицательным просто потому, что «сейчас»
+    позже любого прошлого открытия.
+    """
+    config = _config(mode="on", cooldown_seconds=10)
+    event = _event(id="b", started_at=NOON, sub_label="Алексей", name_score=0.96)
+    later_opening = LastOpening("c", datetime.fromtimestamp(NOON + 20, UTC))
+
+    records, _ = _passes(
+        [event], config=config, last_opening=later_opening,
+        now=datetime.fromtimestamp(NOON + 31, UTC),
+    )
+
+    assert records[0].decision == DECISION_DRY_RUN
+
+
+def test_a_stale_decision_does_not_arm_the_pause() -> None:
+    """Пауза считается от щелчка реле, а не от намерения.
+
+    Решение, умершее в denied_stale, раньше взводило паузу, и следующий человек
+    ждал несуществующего открытия.
+    """
+    config = _config(mode="on")
+    opener = _FakeOpener(PulseResult(True, "ок", 500))
+    records, opening = _passes(
+        [_event(sub_label="Алексей", name_score=0.96, ended_at=NOON)],
+        config=config,
+        now=datetime.fromtimestamp(NOON + ACT_WITHIN_SECONDS + 1, UTC),
+    )
+
+    executed, pulsed = execute_openings(
+        records, config=config, opener=opener, already={},
+        now=NOON + ACT_WITHIN_SECONDS + 1,
+    )
+
+    assert executed[0].decision == "denied_stale"
+    # В режиме «on» намерение паузу не взводит…
+    assert opening is None
+    # …а импульса не было, значит и щелчка нет.
+    assert pulsed is None
+
+
+def test_a_successful_pulse_arms_the_pause() -> None:
+    config = _config(mode="on")
+    opener = _FakeOpener(PulseResult(True, "ок", 500))
+    records, _ = _passes(
+        [_event(sub_label="Алексей", name_score=0.96)],
+        config=config,
+        now=datetime.fromtimestamp(NOON, UTC),
+    )
+
+    _, pulsed = execute_openings(
+        records, config=config, opener=opener, already={}, now=NOON
+    )
+
+    assert pulsed is not None
+    assert pulsed.at == datetime.fromtimestamp(NOON, UTC)
+
+
+def test_the_dry_mode_still_arms_the_pause_by_decision() -> None:
+    """Наблюдение обязано воспроизводить поведение «on», а импульсов в нём нет."""
+    records, opening = _passes(
+        [_event(sub_label="Алексей", name_score=0.96)],
+        config=_config(mode="dry"),
+        now=datetime.fromtimestamp(NOON, UTC),
+    )
+
+    assert records[0].decision == DECISION_DRY_RUN
+    assert opening is not None
+
+
+def test_a_board_error_earns_a_retry_after_a_pause() -> None:
+    """Отказ платы — не приговор: 17:04 он стоил Лёше четырнадцати секунд.
+
+    Пауза перед повтором защищает плату от долбёжки так же, как защищал
+    приговор, но человеку достаётся вторая попытка.
+    """
+    from src.gate.access import ERROR_RETRY_SECONDS
+
+    config = _config(mode="on")
+    opener = _FakeOpener(PulseResult(True, "ок", 500))
+    records, _ = _passes(
+        [_event(sub_label="Алексей", name_score=0.96)],
+        config=config,
+        now=datetime.fromtimestamp(NOON, UTC),
+    )
+    prior = PriorPass("error", 0, NOON)
+
+    too_soon, _ = execute_openings(
+        records, config=config, opener=opener,
+        already={records[0].frigate_event_id: prior}, now=NOON + 5,
+    )
+    assert too_soon[0].decision == "error"
+    assert opener.calls == []  # рано — плату не трогали
+
+    after_pause, _ = execute_openings(
+        records, config=config, opener=opener,
+        already={records[0].frigate_event_id: prior},
+        now=NOON + ERROR_RETRY_SECONDS + 1,
+    )
+    assert after_pause[0].decision == "opened"
+    assert opener.calls == [(2, 500)]
+
+
+def test_ongoing_events_are_fetched_without_an_age_filter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Фильтр `after` режет по началу события.
+
+    Человек, простоявший у калитки дольше окна наблюдения, выпадал из опроса,
+    хотя его событие живо: постоял шесть минут, решил войти — а служба его уже
+    не видит.
+    """
+    from src.gate.notify import fetch_ongoing_events
+
+    seen: list[str] = []
+
+    def fake_urlopen(url, timeout=0):
+        seen.append(url if isinstance(url, str) else url.full_url)
+        return _Response(b"[]")
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    fetch_ongoing_events("http://127.0.0.1:5000")
+
+    assert "in_progress=1" in seen[0]
+    assert "after=" not in seen[0]

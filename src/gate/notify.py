@@ -166,6 +166,22 @@ def _event_from_payload(item: dict[str, object]) -> GateEvent:
 
 def fetch_events(api_url: str, after: float, *, timeout: float = 10.0) -> list[GateEvent]:
     query = urllib.parse.urlencode({"after": f"{after:.3f}", "limit": EVENTS_PER_POLL})
+    return _fetch_event_list(api_url, query, timeout)
+
+
+def fetch_ongoing_events(api_url: str, *, timeout: float = 10.0) -> list[GateEvent]:
+    """Незаконченные события — без оглядки на возраст.
+
+    Фильтр `after` режет по началу события, и человек, простоявший у калитки
+    дольше окна наблюдения, выпадал из опроса, хотя его событие живо: постоял
+    шесть минут, решил войти — а служба его уже не видит. Незаконченных событий
+    единицы, поэтому этот запрос дёшев.
+    """
+    query = urllib.parse.urlencode({"in_progress": 1, "limit": EVENTS_PER_POLL})
+    return _fetch_event_list(api_url, query, timeout)
+
+
+def _fetch_event_list(api_url: str, query: str, timeout: float) -> list[GateEvent]:
     url = f"{api_url.rstrip('/')}/api/events?{query}"
     try:
         with urllib.request.urlopen(url, timeout=timeout) as response:
