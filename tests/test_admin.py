@@ -3304,3 +3304,56 @@ def test_the_status_remembers_whose_process_it_is(tmp_path: Path) -> None:
     assert own["pid"] == os.getpid()
     # Явный номер сильнее: родитель записывает номер ребёнка, а не свой.
     assert explicit["pid"] == 4242
+
+
+def test_a_ready_export_is_served_while_another_build_runs(
+    runtime_path: Path, monkeypatch
+) -> None:
+    """«Идёт сборка» и «набор уже есть» бывают правдой одновременно.
+
+    13 августа рядом с законченной сборкой шла вторая, и по последнему прогону
+    выходило, что готового набора нет вовсе, — конвейер полтора часа ждал того,
+    что уже лежало на диске.
+    """
+    from training.workflow import write_status
+
+    client = make_client(runtime_path, monkeypatch)
+    runs = runtime_path / "training" / "exports"
+    archive = runtime_path / "exports" / "macbook-first.zip"
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    archive.write_bytes(b"zip")
+    write_status(runs / "20260813-070034-a" / "status.json", state="completed",
+                 archive=str(archive), size_mb=1193.8)
+    write_status(runs / "20260813-084535-b" / "status.json", state="preparing",
+                 pid=os.getpid())
+
+    status = client.get("/api/training/macbook/export/status").json()
+    download = client.get("/api/training/macbook/export")
+
+    assert status["state"] == "preparing"
+    assert status["ready"]["archive"] == "macbook-first.zip"
+    assert download.status_code == 200
+    assert download.content == b"zip"
+
+
+def test_an_export_whose_archive_was_swept_is_not_offered(
+    runtime_path: Path, monkeypatch
+) -> None:
+    """Архивов остаётся три последних, а отчёты живут дольше.
+
+    Отчёт о собранном наборе переживает сам набор, и предлагать по нему файл,
+    которого нет, значит отвечать «скачано» на пустоту.
+    """
+    from training.workflow import write_status
+
+    client = make_client(runtime_path, monkeypatch)
+    write_status(
+        runtime_path / "training" / "exports" / "20260801-000000-old" / "status.json",
+        state="completed",
+        archive=str(runtime_path / "exports" / "macbook-swept.zip"),
+    )
+
+    status = client.get("/api/training/macbook/export/status").json()
+
+    assert "ready" not in status
+    assert client.get("/api/training/macbook/export").status_code == 404

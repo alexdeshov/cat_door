@@ -87,14 +87,18 @@ def fetch(root: Path, admin: str, scope: str = "macbook", *, rebuild: bool = Fal
     base = admin.rstrip("/")
     status = _ask(f"{base}/api/training/macbook/export/status")
     state = status.get("state")
+    ready = status.get("ready")
+    if not rebuild and _is_fresh_export(ready):
+        # Готовый набор уже есть — берём его, даже если рядом идёт сборка.
+        # Ждать её незачем: она делает следующий набор, а этот лежит целиком.
+        #
+        # 13 августа конвейер сперва запустил вторую сборку поверх законченной,
+        # а потом полтора часа её ждал — и то и другое ради того же набора.
+        name = ready.get("archive", "") if isinstance(ready, dict) else ""
+        print(f"Беру готовый набор: {name}")
+        return _download(root, base)
     if state in ACTIVE_EXPORT_STATES:
         print("Сборка уже идёт на узле — жду её")
-    elif not rebuild and _is_fresh_export(status):
-        # Готовый набор уже есть. Собирать его заново — это полтора часа
-        # процессора ради того же самого: 13 августа так и вышло, конвейер
-        # запустил вторую сборку поверх законченной десятью минутами раньше.
-        print(f"Беру готовый набор: {status.get('message', '')}")
-        return _download(root, base)
     else:
         started = _ask(f"{base}/api/training/macbook/export?scope={scope}", method="POST")
         print(f"Сборка набора запущена на узле: {started.get('run_id', '?')}")
@@ -115,16 +119,16 @@ def fetch(root: Path, admin: str, scope: str = "macbook", *, rebuild: bool = Fal
     return _download(root, base)
 
 
-def _is_fresh_export(status: dict[str, object]) -> bool:
+def _is_fresh_export(ready: object) -> bool:
     """Годится ли уже собранный набор.
 
     Разметка пополняется каждый день, и вчерашний набор — это вчерашняя работа
     владельца, выброшенная молча. Поэтому у готового набора есть срок годности,
     а не просто «есть или нет».
     """
-    if status.get("state") != "completed":
+    if not isinstance(ready, dict):
         return False
-    raw = status.get("updated_at")
+    raw = ready.get("finished_at")
     if not isinstance(raw, str):
         return False
     try:

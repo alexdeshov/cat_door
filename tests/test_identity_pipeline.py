@@ -62,7 +62,7 @@ def test_a_ready_export_is_taken_instead_of_rebuilt() -> None:
 
     just_now = datetime.now(UTC).isoformat()
 
-    assert _is_fresh_export({"state": "completed", "updated_at": just_now})
+    assert _is_fresh_export({"archive": "macbook.zip", "finished_at": just_now})
 
 
 def test_a_stale_export_is_rebuilt() -> None:
@@ -73,7 +73,7 @@ def test_a_stale_export_is_rebuilt() -> None:
 
     yesterday = (datetime.now(UTC) - timedelta(hours=30)).isoformat()
 
-    assert not _is_fresh_export({"state": "completed", "updated_at": yesterday})
+    assert not _is_fresh_export({"archive": "macbook.zip", "finished_at": yesterday})
 
 
 def test_an_unfinished_export_is_never_reused() -> None:
@@ -82,11 +82,11 @@ def test_an_unfinished_export_is_never_reused() -> None:
 
     from scripts.identity_pipeline import _is_fresh_export
 
-    now = datetime.now(UTC).isoformat()
-
-    assert not _is_fresh_export({"state": "preparing", "updated_at": now})
-    assert not _is_fresh_export({"state": "failed", "updated_at": now})
+    # Готового набора нет вовсе — поля `ready` в ответе не будет.
+    assert not _is_fresh_export(None)
     assert not _is_fresh_export({})
     # Часы узла могли уйти вперёд: набор «из будущего» свежим не считаем.
     ahead = datetime.now(UTC).replace(year=datetime.now(UTC).year + 1).isoformat()
-    assert not _is_fresh_export({"state": "completed", "updated_at": ahead})
+    assert not _is_fresh_export({"archive": "macbook.zip", "finished_at": ahead})
+    # Отчёт без времени — не отчёт: судить о свежести не по чему.
+    assert not _is_fresh_export({"archive": "macbook.zip"})
