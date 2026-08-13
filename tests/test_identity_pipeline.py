@@ -90,3 +90,38 @@ def test_an_unfinished_export_is_never_reused() -> None:
     assert not _is_fresh_export({"archive": "macbook.zip", "finished_at": ahead})
     # Отчёт без времени — не отчёт: судить о свежести не по чему.
     assert not _is_fresh_export({"archive": "macbook.zip"})
+
+
+def test_cats_may_be_written_with_commas_or_spaces() -> None:
+    """`--cats Черныш Яся` и `--cats Черныш,Яся` пишут с равной уверенностью.
+
+    13 августа запятая стоила прогона: аргумент склеился в одно имя, которого в
+    наборе, разумеется, не было.
+    """
+    from scripts.identity_pipeline import split_cats
+
+    assert split_cats(["Черныш", "Яся"]) == {"Черныш", "Яся"}
+    assert split_cats(["Черныш,Яся"]) == {"Черныш", "Яся"}
+    assert split_cats(["Черныш, Яся"]) == {"Черныш", "Яся"}
+    assert split_cats([]) == set()
+
+
+def test_the_refusal_shows_which_names_the_set_has(tmp_path) -> None:
+    """«Нет проходов кота Мурзик» без списка имён отправляет искать не там."""
+    import json
+
+    import pytest
+
+    from scripts.identity_pipeline import PipelineError, restrict_to_cats
+
+    manifest = tmp_path / "dataset.jsonl"
+    manifest.write_text(
+        "\n".join(
+            json.dumps({"label": name}, ensure_ascii=False)
+            for name in ("Черныш", "Яся", "Бася")
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(PipelineError, match="Есть: Бася, Черныш, Яся"):
+        restrict_to_cats(manifest, ["Мурзик"], tmp_path / "out.jsonl")
