@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -81,6 +82,13 @@ FAIL_DISK_USED_PERCENT = 95.0
 # Смотреть надо не на занятость, а на то, **успевает ли уборка**: пока остаётся
 # запас свободного, всё идёт как задумано.
 SELF_MANAGED_DISK_MARKERS = ("frigate",)
+# Копия делается раз в сутки в 05:35. Полутора суток хватает, чтобы не поднимать
+# тревогу из-за узла, выключенного на пару часов утром.
+BACKUP_STALE_AFTER_HOURS = 36.0
+# Сколько места нужно копии на архивном диске. В процентах мерить нельзя: том
+# заполнен на 97% всегда, потому что Frigate держит его полным.
+BACKUP_WARN_FREE_GB = 15.0
+BACKUP_FAIL_FREE_GB = 5.0
 # Часовая запись четырёх камер — около 7 ГБ. Ниже этого уборка уже не успевает
 # за записью, и вот тогда стоит сказать человеку.
 WARN_SELF_MANAGED_FREE_GB = 5.0
@@ -406,6 +414,93 @@ def gpu_occupancy_percent(
     return round(busy_ms / 1000 * 100, 1)
 
 
+def _as_float(value: object) -> float | None:
+    """Число из чужого JSON. `None` — там не число, и врать про него нельзя."""
+    if isinstance(value, int | float) and not isinstance(value, bool):
+        return float(value)
+    return None
+
+
+def backup_checks(status: dict[str, Any] | None, *, now: float | None = None) -> HealthGroup:
+    """Прошла ли последняя резервная копия и не устарела ли она.
+
+    Копия — единственное, что стоит между случайным `rm` и потерянной за месяц
+    разметкой: её нечем восстановить, она сделана руками. При этом ломается она
+    молча — таймер отработал, скрипт упал, никто не заметил.
+
+    Отдельная беда этого узла: архивный диск общий с записями Frigate, а тот
+    держит его полным по устройству. Место кончится не постепенно, а ровно в
+    ночь, когда записей окажется чуть больше обычного, — и «свободно» здесь
+    важно не меньше, чем «прошла».
+    """
+    current = time.time() if now is None else now
+    if not status:
+        return HealthGroup(
+            "Резервная копия",
+            [
+                Check(
+                    "backup_last_run",
+                    "Последняя копия",
+                    f"не старше {BACKUP_STALE_AFTER_HOURS} ч",
+                    "отметок нет",
+                    "unknown",
+                    "Копия ни разу не отчитывалась. Так выглядит и первый запуск, "
+                    "и остановленный таймер `catdoor-backup.timer`.",
+                )
+            ],
+        )
+    finished_at = _as_float(status.get("finished_at"))
+    ok = bool(status.get("ok"))
+    detail = str(status.get("detail") or "")
+    age_hours = None if finished_at is None else (current - finished_at) / 3600
+    if not ok:
+        run_status: Status = "fail"
+        actual = f"не прошла: {detail}" if detail else "не прошла"
+    elif age_hours is None:
+        run_status = "unknown"
+        actual = "время последней копии неизвестно"
+    elif age_hours > BACKUP_STALE_AFTER_HOURS or age_hours < 0:
+        # Отрицательный возраст — часы узла сместились. Свежей такую копию
+        # считать нельзя: она может быть и вчерашней, и месячной давности.
+        run_status = "warn"
+        actual = f"прошла {abs(age_hours):.0f} ч назад"
+    else:
+        run_status = "ok"
+        actual = f"прошла {age_hours:.0f} ч назад: {detail}" if detail else "прошла"
+    checks = [
+        Check(
+            "backup_last_run",
+            "Последняя копия",
+            f"не старше {BACKUP_STALE_AFTER_HOURS} ч",
+            actual,
+            run_status,
+            "Копию делает `catdoor-backup.timer` в 05:35. Восстановить разметку "
+            "нечем: она сделана руками.",
+        )
+    ]
+    free_gb = _as_float(status.get("free_gb"))
+    if free_gb is not None:
+        # Порог не в процентах: архивный диск заполнен на 97% всегда, потому что
+        # Frigate держит его полным. Копии нужны не проценты, а гигабайты.
+        space_status: Status = "ok"
+        if free_gb <= BACKUP_FAIL_FREE_GB:
+            space_status = "fail"
+        elif free_gb <= BACKUP_WARN_FREE_GB:
+            space_status = "warn"
+        checks.append(
+            Check(
+                "backup_free_space",
+                "Место под копию",
+                f"не меньше {BACKUP_WARN_FREE_GB} ГБ",
+                f"{free_gb:.0f} ГБ на архивном диске",
+                space_status,
+                "Диск общий с записями Frigate, а тот держит его полным. "
+                "Место кончится не постепенно, а в одну ночь.",
+            )
+        )
+    return HealthGroup("Резервная копия", checks)
+
+
 def build_health(
     *,
     recorder_status: dict[str, Any],
@@ -414,11 +509,14 @@ def build_health(
     gate_detector_device: str | None,
     metrics: Any,
     gpu_name: str | None,
+    backup_status: dict[str, Any] | None = None,
+    now: float | None = None,
 ) -> list[HealthGroup]:
     return [
         detector_checks(recorder_status, detection_config),
         gate_checks(frigate_stats, gate_detector_device),
         hardware_checks(metrics, gpu_name),
+        backup_checks(backup_status, now=now),
     ]
 
 
