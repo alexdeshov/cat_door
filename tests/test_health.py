@@ -257,3 +257,49 @@ def test_an_unreadable_environment_is_a_refusal_not_an_absence(tmp_path: Path) -
             load_env_file(env)
     finally:
         env.chmod(0o644)
+
+
+def _disk(path: str, total_gb: float, free_gb: float) -> object:
+    from src.common.node_metrics import DiskUsage
+
+    return DiskUsage(path=path, total_gb=total_gb, free_gb=free_gb)
+
+
+def test_a_full_frigate_volume_is_not_an_alarm() -> None:
+    """Frigate не «заполняет диск», а держит его полным.
+
+    Проверено на узле 13 августа при 97% занятости: 6 августа удалено целиком,
+    5 августа стёрто до 150 МБ, 7 августа съедено со 130 до 23 ГБ. Уборка идёт,
+    и полнота здесь — рабочее состояние.
+
+    Общая мерка в 85% дала бы вечное жёлтое, а постоянное предупреждение хуже
+    отсутствующего: оно приучает не смотреть на страницу состояния.
+    """
+    from src.common.health import _disk_check
+
+    check = _disk_check(_disk("/var/lib/frigate/media/recordings", 916.0, 31.1))
+
+    assert check.status == "ok"
+    assert "так и задумано" in check.expected
+
+
+def test_a_frigate_volume_without_free_space_is_an_alarm() -> None:
+    """Смотреть надо не на занятость, а на то, успевает ли уборка."""
+    from src.common.health import _disk_check
+
+    tight = _disk_check(_disk("/var/lib/frigate/media", 916.0, 4.0))
+    empty = _disk_check(_disk("/var/lib/frigate/media", 916.0, 1.0))
+
+    assert tight.status == "warn"
+    assert empty.status == "fail"
+    assert "не успевает" in tight.hint
+
+
+def test_an_ordinary_volume_is_still_measured_the_ordinary_way() -> None:
+    """Послабление касается только тома с собственной уборкой."""
+    from src.common.health import _disk_check
+
+    check = _disk_check(_disk("/var/lib/catdoor", 360.0, 20.0))
+
+    assert check.status == "warn"
+    assert "занято до" in check.expected
