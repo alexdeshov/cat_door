@@ -155,7 +155,7 @@ from src.recorder.preview import local_mjpeg_stream, preview_is_fresh, preview_p
 from src.recorder.status import read_recorder_status, recorder_status_path
 from src.web.door_monitor import DoorMonitor
 from src.web.live_stream import resilient_mjpeg_stream, until
-from training.workflow import create_macbook_export, write_status
+from training.workflow import write_status
 
 LABELS = {"pending", "known_cat", "foreign_cat", "not_visible", "multiple_cats"}
 TRAINING_TARGETS = {"excluded", "macbook", "local"}
@@ -1224,6 +1224,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "prototypes_status": _latest_status(
                     settings.data_dir / "training" / "prototypes"
                 ),
+                "export_status": _latest_status(settings.data_dir / "training" / "exports"),
             },
         )
 
@@ -2094,22 +2095,87 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         session.delete(event)
         session.commit()
 
-    @app.get("/api/training/macbook/export")
-    def export_for_macbook(scope: str = "macbook") -> FileResponse:
+    @app.post("/api/training/macbook/export", status_code=202)
+    def start_macbook_export(scope: str = "macbook") -> dict[str, object]:
+        """Начать сборку набора. Ответ приходит сразу, работа идёт фоном.
+
+        Раньше архив собирался прямо здесь. На живом наборе это разваливалось:
+        11 августа узел резал кадры больше часа, веб-процесс висел на 145%
+        процессора, клиент отвалился по таймауту — и обучение пришлось вести на
+        наборе недельной давности. HTTP не умеет ждать час.
+        """
         if scope not in {"macbook", "all"}:
             raise HTTPException(422, "scope должен быть macbook или all")
+        runs_root = settings.data_dir / "training" / "exports"
+        existing = sorted(runs_root.glob("*/status.json"))
+        if existing:
+            latest = _read_status(existing[-1]) or {}
+            if (
+                latest.get("state") in ACTIVE_TRAINING_STATES
+                and not _expire_stale_training(existing[-1], latest)
+            ):
+                raise HTTPException(409, "Набор уже собирается")
+        run_id = f"{datetime.now(UTC):%Y%m%d-%H%M%S}-{uuid4().hex[:8]}"
+        output_dir = runs_root / run_id
+        status_path = output_dir / "status.json"
+        write_status(status_path, state="starting", message="Запуск отдельного процесса")
+        command = [
+            sys.executable,
+            "-m",
+            "training.export_job",
+            str(settings.resolved_database_path.resolve()),
+            str(settings.data_dir.resolve()),
+            settings.ffmpeg_path,
+            str(output_dir.resolve()),
+            "--detector-model",
+            str(settings.detector_model_path.resolve()),
+            "--detector-device",
+            settings.detector_device,
+            "--scope",
+            scope,
+        ]
         try:
-            archive = create_macbook_export(
-                settings.resolved_database_path,
-                settings.data_dir,
-                settings.ffmpeg_path,
-                settings.detector_model_path,
-                settings.detector_device,
-                DetectionConfig.from_settings(settings),
-                scope=scope,
-            )
-        except (OSError, RuntimeError, ValueError) as exc:
-            raise HTTPException(422, str(exc)) from exc
+            with (output_dir / "export.log").open("ab") as log:
+                process = spawn_detached(
+                    command,
+                    cwd=Path.cwd(),
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                )
+        except OSError as exc:
+            write_status(status_path, state="failed", message="Не удалось запустить Python")
+            raise HTTPException(500, "Не удалось запустить сборку набора") from exc
+        write_status(
+            status_path,
+            state="starting",
+            message="Запуск отдельного процесса",
+            pid=process.pid,
+        )
+        return {"run_id": run_id, "pid": process.pid, "state": "starting"}
+
+    @app.get("/api/training/macbook/export/status")
+    def macbook_export_status() -> dict[str, object]:
+        latest = _latest_status(settings.data_dir / "training" / "exports")
+        if latest is None:
+            return {"state": "idle", "message": "Набор ещё не собирался"}
+        return latest
+
+    @app.get("/api/training/macbook/export")
+    def export_for_macbook() -> FileResponse:
+        """Отдать собранный архив. Сборкой этот маршрут больше не занимается.
+
+        Пока набор не собран, честнее ответить отказом с внятной причиной, чем
+        начать часовую работу в ответ на запрос файла.
+        """
+        latest = _latest_status(settings.data_dir / "training" / "exports") or {}
+        if latest.get("state") in ACTIVE_TRAINING_STATES:
+            raise HTTPException(409, "Набор ещё собирается — дождитесь окончания")
+        raw_archive = latest.get("archive")
+        if not isinstance(raw_archive, str):
+            raise HTTPException(404, "Набор не собран: сначала запустите сборку")
+        archive = Path(raw_archive)
+        if not archive.is_file():
+            raise HTTPException(404, "Архив набора не найден — соберите заново")
         return FileResponse(
             archive,
             media_type="application/zip",

@@ -372,7 +372,11 @@
   </div>
   <div class="panel-body">
     <div class="controls">
-      <a class="button" href="/api/training/macbook/export">Скачать набор для MacBook</a>
+      <button id="build-export" type="button">Собрать набор для MacBook</button>
+      <a class="button" href="/api/training/macbook/export">Скачать собранный</a>
+      <span id="export-status" class="muted data" style="font-size: 12px">
+        {{ export_status.message if export_status else "Набор ещё не собирался" }}
+      </span>
       <button id="start-local-training" type="button"
         {{ "disabled" if local_status and local_status.state in ["starting", "preparing", "training"] }}>
         Запустить короткий эксперимент здесь

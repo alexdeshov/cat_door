@@ -1,4 +1,5 @@
 import json
+import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -878,30 +879,73 @@ def test_rejects_unknown_training_target(runtime_path: Path, monkeypatch) -> Non
     assert response.status_code == 422
 
 
-def test_macbook_export_download(runtime_path: Path, monkeypatch) -> None:
+def test_the_export_is_built_by_a_separate_process(runtime_path: Path, monkeypatch) -> None:
+    """Сборка набора — час работы, и в обработчике запроса ей не место.
+
+    11 августа она собиралась прямо здесь: узел резал кадры больше часа,
+    веб-процесс висел на 145% процессора, клиент отвалился по таймауту — и
+    обучение пришлось вести на наборе недельной давности.
+    """
     client = make_client(runtime_path, monkeypatch)
+    spawned: list[list[str]] = []
+
+    def fake_spawn(command, **_kwargs):
+        spawned.append(list(command))
+        return SimpleNamespace(pid=4242)
+
+    monkeypatch.setattr("src.web.app.spawn_detached", fake_spawn)
+
+    answer = client.post("/api/training/macbook/export")
+
+    assert answer.status_code == 202
+    assert answer.json()["pid"] == 4242
+    assert "training.export_job" in spawned[0]
+    assert "--scope" in spawned[0] and "macbook" in spawned[0]
+
+
+def test_the_export_download_waits_for_the_build(runtime_path: Path, monkeypatch) -> None:
+    """Пока набор не собран, запрос файла не должен начинать часовую работу."""
+    from training.workflow import write_status
+
+    client = make_client(runtime_path, monkeypatch)
+    runs = runtime_path / "training" / "exports"
+
+    missing = client.get("/api/training/macbook/export")
+    write_status(runs / "20260813-000000-a" / "status.json", state="preparing", pid=os.getpid())
+    building = client.get("/api/training/macbook/export")
+
     archive = runtime_path / "exports" / "dataset.zip"
-    archive.parent.mkdir(parents=True)
+    archive.parent.mkdir(parents=True, exist_ok=True)
     archive.write_bytes(b"zip")
-    seen_scopes: list[str] = []
+    write_status(
+        runs / "20260813-000000-a" / "status.json",
+        state="completed",
+        archive=str(archive),
+    )
+    ready = client.get("/api/training/macbook/export")
 
-    def fake_export(*_args, scope="macbook"):
-        seen_scopes.append(scope)
-        return archive
+    assert missing.status_code == 404
+    assert building.status_code == 409
+    assert ready.status_code == 200
+    assert ready.content == b"zip"
 
-    monkeypatch.setattr("src.web.app.create_macbook_export", fake_export)
 
-    response = client.get("/api/training/macbook/export")
+def test_a_second_build_does_not_start_while_one_runs(runtime_path: Path, monkeypatch) -> None:
+    """Две сборки разом — это два часа процессора и два архива, из которых
+    нужен один."""
+    from training.workflow import write_status
 
-    assert response.status_code == 200
-    assert response.content == b"zip"
-    assert seen_scopes == ["macbook"]
+    client = make_client(runtime_path, monkeypatch)
+    monkeypatch.setattr("src.web.app.spawn_detached", lambda *a, **k: SimpleNamespace(pid=1))
+    write_status(
+        runtime_path / "training" / "exports" / "20260813-000000-a" / "status.json",
+        state="preparing",
+        pid=os.getpid(),
+    )
 
-    assert client.get("/api/training/macbook/export?scope=all").status_code == 200
-    assert seen_scopes == ["macbook", "all"]
-
-    # Опечатка в scope — отказ, а не молчаливый экспорт не того набора.
-    assert client.get("/api/training/macbook/export?scope=everything").status_code == 422
+    assert client.post("/api/training/macbook/export").status_code == 409
+    # Опечатка в scope — отказ, а не молчаливая сборка не того набора.
+    assert client.post("/api/training/macbook/export?scope=everything").status_code == 422
 
 
 def test_start_local_training_is_detached(runtime_path: Path, monkeypatch) -> None:
