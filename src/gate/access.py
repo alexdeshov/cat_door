@@ -566,10 +566,23 @@ def record_passes(
                 record.decision,
             )
             stored.decision = record.decision
-            stored.reason = record.reason
-            stored.factors_json = record.factors_json
             stored.pulse_ms = record.pulse_ms
             stored.modbus_ok = record.modbus_ok
+            changed = True
+        if record.reason != stored.reason or record.factors_json != stored.factors_json:
+            # Причина обновляется **отдельно от решения**, и это не педантизм.
+            #
+            # 13 августа в журнале вышла карточка «Нина … Лицо не узнано»: имя
+            # в заголовке есть, а причина уверяет, что лица не узнали. Первый
+            # опрос видел человека без имени и отказал с «Лицо не узнано»;
+            # через секунду приехало имя, и отказ стал «Нина не в списке» — но
+            # код решения в обоих случаях один и тот же, `denied_not_allowed`,
+            # поэтому ветка выше не срабатывала и причина оставалась прежней.
+            #
+            # Из двух записей о разном одна оставалась вчерашней, и разобрать
+            # отказ по такой строке нельзя: она противоречит сама себе.
+            stored.reason = record.reason
+            stored.factors_json = record.factors_json
             changed = True
         if record.pulses > (stored.pulses or 0):
             # Второй импульс по тому же событию: решение не изменилось, оно и

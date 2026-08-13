@@ -1300,3 +1300,61 @@ def test_a_clock_behind_the_event_never_opens_the_gate() -> None:
     assert opener.calls == []
     assert executed[0].decision == "denied_stale"
     assert "часы узла позади" in (executed[0].reason or "")
+
+
+def test_the_reason_catches_up_with_the_name(runtime_path: Path) -> None:
+    """13 августа журнал выдал «Нина … Лицо не узнано» — одна строка о разном.
+
+    Первый опрос видит человека без имени и отказывает с «Лицо не узнано».
+    Через секунду приезжает имя, и отказ становится «Нина не в списке». Код
+    решения в обоих случаях один — `denied_not_allowed`, — поэтому причина
+    обновляться обязана отдельно от него.
+    """
+    factory = _session(runtime_path)
+    nameless = _record(decision="denied_not_allowed", reason="Лицо не узнано")
+
+    with factory() as session:
+        record_passes(session, [nameless])
+        session.commit()
+    with factory() as session:
+        refined = record_passes(
+            session,
+            [
+                replace(
+                    nameless,
+                    person_name="Нина",
+                    score=0.93,
+                    reason="Нина не в списке разрешённых",
+                )
+            ],
+        )
+        session.commit()
+    with factory() as session:
+        row = session.query(GatePass).one()
+
+    assert refined == (0, 1)
+    assert row.person_name == "Нина"
+    assert row.reason == "Нина не в списке разрешённых"
+
+
+def test_a_row_with_a_pulse_behind_it_keeps_its_reason(runtime_path: Path) -> None:
+    """За «открыл» стоит ушедший импульс, и переоценка его не переписывает."""
+    factory = _session(runtime_path)
+    opened = _record(
+        decision="opened", person_name="Алексей", reason="Алексей: открыто по лицу. Импульс"
+    )
+
+    with factory() as session:
+        record_passes(session, [opened])
+        session.commit()
+    with factory() as session:
+        record_passes(
+            session,
+            [replace(opened, decision=DECISION_DRY_RUN, reason="открыл бы")],
+        )
+        session.commit()
+    with factory() as session:
+        row = session.query(GatePass).one()
+
+    assert row.decision == "opened"
+    assert "открыто по лицу" in (row.reason or "")
