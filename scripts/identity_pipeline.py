@@ -45,6 +45,11 @@ ACTIVE_EXPORT_STATES = {"starting", "preparing", "training"}
 # Два часа: живой набор режется около часа, и запас нужен на рост разметки.
 EXPORT_WAIT_SECONDS = 7200.0
 EXPORT_POLL_SECONDS = 30.0
+# Сколько готовый набор считается свежим. Шесть часов — это «собран сегодня и
+# с тех пор разметка почти не менялась»; за большее время владелец успевает
+# разметить заметную порцию проходов, и брать старый набор значило бы молча
+# выбросить его работу.
+EXPORT_REUSE_HOURS = 6.0
 
 
 class PipelineError(RuntimeError):
@@ -71,7 +76,7 @@ def _ask(url: str, *, method: str = "GET", timeout: float = 30.0) -> dict[str, o
     return payload if isinstance(payload, dict) else {}
 
 
-def fetch(root: Path, admin: str, scope: str = "macbook") -> Path:
+def fetch(root: Path, admin: str, scope: str = "macbook", *, rebuild: bool = False) -> Path:
     """Забрать с узла свежий экспорт размеченных проходов.
 
     Сборка идёт на узле отдельным процессом, а здесь мы её запускаем и ждём.
@@ -80,12 +85,19 @@ def fetch(root: Path, admin: str, scope: str = "macbook") -> Path:
     Ожидание опросом переживает и час, и разрыв связи: состояние лежит на узле.
     """
     base = admin.rstrip("/")
-    running = _ask(f"{base}/api/training/macbook/export/status")
-    if running.get("state") not in ACTIVE_EXPORT_STATES:
+    status = _ask(f"{base}/api/training/macbook/export/status")
+    state = status.get("state")
+    if state in ACTIVE_EXPORT_STATES:
+        print("Сборка уже идёт на узле — жду её")
+    elif not rebuild and _is_fresh_export(status):
+        # Готовый набор уже есть. Собирать его заново — это полтора часа
+        # процессора ради того же самого: 13 августа так и вышло, конвейер
+        # запустил вторую сборку поверх законченной десятью минутами раньше.
+        print(f"Беру готовый набор: {status.get('message', '')}")
+        return _download(root, base)
+    else:
         started = _ask(f"{base}/api/training/macbook/export?scope={scope}", method="POST")
         print(f"Сборка набора запущена на узле: {started.get('run_id', '?')}")
-    else:
-        print("Сборка уже идёт на узле — жду её")
     deadline = time.monotonic() + EXPORT_WAIT_SECONDS
     while True:
         status = _ask(f"{base}/api/training/macbook/export/status")
@@ -100,12 +112,38 @@ def fetch(root: Path, admin: str, scope: str = "macbook") -> Path:
         print(f"  {status.get('message', state)} …", flush=True)
         time.sleep(EXPORT_POLL_SECONDS)
 
+    return _download(root, base)
+
+
+def _is_fresh_export(status: dict[str, object]) -> bool:
+    """Годится ли уже собранный набор.
+
+    Разметка пополняется каждый день, и вчерашний набор — это вчерашняя работа
+    владельца, выброшенная молча. Поэтому у готового набора есть срок годности,
+    а не просто «есть или нет».
+    """
+    if status.get("state") != "completed":
+        return False
+    raw = status.get("updated_at")
+    if not isinstance(raw, str):
+        return False
+    try:
+        finished = datetime.fromisoformat(raw)
+    except ValueError:
+        return False
+    if finished.tzinfo is None:
+        finished = finished.replace(tzinfo=UTC)
+    age_hours = (datetime.now(UTC) - finished).total_seconds() / 3600
+    return 0 <= age_hours <= EXPORT_REUSE_HOURS
+
+
+def _download(root: Path, base: str) -> Path:
     stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
     incoming = root / "incoming"
     incoming.mkdir(parents=True, exist_ok=True)
     archive = incoming / f"macbook-{stamp}.zip"
     url = f"{base}/api/training/macbook/export"
-    print(f"Забираю готовый набор: {url}")
+    print(f"Забираю набор: {url}")
     try:
         with urllib.request.urlopen(url, timeout=1800) as response:
             archive.write_bytes(response.read())
@@ -447,6 +485,15 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--rebuild-export",
+        action="store_true",
+        help=(
+            f"собрать набор заново, даже если готовый моложе "
+            f"{EXPORT_REUSE_HOURS:.0f} ч. Нужно, когда разметку правили "
+            "только что и она обязана попасть в обучение"
+        ),
+    )
+    parser.add_argument(
         "--cats",
         nargs="+",
         default=(),
@@ -481,7 +528,7 @@ def main() -> None:
     try:
         dataset = args.root / "datasets" / "export"
         if args.stage in ("fetch", "all"):
-            dataset = fetch(args.root, args.admin, args.scope)
+            dataset = fetch(args.root, args.admin, args.scope, rebuild=args.rebuild_export)
         report = read_report(dataset)
         describe(report)
 

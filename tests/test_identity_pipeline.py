@@ -48,3 +48,45 @@ def test_unknown_target_cat_is_a_loud_refusal(tmp_path: Path) -> None:
 
     with pytest.raises(PipelineError, match="Мурзик"):
         restrict_to_cats(source, ["Мурзик"], tmp_path / "restricted.jsonl")
+
+
+def test_a_ready_export_is_taken_instead_of_rebuilt() -> None:
+    """13 августа конвейер запустил вторую сборку поверх законченной.
+
+    Полтора часа процессора ради того же самого набора — и полтора часа
+    ожидания у владельца, который уже видел «Набор собран».
+    """
+    from datetime import UTC, datetime
+
+    from scripts.identity_pipeline import _is_fresh_export
+
+    just_now = datetime.now(UTC).isoformat()
+
+    assert _is_fresh_export({"state": "completed", "updated_at": just_now})
+
+
+def test_a_stale_export_is_rebuilt() -> None:
+    """Вчерашний набор — это вчерашняя разметка, выброшенная молча."""
+    from datetime import UTC, datetime, timedelta
+
+    from scripts.identity_pipeline import _is_fresh_export
+
+    yesterday = (datetime.now(UTC) - timedelta(hours=30)).isoformat()
+
+    assert not _is_fresh_export({"state": "completed", "updated_at": yesterday})
+
+
+def test_an_unfinished_export_is_never_reused() -> None:
+    """Незаконченная сборка — это отсутствие набора, а не набор."""
+    from datetime import UTC, datetime
+
+    from scripts.identity_pipeline import _is_fresh_export
+
+    now = datetime.now(UTC).isoformat()
+
+    assert not _is_fresh_export({"state": "preparing", "updated_at": now})
+    assert not _is_fresh_export({"state": "failed", "updated_at": now})
+    assert not _is_fresh_export({})
+    # Часы узла могли уйти вперёд: набор «из будущего» свежим не считаем.
+    ahead = datetime.now(UTC).replace(year=datetime.now(UTC).year + 1).isoformat()
+    assert not _is_fresh_export({"state": "completed", "updated_at": ahead})
