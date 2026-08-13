@@ -1066,3 +1066,29 @@ details.folded > summary:focus-visible {
 }
 .data-table td.data { font-size: 12.5px; }
 .scroll-x { overflow-x: auto; }
+
+/* ── Поправки для узкой рейки ───────────────────────────────────────
+ * Карточки .pass рассчитаны на широкую ленту: две колонки от 200px. В рейке
+ * шириной 340px вторая колонка вылезала за край карточки и текст резался.
+ * Здесь всё складывается в одну колонку. */
+.work-rail .pass {
+  grid-template-columns: 1fr;
+  gap: 10px;
+  padding: 12px 14px;
+}
+.work-rail .pass > * { min-width: 0; }
+
+/* Сегмент из трёх режимов не помещается в рейку одной строкой: «открывать»
+ * сползал кривой второй строкой с пустым углом. Разрешаем перенос честно —
+ * кнопки делят ширину, перенос выглядит как две ровные строки. */
+.work-rail .segmented {
+  display: flex;
+  flex-wrap: wrap;
+  justify-self: stretch;
+}
+.work-rail .segmented button {
+  flex: 1 1 auto;
+  border-top: 1px solid var(--line-strong);
+  margin-top: -1px;
+  white-space: nowrap;
+}
