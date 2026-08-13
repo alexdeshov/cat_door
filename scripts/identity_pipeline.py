@@ -208,6 +208,20 @@ def usable_for_production(report: dict[str, object]) -> bool:
     return len(home) >= MIN_CATS and all(count >= MIN_EVENTS_PER_CAT for count in home.values())
 
 
+def split_cats(cats: Sequence[str]) -> set[str]:
+    """Имена котов из аргументов, хоть через пробел, хоть через запятую.
+
+    `--cats Черныш Яся` и `--cats Черныш,Яся` человек пишет с одинаковой
+    уверенностью, и разбираться, какая форма верна, ему незачем: 13 августа
+    запятая стоила прогона, который отказал со словами «в наборе нет проходов
+    котов: Черныш,Яся» — рядом с отчётом, где Черныша 142 прохода.
+    """
+    names = set()
+    for value in cats:
+        names.update(part.strip() for part in value.split(",") if part.strip())
+    return names
+
+
 def restrict_to_cats(source: Path, cats: Sequence[str], destination: Path) -> None:
     """Оставить классами только целевых котов, остальных — в отрицательные.
 
@@ -216,15 +230,21 @@ def restrict_to_cats(source: Path, cats: Sequence[str], destination: Path) -> No
     Первый прогон на шести классах, где у четырёх было по 10–18 проходов,
     дал 69% принятых чужих: крошечные классы не учат, а размывают.
     """
-    targets = set(cats)
-    unknown = targets - {
+    targets = split_cats(cats)
+    present = {
         json.loads(line)["label"]
         for line in source.read_text(encoding="utf-8").splitlines()
         if line.strip()
     }
+    unknown = targets - present
     if unknown:
+        # Имена набора — в тексте отказа. Без них человек видит «нет проходов
+        # котов: Черныш» рядом с отчётом, где Черныша 142 прохода, и ищет
+        # ошибку не там: 13 августа причиной была запятая вместо пробела.
+        known = sorted(present - REJECT_LABELS - {FOREIGN_LABEL})
         raise PipelineError(
-            f"в наборе нет проходов котов: {', '.join(sorted(unknown))}"
+            f"в наборе нет проходов котов: {', '.join(sorted(unknown))}. "
+            f"Есть: {', '.join(known) if known else 'ни одного имени'}"
         )
     lines = []
     for line in source.read_text(encoding="utf-8").splitlines():
