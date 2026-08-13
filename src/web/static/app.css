@@ -992,3 +992,77 @@ body:not(.previews-on) .preview-queued { display: none; }
   .health-title { grid-column: 1 / -1; }
   .health-expected::before { content: "эталон: "; }
 }
+
+/* ── Рабочее поле: лента + приборная рейка ──────────────────────────
+ * Пультовая метафора, доведённая до конца: слева скроллится лента событий,
+ * справа — липкая рейка с тем, что должно быть под рукой всегда. На узком
+ * экране рейка встаёт первой: кнопка дверцы важнее ленты. */
+.work {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 340px;
+  gap: var(--gap);
+  align-items: start;
+}
+.work-feed { min-width: 0; }
+.work-rail {
+  position: sticky;
+  top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap);
+  min-width: 0;
+}
+.work-rail .panel { margin: 0; }
+.work-rail .camera-pair { grid-template-columns: 1fr; }
+@media (max-width: 960px) {
+  .work { grid-template-columns: 1fr; }
+  .work-rail { position: static; order: -1; }
+}
+
+/* ── Складная панель настроек ───────────────────────────────────────
+ * Свёрнутая панель не прячет знание — она показывает главное его число в
+ * строке заголовка. Родные details, без джаваскрипта. */
+details.folded { margin-top: 12px; }
+details.folded > summary {
+  list-style: none;
+  cursor: pointer;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 13.5px;
+  font-weight: 600;
+  padding: 8px 0;
+  border-top: 1px solid var(--line);
+}
+details.folded > summary::-webkit-details-marker { display: none; }
+details.folded > summary::before {
+  content: "▸";
+  color: var(--text-faint);
+  font-size: 11px;
+}
+details[open].folded > summary::before { content: "▾"; }
+details.folded > summary .state-line {
+  margin-left: auto;
+  font-weight: 400;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+details.folded > summary:focus-visible {
+  outline: 2px solid var(--signal);
+  outline-offset: 2px;
+}
+
+/* ── Таблицы фактов на странице моделей ────────────────────────────── */
+.data-table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
+.data-table th,
+.data-table td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--line); }
+.data-table th {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-faint);
+  font-weight: 600;
+}
+.data-table td.data { font-size: 12.5px; }
+.scroll-x { overflow-x: auto; }
