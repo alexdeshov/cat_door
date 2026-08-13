@@ -2527,17 +2527,23 @@ def test_a_gate_snapshot_stays_inside_the_data_directory(
     assert client.get("/gate/passes/9999/snapshot").status_code == 404
 
 
-def test_the_gate_tab_still_says_mechanics_are_not_controlled(
+def test_the_gate_tab_tells_the_truth_about_the_latch(
     runtime_path: Path,
     monkeypatch,
 ) -> None:
-    """Журнал не даёт права на замок, и страница не должна намекать обратное."""
+    """Строка «механика: не управляется» была правдой до 2026-08-11 и сторожила
+    границу разрешений. Теперь механика управляется, и страница обязана
+    показывать фактический режим, а не успокаивать. Умолчание — «выключено»:
+    свежая установка не открывает калитку никому.
+    """
     client = make_client(runtime_path, monkeypatch)
     _gate_pass(runtime_path, frigate_event_id="a")
 
     page = client.get("/gate")
 
-    assert "не управляется" in page.text
+    assert "не управляется" not in page.text
+    assert "открытие по лицу" in page.text
+    assert "выключено" in page.text
 
 
 def test_the_gate_tab_offers_all_three_modes(runtime_path: Path, monkeypatch) -> None:
