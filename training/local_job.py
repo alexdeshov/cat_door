@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import tempfile
 import traceback
 from collections import defaultdict
 from pathlib import Path
@@ -119,6 +120,16 @@ def run_job(
     # юните). Кеш направляется в каталог данных: он у службы точно писуемый, и
     # скачивание случается один раз, а не на каждый прогон.
     os.environ.setdefault("TORCH_HOME", str(data_dir / "training" / "torch-cache"))
+    # Временные файлы — тоже в каталог данных, и это не причуда. У веб-службы
+    # `PrivateTmp=true`: её /tmp — приватное пространство имён, и ребёнок его
+    # наследует. `KillMode=process` спасает прогон от перезапуска админки, но
+    # приватный /tmp умирает вместе со старым процессом службы — и 13 августа
+    # прогон, переживший три перезапуска, упал через два часа обучения на
+    # первом же tempfile в приёмке: «No usable temporary directory found».
+    scratch = data_dir / "training" / "tmp"
+    scratch.mkdir(parents=True, exist_ok=True)
+    os.environ["TMPDIR"] = str(scratch)
+    tempfile.tempdir = None  # заставить tempfile перечитать TMPDIR
     heartbeat = StatusHeartbeat(status_path)
     heartbeat.start()
     try:
