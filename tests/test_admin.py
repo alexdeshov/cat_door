@@ -956,7 +956,9 @@ def test_start_local_training_is_detached(runtime_path: Path, monkeypatch) -> No
     assert 'id="training-report-warnings"' in page.text
 
     class FakeProcess:
-        pid = 4321
+        # Живой номер: статус проверяет, что процесс существует, и мёртвый
+        # сразу читался бы как оборванный.
+        pid = os.getpid()
 
     monkeypatch.setattr(
         "src.web.app.subprocess.Popen",
@@ -966,7 +968,7 @@ def test_start_local_training_is_detached(runtime_path: Path, monkeypatch) -> No
     response = client.post("/api/training/local/start")
 
     assert response.status_code == 202
-    assert response.json()["pid"] == 4321
+    assert response.json()["pid"] == os.getpid()
     status = client.get("/api/training/local/status")
     assert status.json()["state"] == "starting"
 
@@ -3363,3 +3365,51 @@ def test_an_export_whose_archive_was_swept_is_not_offered(
 
     assert "ready" not in status
     assert client.get("/api/training/macbook/export").status_code == 404
+
+
+def test_the_training_panel_shows_models_and_dynamics(runtime_path: Path, monkeypatch) -> None:
+    """Динамика — по строкам прогонов, и обе формы отчётов выглядят одинаково.
+
+    Пересчёт эталонов пишет доли recognised/false_accepts, приёмка обучения —
+    false_reject_rate/false_accept_rate. Смысл один: узнано своих / пущено
+    чужих.
+    """
+    from training.workflow import write_status
+
+    client = make_client(runtime_path, monkeypatch)
+    write_status(
+        runtime_path / "training" / "prototypes" / "20260812-000000-a" / "status.json",
+        state="completed",
+        report={
+            "views": {
+                "face": {
+                    "before": {"recognised": 0.715, "false_accepts": 0.071},
+                    "after": {"recognised": 0.436, "false_accepts": 0.007},
+                    "applied": False,
+                }
+            }
+        },
+    )
+    write_status(
+        runtime_path / "training" / "local" / "20260813-000000-b" / "status.json",
+        state="completed",
+        views={
+            "face": {
+                "new": {"false_reject_rate": 0.39, "false_accept_rate": 0.01},
+                "installed": {"false_reject_rate": 0.336, "false_accept_rate": 0.103},
+                "better": True,
+            }
+        },
+    )
+
+    page = client.get("/")
+
+    assert "Динамика" in page.text
+    assert "Пересчёт эталонов" in page.text
+    assert "Обучение на узле" in page.text
+    # Обе формы приведены к процентам «узнано / пущено».
+    assert "71.5%" in page.text
+    assert "61.0% / 1.0%" in page.text
+    assert "лучше" in page.text
+    # Сторож против сравнения строк между собой.
+    assert "экзамены разные" in page.text

@@ -384,7 +384,7 @@
       </span>
       <button id="start-local-training" type="button"
         {{ "disabled" if local_status and local_status.state in ["starting", "preparing", "training"] }}>
-        Запустить короткий эксперимент здесь
+        Обучить на узле
       </button>
       <span id="training-status" class="muted">
         {% if local_status %}{{ local_status.message }}{% else %}Ещё не запускалось{% endif %}
@@ -395,9 +395,78 @@
     <div id="training-report-details" class="muted data" style="font-size: 13px"></div>
     <div id="training-report-warnings" class="stack"></div>
     <p class="muted" style="font-size: 13px">
-      {{ local_training_epochs }} короткие эпохи на CPU — это проверка конвейера,
-      а не модель для решений о двери.
+      «Обучить на узле» — полный цикл без макбука: набор по всей разметке,
+      пространство эмбеддингов ({{ local_training_epochs }} эпох на процессоре —
+      это часы), приёмка. Каких котов учить, узел решает по стоящей модели, а её
+      саму сдаёт тому же экзамену, что и новую, — цифры двух разных экзаменов
+      несравнимы. Готовая модель <strong>не применяется сама</strong>: прогон
+      оставляет пакет и сравнение, менять или нет — решение владельца.
     </p>
+
+    <h3 style="margin: 16px 0 8px; font-size: 15px">Что стоит сейчас</h3>
+    <table class="data" style="font-size: 13px">
+      <thead>
+        <tr><th>ракурс</th><th>вид</th><th>вход</th><th>порог</th><th>коты</th><th>файл от</th></tr>
+      </thead>
+      <tbody>
+        {% for model in installed_models %}
+          <tr>
+            <td>{{ model.role }}</td>
+            {% if model.present %}
+              <td>{{ "эмбеддинги" if model.kind == "embedding" else "классификатор" }}</td>
+              <td>{{ model.image_size }}</td>
+              <td class="data">{{ model.threshold }}</td>
+              <td>{{ model.labels | join(", ") }}</td>
+              <td>{{ model.installed_at | local_time }}</td>
+            {% else %}
+              <td colspan="5" class="muted">модель не установлена</td>
+            {% endif %}
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <p class="muted" style="font-size: 13px">
+      Порог — рабочая точка, а не свойство модели: правится в метаданных рядом с
+      моделью без переобучения. Правила честного сравнения и вся история —
+      <code>docs/model-benchmarks.md</code>.
+    </p>
+
+    {% if training_history %}
+      <h3 style="margin: 16px 0 8px; font-size: 15px">Динамика</h3>
+      <table class="data" style="font-size: 13px">
+        <thead>
+          <tr><th>когда</th><th>что</th><th>дверца</th><th>подход</th></tr>
+        </thead>
+        <tbody>
+          {% for row in training_history %}
+            <tr>
+              <td class="data">{{ row.at[:16] | replace("T", " ") if row.at else "—" }}</td>
+              <td>{{ row.title }}</td>
+              {% for role in ("face", "side") %}
+                <td>
+                  {% set view = row.views.get(role) %}
+                  {% if view and view.new and view.installed %}
+                    {# Каждая строка — один экзамен: новая и стоящая модель на
+                       одних и тех же отложенных кропах. #}
+                    {{ view.new.recognised }}% / {{ view.new.false_accepts }}%
+                    <span class="muted">(было {{ view.installed.recognised }}% /
+                      {{ view.installed.false_accepts }}%)</span>
+                    {{ "✓ лучше" if view.better }}
+                  {% else %}
+                    <span class="muted">—</span>
+                  {% endif %}
+                </td>
+              {% endfor %}
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      <p class="muted" style="font-size: 13px">
+        В клетках: узнано своих / пущено чужих — новая модель, в скобках стоящая
+        на том же наборе. Сравнивать строки между собой нельзя: наборы растут и
+        экзамены разные.
+      </p>
+    {% endif %}
   </div>
 </section>
 
