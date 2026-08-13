@@ -190,7 +190,15 @@ def describe(report: dict[str, object]) -> None:
     excluded = crops.get("excluded_no_confident_box", 0) if isinstance(crops, dict) else 0
     total = included + excluded
     share = f"{included / total:.0%}" if total else "—"
+    crowded = crops.get("excluded_two_cats", 0) if isinstance(crops, dict) else 0
     print(f"\nКропов: {included} из {total} кадров ({share} с уверенной рамкой кота)")
+    if crowded:
+        # Отдельной строкой, а не в общей куче отброшенных: кадр без кота —
+        # шум съёмки, а кадр с двумя котами — повод пересмотреть проход.
+        print(
+            f"Кадров с двумя котами отброшено: {crowded} — "
+            "имя у прохода одно, а котов в кадре несколько"
+        )
     print(f"Проходов: {report.get('events')}; по именам: {report.get('events_per_label')}")
     for warning in report.get("warnings", []) or []:
         print(f"  ! {warning}")
