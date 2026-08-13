@@ -7,6 +7,7 @@ are asserted here instead.
 
 import configparser
 import stat
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -87,6 +88,36 @@ def test_service_never_stops_retrying(name: str) -> None:
     assert int(service["RestartMaxDelaySec"]) == 1800
     assert "StartLimitBurst" not in service
     assert int(unit["Unit"]["StartLimitIntervalSec"]) == 0
+
+
+def test_every_unit_is_copied_by_the_installer() -> None:
+    """Юнит, не попавший в установщик, обновляется только руками.
+
+    Так уже было с примирителем контура калитки: он жил отдельной ручной
+    установкой, и правки его юнита молча не доезжали на узел.
+    """
+    installer = (INSTALL_DIR / "install.sh").read_text(encoding="utf-8")
+    missing = [
+        path.name
+        for path in sorted(INSTALL_DIR.glob("catdoor-*.*"))
+        if path.suffix in {".service", ".path", ".timer"} and path.name not in installer
+    ]
+
+    assert missing == []
+
+
+def test_the_gate_journal_needs_no_token_to_be_enabled() -> None:
+    """Журнал проходов включается безусловно, в отличие от уведомлений.
+
+    Уведомлениям нужен бот, и без токена служба падала бы каждые пять секунд.
+    Журналу не нужно ничего: он читает ленту Frigate и пишет свою таблицу.
+    """
+    installer = (INSTALL_DIR / "install.sh").read_text(encoding="utf-8")
+
+    assert "systemctl enable catdoor-gate-access.service" in installer
+    assert "-m src.gate.access" in (
+        (INSTALL_DIR / "catdoor-gate-access.service").read_text(encoding="utf-8")
+    )
 
 
 def test_installer_is_executable() -> None:
@@ -178,6 +209,7 @@ DATA_UNITS = (
     "catdoor-recorder.service",
     "catdoor-web.service",
     "catdoor-gate-notify.service",
+    "catdoor-gate-access.service",
     "catdoor-gate-sync.service",
     "catdoor-backup.service",
 )
@@ -204,3 +236,78 @@ def test_unit_waits_for_the_data_volume(name: str) -> None:
     )
     assert line is not None, f"{name} не ждёт своего тома"
     assert "/var/lib/catdoor" in line
+
+
+def test_the_mqtt_script_is_runnable_and_idempotent() -> None:
+    """Скрипт запускают руками на узле, и синтаксическая ошибка выяснится там.
+
+    Заодно проверяется главное свойство: повторный запуск не должен добавлять
+    сервис в compose второй раз и плодить дубли настроек в окружении.
+    """
+    script = INSTALL_DIR / "enable-mqtt.sh"
+    text = script.read_text(encoding="utf-8")
+
+    assert script.stat().st_mode & stat.S_IXUSR
+    subprocess.run(["bash", "-n", str(script)], check=True)
+    # Проверки «уже сделано» до каждого изменяющего действия.
+    assert 'grep -qE \'^\\s{2}mqtt:\' "$COMPOSE_FILE"' in text
+    assert 'sed -i "/^${1}=/d" "$CATDOOR_ENV"' in text
+
+
+def test_the_mqtt_script_never_restarts_frigate_silently() -> None:
+    """Перезапуск Frigate прерывает запись обоих контуров.
+
+    Такое не делается молча внутри скрипта, который человек запускает ради
+    брокера: сначала вопрос, потом действие.
+    """
+    text = (INSTALL_DIR / "enable-mqtt.sh").read_text(encoding="utf-8")
+    restart = text.index('systemctl restart "$FRIGATE_UNIT"')
+    question = text.index("Перезапустить Frigate сейчас?")
+
+    assert question < restart
+    # Брокер поднимается по имени сервиса, а не всем compose разом: иначе
+    # Frigate перезапустился бы заодно.
+    assert "up -d mqtt" in text
+
+
+def test_the_broker_listens_only_on_loopback() -> None:
+    """Наружу брокер не смотрит, поэтому и живёт без паролей.
+
+    Если порт когда-нибудь опубликуют шире, пароли становятся обязательными в
+    тот же день — и тест это заметит.
+    """
+    text = (INSTALL_DIR / "enable-mqtt.sh").read_text(encoding="utf-8")
+
+    assert '"127.0.0.1:1883:1883"' in text
+    assert '"1883:1883"' not in text.replace('"127.0.0.1:1883:1883"', "")
+
+
+def test_the_mqtt_script_waits_for_the_config_to_actually_change() -> None:
+    """«Служба отработала» и «настройка доехала» — разные утверждения.
+
+    2026-08-12 скрипт прочитал конфигурацию через две секунды после запуска
+    примирителя, а пересборка заняла четырнадцать, — и показал человеку
+    «enabled: false», хотя всё сработало. Примиритель к тому же ходит по
+    собственному таймеру раз в две минуты, и наш запуск может слиться с уже
+    идущим.
+    """
+    text = (INSTALL_DIR / "enable-mqtt.sh").read_text(encoding="utf-8")
+
+    assert "systemctl is-active --quiet catdoor-gate-sync.service || break" in text
+    # Проверка по самому файлу, а не только по состоянию юнита.
+    assert "enabled: ${1}" in text
+    assert '"$FRIGATE_CONFIG"' in text
+    # Отказ примирителя больше не проглатывается молча.
+    assert "|| true" not in text
+
+
+def test_the_web_unit_lets_its_long_jobs_finish() -> None:
+    """Пересчёт эталонов и офлайн-замер живут отдельными процессами.
+
+    По умолчанию systemd убивает всю контрольную группу службы, детей вместе с
+    родителем: 12 августа перезапуск админки убил часовой пересчёт эталонов
+    через четырнадцать секунд после того, как тот записал очередной шаг.
+    """
+    unit = (Path("install") / "catdoor-web.service").read_text(encoding="utf-8")
+
+    assert "KillMode=process" in unit

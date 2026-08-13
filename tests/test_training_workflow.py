@@ -177,9 +177,10 @@ def test_build_dataset_uses_selected_events_only(runtime_path: Path, monkeypatch
     assert report["detector_crops"] == {
         "included": 2,
         "excluded_no_confident_box": 0,
+        "excluded_two_cats": 0,
         "by_view": {
-            "face": {"included": 1, "excluded_no_confident_box": 0},
-            "side": {"included": 1, "excluded_no_confident_box": 0},
+            "face": {"included": 1, "excluded_no_confident_box": 0, "excluded_two_cats": 0},
+            "side": {"included": 1, "excluded_no_confident_box": 0, "excluded_two_cats": 0},
         },
     }
     assert all(frame.shape == (320, 320, 3) for frame in detector.frames)
@@ -618,3 +619,43 @@ def test_ffprobe_sits_next_to_ffmpeg() -> None:
 
     assert _ffprobe_path("ffmpeg") == "ffprobe"
     assert _ffprobe_path("/usr/bin/ffmpeg") == "/usr/bin/ffprobe"
+
+
+def test_a_frame_with_two_cats_is_dropped_not_guessed(tmp_path: Path) -> None:
+    """Проход подписан одним именем, а котов в кадре двое — который из них чей?
+
+    13 августа так и вышло: у прохода 508, размеченного «Ксюша», нашёлся кроп с
+    похожестью 0.939 на Черныша. Владелец посмотрел и подтвердил — в кадре оба
+    кота сразу. Один такой кроп поднял порог модели выше, чем живут её
+    собственные коты, и модель не прошла приёмку.
+    """
+    import numpy as np
+    from PIL import Image
+
+    from src.inference.cat_detector import CatDetection, CatDetectionResult
+    from training.workflow import crop_extracted_frames
+
+    class TwoCats:
+        input_size = 320
+
+        def detect(self, _frame: object) -> CatDetectionResult:
+            return CatDetectionResult(
+                confidence=0.9,
+                detections=(
+                    CatDetection(confidence=0.9, box=(0.1, 0.1, 0.4, 0.4)),
+                    CatDetection(confidence=0.8, box=(0.6, 0.6, 0.9, 0.9)),
+                ),
+            )
+
+    frame = tmp_path / "frame-0001.jpg"
+    Image.fromarray(np.zeros((320, 320, 3), np.uint8)).save(frame)
+
+    accepted, rejected, crowded = crop_extracted_frames(
+        [frame], TwoCats(), confidence_threshold=0.65, roi=None
+    )
+
+    assert accepted == []
+    assert crowded == 1
+    # Это не «кота не видно»: причины разные и ведут к разным действиям.
+    assert rejected == 0
+    assert not frame.exists()

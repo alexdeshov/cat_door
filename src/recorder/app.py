@@ -28,6 +28,11 @@ from src.common.camera_registry import (
     save_registry,
 )
 from src.common.capture_mode import CaptureMode, capture_mode_path, load_capture_mode
+from src.common.cat_door_config import (
+    CatDoorConfig,
+    cat_door_config_path,
+    load_cat_door_config,
+)
 from src.common.circuits import circuits_path, load_circuits
 from src.common.database import Event, create_session_factory
 from src.common.detection_config import (
@@ -62,6 +67,7 @@ from src.inference.preprocessing import (
     prepare_detector_frame,
 )
 from src.recorder.automatic import AutomaticEventConfig, AutomaticEventMachine
+from src.recorder.cat_door_automation import CatDoorAutomation
 from src.recorder.cleanup import sweep_incomplete_files
 from src.recorder.detection_journal import DetectionJournal
 from src.recorder.events import (
@@ -896,6 +902,12 @@ def monitor_automatic(
         },
     )
     last_config_check_at = 0.0
+    # Автоматика дверцы: решение принимается по живому кадру, потому что
+    # опознание прохода попадает в базу, когда кот уже ушёл. Настройки
+    # перечитываются рядом с настройками детекции — тем же тактом раз в секунду.
+    cat_door_config_file = cat_door_config_path(settings.data_dir)
+    cat_door_settings = load_cat_door_config(cat_door_config_file, CatDoorConfig())
+    cat_door = CatDoorAutomation(settings.data_dir)
     last_mode_check_at = 0.0
     last_lease_check_at = 0.0
     starving_before: set[str] = set()
@@ -972,6 +984,22 @@ def monitor_automatic(
                     stopped_by_operator = True
                     return
             if now - last_config_check_at >= 1 and machine.state.value == "idle":
+                # Эталоны котов могли пересчитать кнопкой в админке. Это не
+                # новая сеть, а новые числа рядом с ней, и ради них
+                # перезапускать recorder незачем: перезапуск оборвал бы проход,
+                # который сейчас пишется.
+                for role, model in identity_models.items():
+                    if model.reload_prototypes_if_changed():
+                        journal.write(
+                            "identity_prototypes_reloaded",
+                            role=role,
+                            labels=model.labels,
+                            threshold=model.threshold,
+                        )
+                updated_cat_door = load_cat_door_config(cat_door_config_file, cat_door_settings)
+                if updated_cat_door != cat_door_settings:
+                    journal.write("cat_door_config_updated", **updated_cat_door.model_dump())
+                    cat_door_settings = updated_cat_door
                 updated_config = load_detection_config(config_path, runtime_config)
                 if updated_config != runtime_config:
                     with config_lock:
@@ -1161,6 +1189,18 @@ def monitor_automatic(
                 active_confidences = dict(confidences)
                 active_identity_scores = {"face": [], "side": []}
                 active_identity_timings = {"face": [], "side": []}
+            # Дверца открывается по коту у самой дверцы, а не по коту в записи.
+            # Смотрим на каждый кадр с опознанием — и на кадры вне прохода тоже:
+            # кот, пришедший поесть и не начавший события, дверцу заслужил так же.
+            if prediction.prediction is not None:
+                cat_door.observe(
+                    name=prediction.prediction.name,
+                    confidence=prediction.prediction.confidence,
+                    role=role,
+                    config=cat_door_settings,
+                )
+            if cat_door.tick(cat_door_settings):
+                journal.write("cat_door_open_requested", role=role)
             if active_started_at is not None and prediction.prediction is not None:
                 candidate_name = (
                     prediction.prediction.candidate_name

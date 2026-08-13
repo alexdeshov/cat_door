@@ -1,0 +1,47 @@
+[Unit]
+Description=CatDoor — журнал проходов калитки
+Documentation=https://github.com/alexdeshov/cat_door/blob/main/docs/gate-access-plan.md
+# Опрашивать Frigate до того, как он поднялся, бессмысленно, но и падать от
+# этого служба не должна: она просто ждёт и спрашивает снова.
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+# Каталог данных лежит на отдельном томе, и systemd сам про него не знает:
+# путь приходит из окружения, а не из юнита. Без этой строки служба стартует
+# раньше монтирования и пишет в пустой каталог под точкой монтирования — а
+# здесь под ним база и снимки проходов.
+RequiresMountsFor=/var/lib/catdoor
+
+[Service]
+Type=notify
+NotifyAccess=main
+# Опрос идёт раз в секунду, но сторож считается не по нему: забор снимка у
+# Frigate стоит до пятнадцати секунд, и пачка событий кормит сторож на каждой
+# строке. Минута оставляет запас на неспешный ответ.
+WatchdogSec=60
+
+User=catdoor
+Group=catdoor
+WorkingDirectory=/opt/catdoor
+EnvironmentFile=/etc/catdoor/catdoor.env
+ExecStart=/opt/catdoor/.venv/bin/python -m src.gate.access
+
+# Та же выдержка, что у остальных служб узла: сдаваться нельзя, но и
+# долбиться каждую секунду незачем.
+Restart=always
+RestartSec=5
+RestartSteps=5
+RestartMaxDelaySec=1800
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+ReadWritePaths=/var/lib/catdoor
+
+[Install]
+WantedBy=multi-user.target

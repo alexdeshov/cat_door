@@ -191,6 +191,17 @@ class Settings(BaseSettings):
     # локальном порту: наружу он не смотрит и пароля не спрашивает. Пустой
     # список камер означает «все», пустой список меток — «любые».
     gate_api_url: str = "http://127.0.0.1:5000"
+    # Брокер MQTT. Адресов два, и это не дублирование: Frigate живёт в
+    # контейнере с мостовой сетью и видит брокер по имени сервиса в compose, а
+    # наши службы работают на самом узле и ходят на опубликованный порт
+    # loopback. Один адрес на двоих означал бы, что кто-то из них не подключится.
+    gate_mqtt_enabled: bool = False
+    # Как брокер зовётся из контейнера Frigate.
+    gate_mqtt_host: str = "mqtt"
+    gate_mqtt_port: int = Field(default=1883, ge=1, le=65535)
+    # Как до брокера дотягиваются службы узла.
+    mqtt_host: str = "127.0.0.1"
+    mqtt_port: int = Field(default=1883, ge=1, le=65535)
     gate_notify_cameras: list[str] = Field(default_factory=list)
     gate_notify_labels: list[str] = Field(default_factory=lambda: ["person"])
     # О своих — с именем, о чужих — отдельным сообщением «неизвестный».
@@ -204,6 +215,12 @@ class Settings(BaseSettings):
     gate_notify_unknown_cooldown_seconds: float = Field(default=600.0, ge=0.0, le=86400.0)
     gate_notify_cooldown_seconds: float = Field(default=120.0, ge=0.0, le=86400.0)
     gate_notify_poll_seconds: float = Field(default=10.0, ge=1.0, le=600.0)
+    # Журнал проходов калитки. Опрос втрое чаще уведомлений: сообщению
+    # безразлично, придёт оно секундой позже, а решению об открытии — нет,
+    # человек за четыре секунды успевает набрать код руками.
+    gate_access_poll_seconds: float = Field(default=1.0, ge=0.5, le=60.0)
+    # Сколько дней хранить строки журнала и снимки к ним. Ноль — не удалять.
+    gate_access_retention_days: int = Field(default=30, ge=0, le=3650)
     local_training_epochs: int = Field(default=2, ge=1, le=100)
     web_host: str = "127.0.0.1"
     web_port: int = Field(default=8080, ge=1, le=65535)

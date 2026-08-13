@@ -73,8 +73,10 @@ def test_config_is_valid_yaml_with_a_camera_per_entry() -> None:
     parsed = yaml.safe_load(build_config(inventory, NodeCircuits(cats=False, gate=True, nvr=True)))
 
     assert set(parsed["cameras"]) == {"gate_1", "yard_cam"}
-    # У калитки один вопрос — кто пришёл; регистратору участка нужны и машины.
-    assert parsed["cameras"]["gate_1"]["objects"]["track"] == ["person"]
+    # У калитки два вопроса: кто пришёл и кто приехал. Машины нужны только
+    # для отчёта, но пока их не было в списке, Frigate не создавал события
+    # и не читал номер, сколько бы хорошо тот ни был виден.
+    assert parsed["cameras"]["gate_1"]["objects"]["track"] == ["person", "car"]
     assert parsed["cameras"]["yard_cam"]["objects"]["track"] == ["person", "car"]
 
 
@@ -422,3 +424,27 @@ def test_a_camera_can_be_forced_to_software_decoding() -> None:
     assert parsed["cameras"]["nvr_2"]["ffmpeg"]["hwaccel_args"] == ""
     assert parsed["cameras"]["cam_3"]["ffmpeg"]["hwaccel_args"] == "preset-intel-qsv-h264"
     assert "hwaccel_args" not in parsed["cameras"]["yard"]["ffmpeg"]
+
+
+def test_mqtt_stays_off_until_a_broker_exists() -> None:
+    """Включённый MQTT без брокера сыпал бы ошибками подключения в лог."""
+    parsed = yaml.safe_load(build_config(registry(), NodeCircuits(gate=True)))
+
+    assert parsed["mqtt"]["enabled"] is False
+    assert "host" not in parsed["mqtt"]
+
+
+def test_the_broker_address_is_the_one_frigate_can_reach() -> None:
+    """Frigate живёт в контейнере, и `127.0.0.1` там — это он сам.
+
+    Брокер поднимается соседним сервисом того же compose, и достучаться до него
+    можно по имени сервиса. Адрес узла (`127.0.0.1`) в конфигурации Frigate
+    означал бы «подключайся к самому себе» — и не подключился бы никто.
+    """
+    parsed = yaml.safe_load(
+        build_config(registry(), NodeCircuits(gate=True), mqtt=("mqtt", 1883))
+    )
+
+    assert parsed["mqtt"]["enabled"] is True
+    assert parsed["mqtt"]["host"] == "mqtt"
+    assert parsed["mqtt"]["port"] == 1883

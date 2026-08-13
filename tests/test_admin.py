@@ -1,6 +1,9 @@
 import json
+import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 from fastapi.testclient import TestClient
 from sqlalchemy import select
@@ -876,30 +879,73 @@ def test_rejects_unknown_training_target(runtime_path: Path, monkeypatch) -> Non
     assert response.status_code == 422
 
 
-def test_macbook_export_download(runtime_path: Path, monkeypatch) -> None:
+def test_the_export_is_built_by_a_separate_process(runtime_path: Path, monkeypatch) -> None:
+    """Сборка набора — час работы, и в обработчике запроса ей не место.
+
+    11 августа она собиралась прямо здесь: узел резал кадры больше часа,
+    веб-процесс висел на 145% процессора, клиент отвалился по таймауту — и
+    обучение пришлось вести на наборе недельной давности.
+    """
     client = make_client(runtime_path, monkeypatch)
+    spawned: list[list[str]] = []
+
+    def fake_spawn(command, **_kwargs):
+        spawned.append(list(command))
+        return SimpleNamespace(pid=4242)
+
+    monkeypatch.setattr("src.web.app.spawn_detached", fake_spawn)
+
+    answer = client.post("/api/training/macbook/export")
+
+    assert answer.status_code == 202
+    assert answer.json()["pid"] == 4242
+    assert "training.export_job" in spawned[0]
+    assert "--scope" in spawned[0] and "macbook" in spawned[0]
+
+
+def test_the_export_download_waits_for_the_build(runtime_path: Path, monkeypatch) -> None:
+    """Пока набор не собран, запрос файла не должен начинать часовую работу."""
+    from training.workflow import write_status
+
+    client = make_client(runtime_path, monkeypatch)
+    runs = runtime_path / "training" / "exports"
+
+    missing = client.get("/api/training/macbook/export")
+    write_status(runs / "20260813-000000-a" / "status.json", state="preparing", pid=os.getpid())
+    building = client.get("/api/training/macbook/export")
+
     archive = runtime_path / "exports" / "dataset.zip"
-    archive.parent.mkdir(parents=True)
+    archive.parent.mkdir(parents=True, exist_ok=True)
     archive.write_bytes(b"zip")
-    seen_scopes: list[str] = []
+    write_status(
+        runs / "20260813-000000-a" / "status.json",
+        state="completed",
+        archive=str(archive),
+    )
+    ready = client.get("/api/training/macbook/export")
 
-    def fake_export(*_args, scope="macbook"):
-        seen_scopes.append(scope)
-        return archive
+    assert missing.status_code == 404
+    assert building.status_code == 409
+    assert ready.status_code == 200
+    assert ready.content == b"zip"
 
-    monkeypatch.setattr("src.web.app.create_macbook_export", fake_export)
 
-    response = client.get("/api/training/macbook/export")
+def test_a_second_build_does_not_start_while_one_runs(runtime_path: Path, monkeypatch) -> None:
+    """Две сборки разом — это два часа процессора и два архива, из которых
+    нужен один."""
+    from training.workflow import write_status
 
-    assert response.status_code == 200
-    assert response.content == b"zip"
-    assert seen_scopes == ["macbook"]
+    client = make_client(runtime_path, monkeypatch)
+    monkeypatch.setattr("src.web.app.spawn_detached", lambda *a, **k: SimpleNamespace(pid=1))
+    write_status(
+        runtime_path / "training" / "exports" / "20260813-000000-a" / "status.json",
+        state="preparing",
+        pid=os.getpid(),
+    )
 
-    assert client.get("/api/training/macbook/export?scope=all").status_code == 200
-    assert seen_scopes == ["macbook", "all"]
-
-    # Опечатка в scope — отказ, а не молчаливый экспорт не того набора.
-    assert client.get("/api/training/macbook/export?scope=everything").status_code == 422
+    assert client.post("/api/training/macbook/export").status_code == 409
+    # Опечатка в scope — отказ, а не молчаливая сборка не того набора.
+    assert client.post("/api/training/macbook/export?scope=everything").status_code == 422
 
 
 def test_start_local_training_is_detached(runtime_path: Path, monkeypatch) -> None:
@@ -2335,3 +2381,985 @@ def test_pass_videos_do_not_preload(runtime_path: Path, monkeypatch) -> None:
     assert 'preload="none"' in page.text
     assert 'preload="metadata"' not in page.text
     assert "/poster" in page.text
+
+
+def _gate_pass(runtime_path: Path, **overrides) -> int:
+    """Строка журнала калитки прямо в базе: пишет её отдельная служба."""
+    from src.common.database import GatePass
+
+    values: dict[str, object] = {
+        "frigate_event_id": "1786171119.126838-b1jywn",
+        "created_at": datetime.now(UTC),
+        "camera": "gate",
+        "label": "person",
+        "person_name": None,
+        "plate": None,
+        "score": None,
+        "zone": None,
+        "decision": "denied_mode_off",
+        "reason": "Автооткрытие выключено",
+        "snapshot_path": None,
+    }
+    values.update(overrides)
+    factory = create_session_factory(runtime_path / "test.sqlite3")
+    with factory() as session:
+        stored = GatePass(**values)
+        session.add(stored)
+        session.commit()
+        return stored.id
+
+
+def test_gate_tab_shows_the_journal_of_passes(runtime_path: Path, monkeypatch) -> None:
+    """Журнал живёт на вкладке калитки, а не отдельной страницей."""
+    client = make_client(runtime_path, monkeypatch)
+    _gate_pass(runtime_path, frigate_event_id="a", person_name="Алексей", score=0.94)
+    _gate_pass(runtime_path, frigate_event_id="b")
+
+    page = client.get("/gate")
+
+    assert page.status_code == 200
+    assert "Журнал проходов" in page.text
+    assert "Алексей" in page.text
+    assert "неизвестный" in page.text
+    assert "автооткрытие выключено" in page.text
+
+
+def test_the_journal_says_it_is_empty_rather_than_showing_nothing(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    """Пустой список и «журнал пуст» — разные сообщения для человека."""
+    client = make_client(runtime_path, monkeypatch)
+
+    page = client.get("/gate")
+
+    assert "Журнал пуст" in page.text
+
+
+def test_gate_counters_count_the_whole_base_not_the_page(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    client = make_client(runtime_path, monkeypatch)
+    for number in range(12):
+        _gate_pass(
+            runtime_path,
+            frigate_event_id=f"e{number}",
+            person_name="Алексей" if number % 2 else None,
+        )
+
+    page = client.get("/gate")
+
+    assert '<span class="tally-value">12</span>' in page.text
+    assert '<span class="tally-value">6</span>' in page.text
+    assert "1 из 2" in page.text
+
+
+def test_the_journal_filters_by_person_and_by_day(runtime_path: Path, monkeypatch) -> None:
+    """Фильтр «за день» человек задаёт по своим часам, а база живёт в UTC.
+
+    Полночь в Москве наступает на три часа раньше: без пересчёта в «сегодня»
+    попадали бы три часа вчерашней ночи.
+    """
+    client = make_client(runtime_path, monkeypatch)
+    today = datetime.now(ZoneInfo("Europe/Moscow"))
+    _gate_pass(
+        runtime_path,
+        frigate_event_id="today",
+        person_name="Алексей",
+        created_at=today.astimezone(UTC),
+    )
+    _gate_pass(
+        runtime_path,
+        frigate_event_id="old",
+        person_name="Марина",
+        created_at=(today - timedelta(days=3)).astimezone(UTC),
+    )
+
+    by_name = client.get("/gate?name=Марина")
+    by_day = client.get(f"/gate?day={today.strftime('%Y-%m-%d')}")
+
+    assert "Марина" in by_name.text
+    assert by_name.text.count("Алексей") == 1  # только чип фильтра
+    assert "Алексей" in by_day.text
+    assert by_day.text.count("Марина") == 1
+
+
+def test_an_unreadable_day_filter_falls_back_to_everything(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    """Сохранённая ссылка с мусором в параметре не должна отдавать ошибку."""
+    client = make_client(runtime_path, monkeypatch)
+    _gate_pass(runtime_path, frigate_event_id="a", person_name="Алексей")
+
+    page = client.get("/gate?day=позавчера&who=выдумка")
+
+    assert page.status_code == 200
+    assert "Алексей" in page.text
+
+
+def test_a_gate_snapshot_stays_inside_the_data_directory(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    """Путь приходит из базы, а её пишет служба по чужому идентификатору."""
+    client = make_client(runtime_path, monkeypatch)
+    inside = _gate_pass(
+        runtime_path,
+        frigate_event_id="a",
+        snapshot_path="runtime/gate-passes/a.jpg",
+    )
+    outside = _gate_pass(
+        runtime_path,
+        frigate_event_id="b",
+        snapshot_path="../../etc/passwd",
+    )
+    snapshot = runtime_path / "runtime" / "gate-passes" / "a.jpg"
+    snapshot.parent.mkdir(parents=True, exist_ok=True)
+    snapshot.write_bytes(b"jpeg")
+
+    good = client.get(f"/gate/passes/{inside}/snapshot")
+
+    assert good.status_code == 200
+    assert good.headers["cache-control"] == "public, max-age=31536000, immutable"
+    assert client.get(f"/gate/passes/{outside}/snapshot").status_code == 404
+    assert client.get("/gate/passes/9999/snapshot").status_code == 404
+
+
+def test_the_gate_tab_tells_the_truth_about_the_latch(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    """Строка «механика: не управляется» была правдой до 2026-08-11 и сторожила
+    границу разрешений. Теперь механика управляется, и страница обязана
+    показывать фактический режим, а не успокаивать. Умолчание — «выключено»:
+    свежая установка не открывает калитку никому.
+    """
+    client = make_client(runtime_path, monkeypatch)
+    _gate_pass(runtime_path, frigate_event_id="a")
+
+    page = client.get("/gate")
+
+    assert "не управляется" not in page.text
+    assert "открытие по лицу" in page.text
+    assert "выключено" in page.text
+
+
+def test_the_gate_tab_offers_all_three_modes(runtime_path: Path, monkeypatch) -> None:
+    """Умолчание — «выключено»: свежая установка не открывает калитку никому."""
+    client = make_client(runtime_path, monkeypatch)
+
+    page = client.get("/gate")
+
+    assert "Открытие по лицу" in page.text
+    for mode in ("off", "dry", "on"):
+        assert f'data-mode="{mode}"' in page.text
+    assert client.get("/api/gate/access-settings").json()["mode"] == "off"
+
+
+def test_access_settings_default_to_off(runtime_path: Path, monkeypatch) -> None:
+    client = make_client(runtime_path, monkeypatch)
+
+    settings = client.get("/api/gate/access-settings").json()
+
+    assert settings["mode"] == "off"
+    assert settings["require_second_factor"] is False
+
+
+def test_access_settings_are_saved_for_the_service(runtime_path: Path, monkeypatch) -> None:
+    """Веб пишет файл, служба его читает: механикой админка не распоряжается."""
+    from src.common.gate_access_config import GateAccessConfig, gate_access_config_path
+
+    client = make_client(runtime_path, monkeypatch)
+
+    response = client.put(
+        "/api/gate/access-settings",
+        json={
+            "mode": "dry",
+            "gates": [{"camera": "gate", "relay": 2, "zone": "у калитки"}],
+            "allowed_names": ["Алексей"],
+            "min_score": 0.95,
+        },
+    )
+
+    assert response.status_code == 200
+    stored = GateAccessConfig.model_validate_json(
+        gate_access_config_path(runtime_path).read_text(encoding="utf-8")
+    )
+    assert stored.mode == "dry"
+    assert stored.allowed_names == ["Алексей"]
+    assert stored.min_score == 0.95
+
+
+def test_the_admin_switches_the_mode_and_the_service_reads_it(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    """Переключатель режима — единственное, чем человек включает автооткрытие."""
+    client = make_client(runtime_path, monkeypatch)
+
+    assert client.put("/api/gate/access-settings", json={"mode": "on"}).status_code == 200
+    assert client.get("/api/gate/access-settings").json()["mode"] == "on"
+
+
+def test_a_typo_in_the_mode_is_refused(runtime_path: Path, monkeypatch) -> None:
+    """Опечатка не должна тихо превратиться во что-нибудь работающее."""
+    client = make_client(runtime_path, monkeypatch)
+
+    response = client.put("/api/gate/access-settings", json={"mode": "открывать"})
+
+    assert response.status_code == 422
+    assert client.get("/api/gate/access-settings").json()["mode"] == "off"
+
+
+def test_a_phone_mac_never_leaves_the_node_whole(runtime_path: Path, monkeypatch) -> None:
+    """MAC — персональные данные семьи: наружу выходит только хвост."""
+    client = make_client(runtime_path, monkeypatch)
+
+    client.put(
+        "/api/gate/access-settings",
+        json={
+            "mode": "off",
+            "people": [
+                {"name": "Алексей", "phone_ip": "192.168.2.50", "phone_mac": "aa:bb:cc:dd:ee:ff"}
+            ],
+        },
+    )
+    person = client.get("/api/gate/access-settings").json()["people"][0]
+
+    assert person["phone_mac"] == "··:··:··:··:ee:ff"
+    assert person["has_phone_mac"] is True
+    assert "aa:bb" not in client.get("/gate").text
+
+
+def test_a_missing_mac_means_keep_the_stored_one(runtime_path: Path, monkeypatch) -> None:
+    """Форма не может вернуть то, чего не получала, — и не должна это стирать."""
+    from src.common.gate_access_config import GateAccessConfig, gate_access_config_path
+
+    client = make_client(runtime_path, monkeypatch)
+    client.put(
+        "/api/gate/access-settings",
+        json={"people": [{"name": "Алексей", "phone_mac": "aa:bb:cc:dd:ee:ff"}]},
+    )
+
+    client.put(
+        "/api/gate/access-settings",
+        json={"mode": "dry", "people": [{"name": "Алексей", "phone_ip": "192.168.2.51"}]},
+    )
+
+    stored = GateAccessConfig.model_validate_json(
+        gate_access_config_path(runtime_path).read_text(encoding="utf-8")
+    )
+    assert stored.people[0].phone_mac == "aa:bb:cc:dd:ee:ff"
+    assert stored.people[0].phone_ip == "192.168.2.51"
+
+
+def test_a_broken_mac_is_refused_with_a_readable_reason(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    client = make_client(runtime_path, monkeypatch)
+
+    response = client.put(
+        "/api/gate/access-settings",
+        json={"people": [{"name": "Алексей", "phone_mac": "нет"}]},
+    )
+
+    assert response.status_code == 422
+    assert "MAC" in response.json()["detail"]
+
+
+def test_names_come_from_the_frigate_face_library(runtime_path: Path, monkeypatch) -> None:
+    """Два списка имён разъезжаются и молча перестают совпадать."""
+    monkeypatch.setattr(
+        "src.web.app.frigate_face_names", lambda api_url, **kwargs: ["Алексей", "Марина"]
+    )
+    client = make_client(runtime_path, monkeypatch)
+    client.put("/api/gate/access-settings", json={"allowed_names": ["Алексей"]})
+
+    page = client.get("/gate")
+
+    assert 'data-name="Марина"' in page.text
+    assert 'data-name="Алексей"' in page.text
+
+
+def test_a_name_that_left_the_library_is_shown_not_hidden(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    """Иначе в настройках остаётся правило, которое не сработает никогда."""
+    monkeypatch.setattr("src.web.app.frigate_face_names", lambda api_url, **kwargs: ["Марина"])
+    client = make_client(runtime_path, monkeypatch)
+    client.put("/api/gate/access-settings", json={"allowed_names": ["Алексей"]})
+
+    page = client.get("/gate")
+
+    assert "которых нет в библиотеке лиц" in page.text
+    assert "Алексей" in page.text
+
+
+def test_an_unreachable_face_library_is_not_an_empty_one(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr("src.web.app.frigate_face_names", lambda api_url, **kwargs: None)
+    client = make_client(runtime_path, monkeypatch)
+
+    page = client.get("/gate")
+
+    assert "спросить не удалось" in page.text
+
+
+def test_the_gate_is_saved_under_its_frigate_name(runtime_path: Path, monkeypatch) -> None:
+    """Инвентарь знает камеру как `test-cam`, а Frigate шлёт события от `test_cam`.
+
+    Дефис в имени камеры Frigate недопустим, и генератор конфигурации меняет
+    его на подчёркивание. Сохранив идентификатор инвентаря, панель получила бы
+    настройку, которая никогда не совпадёт с событием, — и каждый проход
+    получал бы «камера не назначена калиткой». Молча.
+    """
+    from src.common.camera_registry import CameraRecord, CameraRegistry
+
+    save_registry(
+        camera_registry_path(runtime_path),
+        CameraRegistry(
+            cameras=[
+                CameraRecord(id="test-cam", title="на калитке", circuit="gate", host="10.0.0.1")
+            ]
+        ),
+    )
+    client = make_client(runtime_path, monkeypatch)
+
+    page = client.get("/gate")
+
+    assert '<option value="test_cam"' in page.text
+    assert '<option value="test-cam"' not in page.text
+
+
+def test_the_admin_asks_the_service_instead_of_writing_to_the_board(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    """У веб-процесса нет и не должно быть прав на механику.
+
+    Он кладёт просьбу файлом, а исполняет её `catdoor-gate-access` — та же
+    схема, что у переключателя контуров с его примирителем.
+    """
+    from src.common.gate_open_request import (
+        OpenResult,
+        load_open_request,
+        open_request_path,
+        open_result_path,
+        save_open_result,
+    )
+
+    client = make_client(runtime_path, monkeypatch)
+    client.put("/api/gate/access-settings", json={"gates": [{"relay": 1}]})
+
+    def answer(seconds: float) -> None:
+        request = load_open_request(open_request_path(runtime_path))
+        assert request is not None
+        save_open_result(
+            open_result_path(runtime_path),
+            OpenResult(
+                id=request.id, ok=True, detail="Импульс 500 мс на канал 1",
+                finished_at=0.0, pulse_ms=500,
+            ),
+        )
+
+    monkeypatch.setattr("src.web.app.sleep", answer)
+
+    response = client.post("/api/gate/open")
+
+    assert response.status_code == 200
+    assert response.json()["pulse_ms"] == 500
+
+
+def test_a_silent_service_is_reported_not_assumed(runtime_path: Path, monkeypatch) -> None:
+    """Сказать «открыл», не дождавшись подтверждения, — та самая ложь.
+
+    Служба смотрит файл раз в секунду; молчание дольше означает, что она не
+    работает, и человеку надо сказать именно это.
+    """
+    client = make_client(runtime_path, monkeypatch)
+    client.put("/api/gate/access-settings", json={"gates": [{"relay": 1}]})
+    monkeypatch.setattr("src.web.app.OPEN_RESULT_TIMEOUT_SECONDS", 0.05)
+
+    response = client.post("/api/gate/open")
+
+    assert response.status_code == 504
+    assert "catdoor-gate-access" in response.json()["detail"]
+
+
+def test_the_old_answer_is_not_taken_for_this_press(runtime_path: Path, monkeypatch) -> None:
+    """Рядом лежит ответ на прошлое нажатие, и он не про эту просьбу."""
+    from src.common.gate_open_request import OpenResult, open_result_path, save_open_result
+
+    client = make_client(runtime_path, monkeypatch)
+    client.put("/api/gate/access-settings", json={"gates": [{"relay": 1}]})
+    save_open_result(
+        open_result_path(runtime_path),
+        OpenResult(id="прошлое", ok=True, detail="Импульс", finished_at=0.0, pulse_ms=500),
+    )
+    monkeypatch.setattr("src.web.app.OPEN_RESULT_TIMEOUT_SECONDS", 0.05)
+
+    response = client.post("/api/gate/open")
+
+    assert response.status_code == 504
+
+
+def test_the_button_needs_a_relay_before_it_opens_anything(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    client = make_client(runtime_path, monkeypatch)
+
+    response = client.post("/api/gate/open")
+
+    assert response.status_code == 422
+    assert "не настроен" in response.json()["detail"]
+    assert "сначала задайте канал реле" in client.get("/gate").text
+
+
+def test_a_refused_pulse_reaches_the_person_who_pressed(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    """Человек у калитки должен узнать, что она не открылась, от админки."""
+    from src.common.gate_open_request import (
+        OpenResult,
+        load_open_request,
+        open_request_path,
+        open_result_path,
+        save_open_result,
+    )
+
+    client = make_client(runtime_path, monkeypatch)
+    client.put("/api/gate/access-settings", json={"gates": [{"relay": 1}]})
+
+    def answer(seconds: float) -> None:
+        request = load_open_request(open_request_path(runtime_path))
+        assert request is not None
+        save_open_result(
+            open_result_path(runtime_path),
+            OpenResult(
+                id=request.id, ok=False, detail="Плата не ответила", finished_at=0.0
+            ),
+        )
+
+    monkeypatch.setattr("src.web.app.sleep", answer)
+
+    response = client.post("/api/gate/open")
+
+    assert response.status_code == 502
+    assert response.json()["detail"] == "Плата не ответила"
+
+
+def test_the_admin_offers_to_remember_cats_without_the_macbook(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    """Пересчёт эталонов — это запоминание, а не обучение, и живёт он на узле."""
+    client = make_client(runtime_path, monkeypatch)
+
+    page = client.get("/")
+
+    assert "Память о котах" in page.text
+    assert 'id="rebuild-prototypes"' in page.text
+    assert client.get("/api/identity/prototypes/status").json()["state"] == "idle"
+
+
+def test_rebuilding_prototypes_needs_a_model(runtime_path: Path, monkeypatch) -> None:
+    """Без модели опознания пересчитывать нечем, и это надо сказать, а не молчать."""
+    client = make_client(runtime_path, monkeypatch)
+
+    response = client.post("/api/identity/prototypes/rebuild")
+
+    assert response.status_code == 422
+    assert "модель опознания" in response.json()["detail"]
+
+
+def test_prototype_rebuild_runs_outside_the_web_process(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    """Перезапуск админки не должен обрывать пересчёт — как и обучение.
+
+    Заодно проверяется, что процессу передана модель своего ракурса: эталоны у
+    ракурсов разные, и чужие означают, что модель не узнаёт никого.
+    """
+    from src.common.settings import Settings
+
+    model = runtime_path / "face-identity.onnx"
+    model.write_bytes(b"synthetic")
+    settings = Settings(
+        data_dir=runtime_path,
+        database_path=runtime_path / "test.sqlite3",
+        identity_face_model_path=model,
+    )
+    started: dict[str, object] = {}
+
+    def fake_spawn(command, **kwargs):
+        started["command"] = command
+        return SimpleNamespace(pid=4242)
+
+    monkeypatch.setattr("src.web.app.spawn_detached", fake_spawn)
+    client = TestClient(create_app(settings))
+
+    response = client.post("/api/identity/prototypes/rebuild")
+
+    assert response.status_code == 202
+    assert response.json()["pid"] == 4242
+    command = started["command"]
+    assert "training.enrolment" in command
+    assert "--face-model" in command
+    assert str(model.resolve()) in command
+
+
+def test_fresh_crops_by_default_and_reuse_on_request(runtime_path: Path, monkeypatch) -> None:
+    """Обычный порядок работы — «разметил и нажал», и кадры нужны свежие.
+
+    Взять кропы прошлого прогона дешевле на три четверти часа, но тогда
+    свежая разметка молча не попадёт в расчёт. Поэтому по умолчанию нарезаем
+    заново, а переиспользование запрашивается явно — оно годится, когда
+    разметка не менялась.
+    """
+    from src.common.settings import Settings
+
+    model = runtime_path / "face-identity.onnx"
+    model.write_bytes(b"synthetic")
+    previous = runtime_path / "training" / "prototypes" / "20260811-100000-aaaa" / "dataset"
+    previous.mkdir(parents=True)
+    (previous / "dataset.jsonl").write_text("{}\n", encoding="utf-8")
+    (previous.parent / "status.json").write_text('{"state": "completed"}', encoding="utf-8")
+    started: dict[str, object] = {}
+
+    def fake_spawn(command, **kwargs):
+        started["command"] = command
+        return SimpleNamespace(pid=1)
+
+    monkeypatch.setattr("src.web.app.spawn_detached", fake_spawn)
+    client = TestClient(
+        create_app(
+            Settings(
+                data_dir=runtime_path,
+                database_path=runtime_path / "test.sqlite3",
+                identity_face_model_path=model,
+            )
+        )
+    )
+
+    first = client.post("/api/identity/prototypes/rebuild?reuse=true")
+    assert first.status_code == 202, first.text
+    reused = started["command"]
+    started.clear()
+    # Первый запуск оставил статус «работает», и второй запрос иначе получил бы
+    # честный отказ «пересчёт уже выполняется».
+    for status in (runtime_path / "training" / "prototypes").glob("*/status.json"):
+        status.write_text('{"state": "completed"}', encoding="utf-8")
+    client.post("/api/identity/prototypes/rebuild")
+    fresh = started["command"]
+
+    assert "--dataset" in reused
+    assert str(previous) in reused
+    assert "--dataset" not in fresh
+
+
+def test_old_crops_are_swept_but_reports_stay(runtime_path: Path) -> None:
+    """Каждый прогон — пара гигабайт кадров, и копиться молча они не должны.
+
+    Отчёты остаются: по ним смотрят, что было. Кропы всегда можно нарезать
+    заново.
+
+    Считаются прогоны **со своими кадрами**: 2026-08-12 уборка отсчитала два
+    последних подряд — прерванный и взявший чужие кропы, — и снесла
+    единственный годный набор, ради которого переиспользование и заводилось.
+    """
+    from training.enrolment import purge_old_runs
+
+    runs = runtime_path / "prototypes"
+    for name in ("20260811-100000", "20260811-110000", "20260811-120000"):
+        (runs / name / "dataset").mkdir(parents=True)
+        (runs / name / "dataset" / "dataset.jsonl").write_text("{}", encoding="utf-8")
+        (runs / name / "status.json").write_text('{"state": "completed"}', encoding="utf-8")
+    # Два прогона без кадров: прерванный и взявший чужие. Окно они не занимают.
+    for name in ("20260811-130000", "20260811-140000"):
+        (runs / name).mkdir(parents=True)
+        (runs / name / "status.json").write_text('{"state": "completed"}', encoding="utf-8")
+
+    removed = purge_old_runs(runs, keep=2)
+
+    assert removed == ["20260811-100000"]
+    assert (runs / "20260811-110000" / "dataset").is_dir()
+    assert not (runs / "20260811-100000" / "dataset").exists()
+    assert (runs / "20260811-100000" / "status.json").is_file()
+    assert (runs / "20260811-120000" / "dataset").is_dir()
+
+
+def test_the_preset_applies_and_rolls_back_in_one_move(runtime_path: Path, monkeypatch) -> None:
+    """Числа пресета подобраны разбором живых проходов, перебирать их незачем.
+
+    Откат должен работать и после перезагрузки узла, поэтому прежние правила
+    хранятся в том же файле настроек, а не в памяти процесса.
+    """
+    from src.common.gate_access_config import GateAccessConfig, gate_access_config_path
+
+    client = make_client(runtime_path, monkeypatch)
+    client.put(
+        "/api/gate/access-settings",
+        json={"movement": {"enabled": False, "return_window_seconds": 5}},
+    )
+
+    applied = client.post("/api/gate/access-settings/preset").json()
+    stored = GateAccessConfig.model_validate_json(
+        gate_access_config_path(runtime_path).read_text(encoding="utf-8")
+    )
+
+    assert applied["movement"]["enabled"] is True
+    assert applied["movement"]["return_window_seconds"] == 30
+    assert applied["preset_applied"] is True
+    assert stored.movement.enabled is True
+
+    back = client.post("/api/gate/access-settings/preset?rollback=true").json()
+
+    assert back["movement"]["enabled"] is False
+    assert back["movement"]["return_window_seconds"] == 5
+    assert back["preset_applied"] is False
+
+
+def test_saving_other_settings_does_not_disturb_the_rules(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    """Панель настроек и переключатель пресета живут рядом и не затирают друг друга."""
+    client = make_client(runtime_path, monkeypatch)
+    client.post("/api/gate/access-settings/preset")
+
+    client.put("/api/gate/access-settings", json={"mode": "dry", "min_score": 0.9})
+    settings = client.get("/api/gate/access-settings").json()
+
+    assert settings["movement"]["enabled"] is True
+    assert settings["preset_applied"] is True
+
+
+def test_the_rules_are_visible_and_switchable_in_the_admin(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    client = make_client(runtime_path, monkeypatch)
+
+    page = client.get("/gate")
+
+    assert "Куда идёт человек" in page.text
+    assert 'id="movement-enabled"' in page.text
+    assert 'id="apply-preset"' in page.text
+    # Откатывать нечего, пока пресет не накатили.
+    assert 'id="rollback-preset" type="button" disabled' in page.text
+
+
+def test_people_and_cars_are_counted_apart(runtime_path: Path, monkeypatch) -> None:
+    """Они отвечают на разные вопросы: «кого пустили» и «кто приезжал».
+
+    Общий счётчик не отвечает ни на один, а машина в списке людей выглядит как
+    сбой распознавания.
+    """
+    client = make_client(runtime_path, monkeypatch)
+    _gate_pass(runtime_path, frigate_event_id="p", label="person", person_name="Алексей")
+    _gate_pass(
+        runtime_path,
+        frigate_event_id="c",
+        label="car",
+        decision="logged",
+        reason="Машина у калитки — только запись",
+        plate="А123ВС",
+    )
+
+    page = client.get("/gate")
+    cars = client.get("/gate?who=cars")
+
+    assert "машин" in page.text
+    assert "А123ВС" in cars.text
+    # В списке людей машины нет.
+    assert "А123ВС" not in client.get("/gate?who=all").text
+
+
+def test_the_cat_door_panel_mirrors_the_gate(runtime_path: Path, monkeypatch) -> None:
+    """Порядок тот же, что у калитки: режим, тестовое открытие, список своих."""
+    client = make_client(runtime_path, monkeypatch)
+
+    page = client.get("/")
+
+    assert "Кошачья дверца" in page.text
+    assert 'id="test-cat-door"' in page.text
+    for mode in ("off", "dry", "on"):
+        assert f'data-mode="{mode}"' in page.text
+    assert client.get("/api/cat-door/settings").json()["mode"] == "off"
+
+
+def test_the_door_starts_locked_for_everyone(runtime_path: Path, monkeypatch) -> None:
+    """Умолчание — не открывать никому, пока человек не выбрал кому."""
+    client = make_client(runtime_path, monkeypatch)
+
+    settings = client.get("/api/cat-door/settings").json()
+
+    assert settings["mode"] == "off"
+    assert settings["allowed_cats"] == []
+    assert settings["relay"] == 2
+
+
+def test_the_latch_may_not_be_held_forever(runtime_path: Path, monkeypatch) -> None:
+    """Защёлка на 12 В кратковременного включения: держать дольше — греть катушку."""
+    client = make_client(runtime_path, monkeypatch)
+
+    response = client.put("/api/cat-door/settings", json={"hold_ms": 60000})
+
+    assert response.status_code == 422
+    assert client.get("/api/cat-door/settings").json()["hold_ms"] == 5000
+
+
+def test_opening_the_door_goes_through_the_service(runtime_path: Path, monkeypatch) -> None:
+    """Веб механикой не распоряжается и здесь: он кладёт просьбу, исполняет служба.
+
+    Плату держит один процесс: шлюз в прозрачном режиме второго соединения
+    может и не принять.
+    """
+    from src.common.gate_open_request import (
+        OpenResult,
+        load_open_request,
+        open_request_path,
+        open_result_path,
+        save_open_result,
+    )
+
+    client = make_client(runtime_path, monkeypatch)
+
+    def answer(seconds: float) -> None:
+        request = load_open_request(open_request_path(runtime_path))
+        assert request is not None
+        assert request.target == "cat_door"
+        save_open_result(
+            open_result_path(runtime_path),
+            OpenResult(id=request.id, ok=True, detail="Дверца открыта", finished_at=0.0,
+                       pulse_ms=5000),
+        )
+
+    monkeypatch.setattr("src.web.app.sleep", answer)
+
+    response = client.post("/api/cat-door/open")
+
+    assert response.status_code == 200
+    assert response.json()["pulse_ms"] == 5000
+
+
+def test_a_busy_service_is_not_called_dead(runtime_path: Path, monkeypatch) -> None:
+    """«Занята» и «не работает» ведут человека к разным действиям.
+
+    2026-08-12 повторное нажатие показывало «служба не ответила, проверьте
+    catdoor-gate-access», хотя служба работала и была занята опросом Frigate.
+    Человек шёл чинить исправное.
+    """
+    from src.common.gate_open_request import heartbeat_path, touch_heartbeat
+
+    client = make_client(runtime_path, monkeypatch)
+    client.put("/api/gate/access-settings", json={"gates": [{"relay": 1}]})
+    monkeypatch.setattr("src.web.app.OPEN_RESULT_TIMEOUT_SECONDS", 0.05)
+    touch_heartbeat(heartbeat_path(runtime_path))
+
+    response = client.post("/api/gate/open")
+
+    assert response.status_code == 503
+    assert "занята" in response.json()["detail"]
+
+
+def test_a_silent_service_is_still_reported_as_silent(runtime_path: Path, monkeypatch) -> None:
+    """Без отметки живости вывод прежний: идти и смотреть службу."""
+    client = make_client(runtime_path, monkeypatch)
+    client.put("/api/gate/access-settings", json={"gates": [{"relay": 1}]})
+    monkeypatch.setattr("src.web.app.OPEN_RESULT_TIMEOUT_SECONDS", 0.05)
+
+    response = client.post("/api/gate/open")
+
+    assert response.status_code == 504
+    assert "catdoor-gate-access" in response.json()["detail"]
+
+
+def test_an_old_heartbeat_does_not_excuse_the_service(runtime_path: Path, monkeypatch) -> None:
+    """Отметка недельной давности — не признак жизни."""
+    from src.common.gate_open_request import heartbeat_path
+
+    client = make_client(runtime_path, monkeypatch)
+    client.put("/api/gate/access-settings", json={"gates": [{"relay": 1}]})
+    monkeypatch.setattr("src.web.app.OPEN_RESULT_TIMEOUT_SECONDS", 0.05)
+    path = heartbeat_path(runtime_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("1000.0", encoding="utf-8")
+
+    response = client.post("/api/gate/open")
+
+    assert response.status_code == 504
+
+
+def test_the_door_panel_says_what_actually_opens_the_latch(
+    runtime_path: Path, monkeypatch
+) -> None:
+    """Настройка, которая ничего не делает, врёт человеку.
+
+    До 13 августа порог, пауза и задержка были заведены под будущую автоматику,
+    и панель честно говорила «пока не действуют». Теперь они работают, и панель
+    обязана сказать главное условие: открывается по коту **у камеры дверцы**.
+    """
+    client = make_client(runtime_path, monkeypatch)
+
+    page = client.get("/")
+
+    assert "пока не действуют" not in page.text
+    assert "на камере\n      дверцы" in page.text or "камере дверцы" in page.text
+    assert "открывает без оглядки на эти настройки" in page.text
+
+
+def test_the_open_delay_is_saved_and_shown(runtime_path: Path, monkeypatch) -> None:
+    """Число подлежит замеру на живых проходах, поэтому его должно быть видно."""
+    client = make_client(runtime_path, monkeypatch)
+
+    saved = client.put("/api/cat-door/settings", json={"open_delay_seconds": 3.5}).json()
+    page = client.get("/")
+
+    assert saved["open_delay_seconds"] == 3.5
+    assert 'id="door-delay"' in page.text
+    assert "ждать после опознания" in page.text
+
+
+def test_the_second_chance_preset_applies_and_rolls_back(runtime_path: Path, monkeypatch) -> None:
+    """Два пресета живут порознь: откат одного не роняет другой."""
+    client = make_client(runtime_path, monkeypatch)
+
+    client.post("/api/gate/access-settings/preset?rollback=false")
+    applied = client.post("/api/gate/access-settings/second-chance-preset?rollback=false").json()
+    rolled = client.post("/api/gate/access-settings/second-chance-preset?rollback=true").json()
+
+    assert applied["second_chance"]["enabled"] is True
+    assert applied["second_chance"]["max_pulses"] == 2
+    assert applied["chance_preset_applied"] is True
+    # Правила движения при этом остались накатанными.
+    assert applied["movement"]["enabled"] is True
+    assert rolled["second_chance"]["enabled"] is False
+    assert rolled["chance_preset_applied"] is False
+    assert rolled["movement"]["enabled"] is True
+
+
+def test_saving_settings_leaves_the_second_chance_alone(runtime_path: Path, monkeypatch) -> None:
+    """Панель настроек и переключатель пресета не должны затирать друг друга."""
+    client = make_client(runtime_path, monkeypatch)
+    client.post("/api/gate/access-settings/second-chance-preset?rollback=false")
+
+    saved = client.put("/api/gate/access-settings", json={"min_score": 0.95}).json()
+
+    assert saved["second_chance"]["enabled"] is True
+    assert saved["chance_preset_applied"] is True
+
+
+def test_a_run_whose_process_died_stops_holding_the_button(runtime_path: Path, monkeypatch) -> None:
+    """12 августа перезапуск админки убил пересчёт эталонов.
+
+    Восемь часов после этого страница показывала «Готовлю кадры размеченных
+    проходов», а кнопка «Запомнить заново» оставалась серой: состояние осталось
+    рабочим, потому что никто не проверял, жив ли процесс.
+    """
+    from training.workflow import write_status
+
+    client = make_client(runtime_path, monkeypatch)
+    status_path = runtime_path / "training" / "prototypes" / "20260812-092900-dead" / "status.json"
+    # Номер, которого заведомо нет: ядро отдаёт номера по кругу, но нулевого
+    # процесса в пользовательском пространстве не бывает.
+    write_status(status_path, state="preparing", message="Готовлю кадры", pid=2**22)
+
+    answer = client.get("/api/identity/prototypes/status").json()
+
+    assert answer["state"] == "failed"
+    assert "оборван" in answer["message"]
+
+
+def test_a_living_run_still_holds_the_button(runtime_path: Path, monkeypatch) -> None:
+    """Живой процесс не должен объявляться мёртвым: это оборвало бы работу."""
+    import os
+
+    from training.workflow import write_status
+
+    client = make_client(runtime_path, monkeypatch)
+    status_path = runtime_path / "training" / "prototypes" / "20260812-100000-live" / "status.json"
+    write_status(status_path, state="preparing", message="Готовлю кадры", pid=os.getpid())
+
+    answer = client.get("/api/identity/prototypes/status").json()
+
+    assert answer["state"] == "preparing"
+
+
+def test_the_status_remembers_whose_process_it_is(tmp_path: Path) -> None:
+    """Без этого оборванный прогон не отличить от идущего."""
+    import os
+
+    from training.workflow import write_status
+
+    path = tmp_path / "status.json"
+    write_status(path, state="preparing", message="Готовлю кадры")
+    own = json.loads(path.read_text(encoding="utf-8"))
+    write_status(path, state="starting", message="Запуск", pid=4242)
+    explicit = json.loads(path.read_text(encoding="utf-8"))
+
+    assert own["pid"] == os.getpid()
+    # Явный номер сильнее: родитель записывает номер ребёнка, а не свой.
+    assert explicit["pid"] == 4242
+
+
+def test_a_ready_export_is_served_while_another_build_runs(
+    runtime_path: Path, monkeypatch
+) -> None:
+    """«Идёт сборка» и «набор уже есть» бывают правдой одновременно.
+
+    13 августа рядом с законченной сборкой шла вторая, и по последнему прогону
+    выходило, что готового набора нет вовсе, — конвейер полтора часа ждал того,
+    что уже лежало на диске.
+    """
+    from training.workflow import write_status
+
+    client = make_client(runtime_path, monkeypatch)
+    runs = runtime_path / "training" / "exports"
+    archive = runtime_path / "exports" / "macbook-first.zip"
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    archive.write_bytes(b"zip")
+    write_status(runs / "20260813-070034-a" / "status.json", state="completed",
+                 archive=str(archive), size_mb=1193.8)
+    write_status(runs / "20260813-084535-b" / "status.json", state="preparing",
+                 pid=os.getpid())
+
+    status = client.get("/api/training/macbook/export/status").json()
+    download = client.get("/api/training/macbook/export")
+
+    assert status["state"] == "preparing"
+    assert status["ready"]["archive"] == "macbook-first.zip"
+    assert download.status_code == 200
+    assert download.content == b"zip"
+
+
+def test_an_export_whose_archive_was_swept_is_not_offered(
+    runtime_path: Path, monkeypatch
+) -> None:
+    """Архивов остаётся три последних, а отчёты живут дольше.
+
+    Отчёт о собранном наборе переживает сам набор, и предлагать по нему файл,
+    которого нет, значит отвечать «скачано» на пустоту.
+    """
+    from training.workflow import write_status
+
+    client = make_client(runtime_path, monkeypatch)
+    write_status(
+        runtime_path / "training" / "exports" / "20260801-000000-old" / "status.json",
+        state="completed",
+        archive=str(runtime_path / "exports" / "macbook-swept.zip"),
+    )
+
+    status = client.get("/api/training/macbook/export/status").json()
+
+    assert "ready" not in status
+    assert client.get("/api/training/macbook/export").status_code == 404

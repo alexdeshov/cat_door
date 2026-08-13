@@ -67,7 +67,7 @@ idle → candidate → active → tail → cooldown → idle
 Классификатор личности не получает квадратный детекторный кадр. Recorder
 пересчитывает наиболее уверенную рамку кошки обратно в координаты исходного
 кадра, расширяет её на 20% с каждой стороны, ограничивает границами изображения
-и передаёт классификатору кроп без letterbox-полей. Если уверенной рамки нет,
+и передаёт модели опознания кроп без letterbox-полей. Если уверенной рамки нет,
 identity пропускается без исключения, а причина `no_confident_box` записывается
 как событие `identity_skipped` в журнал детекции.
 
@@ -90,10 +90,11 @@ RTSP-подключений. Количество открытых вкладо�
 `sample_fps`, ROI, `inference_ms` и `frame_age_ms`; они позволяют отделить
 медленный inference от задержки RTSP/очереди.
 
-Детектор использует SSDLite320 MobileNetV3 Large с весами COCO. Подготовительный
-скрипт `scripts/prepare_cat_detector.py` создаёт локальный
-`models/cat-detector.onnx` и manifest с SHA-256. Каталог `models/` исключён из
-Git.
+Рабочий детектор с 2026-08-10 — `yolo26n-416` на видеоядре (пороги 0.65 обеих
+ролей, `docs/detector-candidates.md`); SSDLite320 MobileNetV3 Large — прежний
+базовый, скрипт `scripts/prepare_cat_detector.py` сохраняется для подготовки
+локального `models/cat-detector.onnx` с manifest и SHA-256. Каталог `models/`
+исключён из Git.
 
 Поддерживаемые форматы кандидатов, их preprocessing и безопасный локальный
 экспорт описаны в `docs/detector-candidates.md`. Замена baseline не выполняется

@@ -251,6 +251,123 @@
   {% for name in known_cat_names %}<option value="{{ name }}">{% endfor %}
 </datalist>
 
+{# Дверца. Порядок тот же, что у калитки, и по той же причине: веб механикой не
+   распоряжается — он кладёт просьбу файлом, исполняет служба. #}
+<section class="panel" id="cat-door">
+  <div class="panel-head">
+    <h2>Кошачья дверца</h2>
+    <span class="muted">реле {{ cat_door.relay }}</span>
+  </div>
+  <div class="panel-body">
+    <div class="segmented" role="group" aria-label="Режим дверцы">
+      <button type="button" class="door-mode" data-mode="off"
+        aria-pressed="{{ 'true' if cat_door.mode == 'off' else 'false' }}">выключено</button>
+      <button type="button" class="door-mode" data-mode="dry"
+        aria-pressed="{{ 'true' if cat_door.mode == 'dry' else 'false' }}">решать и записывать</button>
+      <button type="button" class="door-mode" data-mode="on"
+        aria-pressed="{{ 'true' if cat_door.mode == 'on' else 'false' }}">открывать</button>
+    </div>
+    <p class="muted" style="font-size: 13px">
+      «Решать и записывать» — тот же приём, которым проверялась калитка: система
+      пишет «открыла бы», но защёлку не трогает. Он и здесь себя оправдал:
+      именно в этом режиме собирается статистика ложных опознаний.
+    </p>
+
+    <div class="controls">
+      <button id="test-cat-door" type="button">Открыть дверцу</button>
+      <span id="cat-door-status" class="muted data" style="font-size: 12px"></span>
+    </div>
+    <p class="muted" style="font-size: 13px">
+      Тестовое открытие работает в любом режиме: режимы — про автоматику, а не
+      про человека, нажавшего сам. Каждое срабатывание попадает в уведомления.
+    </p>
+
+    <div class="controls">
+      <label for="door-relay">канал реле</label>
+      <input id="door-relay" type="number" min="1" max="8" value="{{ cat_door.relay }}">
+      <label for="door-hold">держать, мс</label>
+      <input id="door-hold" type="number" min="200" max="15000" step="100"
+        value="{{ cat_door.hold_ms }}">
+      <label for="door-confidence">порог опознания</label>
+      <input id="door-confidence" type="number" min="0" max="1" step="0.01"
+        value="{{ cat_door.min_confidence }}">
+      <label for="door-cooldown">пауза, с</label>
+      <input id="door-cooldown" type="number" min="0" max="3600"
+        value="{{ cat_door.cooldown_seconds }}">
+      <label for="door-delay">ждать после опознания, с</label>
+      <input id="door-delay" type="number" min="0" max="30" step="0.5"
+        value="{{ cat_door.open_delay_seconds }}">
+    </div>
+    <p class="muted" style="font-size: 13px">
+      Защёлка на 12 вольт кратковременного включения: держать её дольше
+      нескольких секунд — греть катушку.
+    </p>
+    <p class="muted" style="font-size: 13px">
+      Дверца открывается, только когда опознанный кот появился <strong>на камере
+      дверцы</strong>. Терраса показывает того же кота, но он там не у дверцы:
+      открыв по ней, мы отпустили бы защёлку неизвестно для кого и на несколько
+      секунд раньше времени.
+    </p>
+    <p class="muted" style="font-size: 13px">
+      Задержка нужна затем, что кот, узнанный на подходе, доходит до дверцы не
+      мгновенно. Открыть сразу значит израсходовать окно удержания вхолостую и
+      запереть её перед носом. Пять секунд взяты со слов владельца и подлежат
+      замеру: к ним добавится собственная задержка распознавания.
+    </p>
+    <p class="muted" style="font-size: 13px">
+      Пустой список своих котов означает «никого» — как и у калитки. Решение
+      принимается по живому кадру: опознание прохода попадает в базу, когда кот
+      уже ушёл. Режим «наблюдение» пишет решения в журнал и защёлку не трогает.
+      Кнопка выше открывает без оглядки на эти настройки — на то она и ручная.
+    </p>
+
+    <div class="filter-chips" id="door-cats" style="margin: 0 0 12px">
+      {% for name in known_cat_names %}
+        <button type="button" data-name="{{ name }}"
+          class="filter-chip door-cat{{ ' filter-chip-active' if name in cat_door.allowed_cats }}"
+          aria-pressed="{{ 'true' if name in cat_door.allowed_cats else 'false' }}">{{ name }}</button>
+      {% endfor %}
+    </div>
+    <div class="controls">
+      <button id="save-cat-door" type="button">Сохранить</button>
+      <span id="cat-door-save-status" class="muted data" style="font-size: 12px"></span>
+    </div>
+  </div>
+</section>
+
+{# Запоминание котов. Не обучение: сеть не меняется, пересчитываются эталоны —
+   средние векторы размеченных кропов. Поэтому это минуты на узле, а не ночь на
+   макбуке, и поэтому новый кот заводится здесь же. #}
+<section class="panel" id="enrolment">
+  <div class="panel-head">
+    <h2>Память о котах</h2>
+    <span class="muted">эталоны считаются на узле</span>
+  </div>
+  <div class="panel-body">
+    <div class="controls">
+      <button id="rebuild-prototypes" type="button">Запомнить заново</button>
+      <span id="prototypes-status" class="muted data" style="font-size: 12px">
+        {{ prototypes_status.message if prototypes_status else "Ещё не пересчитывались" }}
+      </span>
+    </div>
+    <p class="muted" style="font-size: 13px">
+      Кнопка прогоняет размеченные проходы через стоящую модель и пересчитывает
+      эталоны котов, которых модель знает. Сеть при этом не обучается и макбук
+      не нужен. Кадры нарезаются заново — это около часа работы узла, зато
+      свежая разметка попадает в расчёт целиком; детекция при этом не проседает.
+    </p>
+    <p class="muted" style="font-size: 13px">
+      Новые эталоны применяются, только если они не пускают больше чужих, чем
+      прежние. Если стало хуже — остаются старые, и здесь будет сказано почему.
+      Чего пересчёт не умеет: улучшить само зрение и завести кота, которого
+      модель не обучалась различать. Такому коту эталон не помогает — его векторы
+      лежат там же, где у всех чужих, — и в отчёте он будет назван отдельно.
+      Это работа для обучения на макбуке.
+    </p>
+    <div id="prototypes-report" class="muted data" style="font-size: 13px"></div>
+  </div>
+</section>
+
 <section class="panel">
   <div class="panel-head">
     <h2>Обучение</h2>
@@ -260,7 +377,11 @@
   </div>
   <div class="panel-body">
     <div class="controls">
-      <a class="button" href="/api/training/macbook/export">Скачать набор для MacBook</a>
+      <button id="build-export" type="button">Собрать набор для MacBook</button>
+      <a class="button" href="/api/training/macbook/export">Скачать собранный</a>
+      <span id="export-status" class="muted data" style="font-size: 12px">
+        {{ export_status.message if export_status else "Набор ещё не собирался" }}
+      </span>
       <button id="start-local-training" type="button"
         {{ "disabled" if local_status and local_status.state in ["starting", "preparing", "training"] }}>
         Запустить короткий эксперимент здесь
@@ -300,8 +421,8 @@
     </div>
     <p class="muted" style="font-size: 13px">
       Уведомления шлёт recorder при записи прохода. Камера подхода намеренно
-      молчит: там детектор пока не отличает кота от тени, и каждое пятое
-      сообщение было бы ложным.
+      молчит: кот на террасе — ещё не проход, и сообщение о каждом его
+      появлении было бы шумом.
     </p>
   </div>
 </section>
@@ -623,6 +744,136 @@
       : `Не получилось: ${result.detail}`;
     if (response.ok) location.reload();
   });
+
+  // Память о котах: пересчёт эталонов на узле. Опрос статуса — тот же приём,
+  // что у обучения: работа живёт в отдельном процессе и переживает F5.
+  // Дверца: режим, тестовое открытие и список котов.
+  let doorMode = {{ cat_door.mode | tojson }};
+  const doorModes = [...document.querySelectorAll(".door-mode")];
+  const doorCats = [...document.querySelectorAll(".door-cat")];
+
+  doorModes.forEach(choice => choice.addEventListener("click", () => {
+    doorMode = choice.dataset.mode;
+    press(doorModes, button => button.dataset.mode === doorMode);
+    document.querySelector("#cat-door-save-status").textContent = "не сохранено";
+  }));
+
+  doorCats.forEach(chip => chip.addEventListener("click", () => {
+    const pressed = chip.getAttribute("aria-pressed") === "true";
+    chip.setAttribute("aria-pressed", pressed ? "false" : "true");
+    chip.classList.toggle("filter-chip-active", !pressed);
+    document.querySelector("#cat-door-save-status").textContent = "не сохранено";
+  }));
+
+  document.querySelector("#save-cat-door")?.addEventListener("click", async () => {
+    const status = document.querySelector("#cat-door-save-status");
+    status.textContent = "…";
+    status.classList.remove("bad");
+    try {
+      const response = await fetch("/api/cat-door/settings", {
+        method: "PUT",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({
+          mode: doorMode,
+          relay: Number(document.querySelector("#door-relay").value),
+          hold_ms: Number(document.querySelector("#door-hold").value),
+          min_confidence: Number(document.querySelector("#door-confidence").value),
+          cooldown_seconds: Number(document.querySelector("#door-cooldown").value),
+          open_delay_seconds: Number(document.querySelector("#door-delay").value),
+          allowed_cats: doorCats
+            .filter(chip => chip.getAttribute("aria-pressed") === "true")
+            .map(chip => chip.dataset.name)
+        })
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.detail || `ошибка ${response.status}`);
+      status.textContent = "сохранено";
+    } catch (error) {
+      status.textContent = error.message;
+      status.classList.add("bad");
+    }
+  });
+
+  document.querySelector("#test-cat-door")?.addEventListener("click", async event => {
+    const button = event.currentTarget;
+    const status = document.querySelector("#cat-door-status");
+    button.disabled = true;
+    status.textContent = "…";
+    status.classList.remove("bad");
+    try {
+      const response = await fetch("/api/cat-door/open", {method: "POST"});
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.detail || `ошибка ${response.status}`);
+      status.textContent = result.detail || "открыто";
+    } catch (error) {
+      status.textContent = error.message;
+      status.classList.add("bad");
+    } finally {
+      button.disabled = false;
+    }
+  });
+
+  const prototypesButton = document.querySelector("#rebuild-prototypes");
+  const prototypesStatus = document.querySelector("#prototypes-status");
+  const prototypesReport = document.querySelector("#prototypes-report");
+
+  function showPrototypes(status) {
+    if (!status) return;
+    prototypesStatus.textContent = status.message || status.state || "";
+    const busy = ["starting", "preparing", "running"].includes(status.state);
+    prototypesButton.disabled = busy;
+    const report = status.report;
+    if (!report || !report.views) { prototypesReport.textContent = ""; return; }
+    const lines = [];
+    for (const [view, data] of Object.entries(report.views)) {
+      if (data.skipped) { lines.push(`${view}: ${data.skipped}`); continue; }
+      const before = data.before || {}, after = data.after || {};
+      lines.push(
+        `${view}: узнано своих ${after.recognised} (было ${before.recognised}), ` +
+        `чужих пущено ${after.false_accepts} (было ${before.false_accepts}), ` +
+        `порог ${data.threshold}, ${data.applied ? "применено" : "оставлены прежние"}`
+      );
+      const thin = Object.entries(data.too_thin || {});
+      if (thin.length) {
+        lines.push(`  мало кадров: ${thin.map(([n, c]) => `${n} — ${c}`).join(", ")}`);
+      }
+      const unknown = Object.entries(data.unknown_to_model || {});
+      if (unknown.length) {
+        lines.push(
+          `  модель их не различает, нужен полный цикл обучения: ` +
+          unknown.map(([n, c]) => `${n} — ${c} кадров`).join(", ")
+        );
+      }
+    }
+    prototypesReport.textContent = lines.join("\n");
+  }
+
+  async function refreshPrototypes() {
+    try {
+      showPrototypes(await (await fetch("/api/identity/prototypes/status")).json());
+    } catch (error) {
+      prototypesStatus.textContent = error.message;
+    }
+  }
+
+  prototypesButton?.addEventListener("click", async () => {
+    prototypesButton.disabled = true;
+    prototypesStatus.textContent = "…";
+    try {
+      const response = await fetch("/api/identity/prototypes/rebuild", {method: "POST"});
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.detail || `ошибка ${response.status}`);
+      prototypesStatus.textContent = "Считаю эталоны…";
+    } catch (error) {
+      prototypesStatus.textContent = error.message;
+      prototypesButton.disabled = false;
+    }
+  });
+
+  if (prototypesButton) {
+    refreshPrototypes();
+    setInterval(refreshPrototypes, 5000);
+  }
 
   const trainingButton = document.querySelector("#start-local-training");
   trainingButton?.addEventListener("click", async () => {

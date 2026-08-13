@@ -1,6 +1,7 @@
 import json
 import logging
 import math
+import os
 import shutil
 import subprocess
 import threading
@@ -407,7 +408,13 @@ def crop_extracted_frames(
     *,
     confidence_threshold: float,
     roi: DetectorRoi | None,
-) -> tuple[list[Path], int]:
+) -> tuple[list[Path], int, int]:
+    """Кропы, отброшенные без кота и отброшенные с двумя котами.
+
+    Три числа вместо двух: кадр без уверенной рамки — шум съёмки, а кадр с
+    двумя котами — повод пересмотреть проход глазами. Складывать их в одну
+    кучу значит потерять то, что стоит показать человеку.
+    """
     accepted: list[Path] = []
     rejected = 0
     detector_input_size = int(
@@ -418,6 +425,7 @@ def crop_extracted_frames(
     detector_letterbox_alignment = str(
         getattr(detector, "letterbox_alignment", "center")
     )
+    crowded = 0
     for frame_path in frames:
         with Image.open(frame_path) as image:
             frame = np.asarray(image.convert("RGB"), dtype=np.uint8)
@@ -431,6 +439,24 @@ def crop_extracted_frames(
                 detector_letterbox_alignment,
             )
         )
+        confident = [
+            item for item in detection.detections if item.confidence >= confidence_threshold
+        ]
+        if len(confident) > 1:
+            # Два кота в кадре — и мы не знаем, который из них тот, чьё имя
+            # стоит на проходе. Взять самого уверенного значит с изрядной
+            # вероятностью подписать чужого кота чужим именем.
+            #
+            # 13 августа это выяснилось разбором: у прохода 508, размеченного
+            # «Ксюша», нашёлся кроп с похожестью 0.939 на Черныша. Владелец
+            # посмотрел и подтвердил — в кадре оба кота сразу. Один такой кроп
+            # поднял порог модели выше, чем живут её собственные коты, и модель
+            # не прошла приёмку.
+            #
+            # Выбрасываем и считаем: молчаливая потеря кадров хуже явной.
+            frame_path.unlink(missing_ok=True)
+            crowded += 1
+            continue
         crop = crop_strongest_cat(
             frame,
             detection.detections,
@@ -447,7 +473,7 @@ def crop_extracted_frames(
             continue
         Image.fromarray(crop, mode="RGB").save(frame_path, format="JPEG", quality=95)
         accepted.append(frame_path)
-    return accepted, rejected
+    return accepted, rejected, crowded
 
 
 def build_dataset(
@@ -493,11 +519,12 @@ def build_dataset(
     registry = load_registry(camera_registry_path(data_dir))
     items: list[DatasetItem] = []
     crop_by_view: dict[str, dict[str, int]] = {
-        "face": {"included": 0, "excluded_no_confident_box": 0},
-        "side": {"included": 0, "excluded_no_confident_box": 0},
+        "face": {"included": 0, "excluded_no_confident_box": 0, "excluded_two_cats": 0},
+        "side": {"included": 0, "excluded_no_confident_box": 0, "excluded_two_cats": 0},
     }
     crops_included = 0
     crops_rejected = 0
+    crops_crowded = 0
     root = data_dir.resolve()
     for event in events:
         if event.label == "known_cat":
@@ -527,7 +554,7 @@ def build_dataset(
                 rotate_180=view_rotation(registry, view),
             )
             camera_config = getattr(runtime_config, view)
-            cropped_frames, rejected = crop_extracted_frames(
+            cropped_frames, rejected, crowded = crop_extracted_frames(
                 frames,
                 active_detector,
                 confidence_threshold=camera_config.confidence_threshold,
@@ -536,8 +563,10 @@ def build_dataset(
             view_report = crop_by_view[view]
             view_report["included"] += len(cropped_frames)
             view_report["excluded_no_confident_box"] += rejected
+            view_report["excluded_two_cats"] += crowded
             crops_included += len(cropped_frames)
             crops_rejected += rejected
+            crops_crowded += crowded
             for frame in cropped_frames:
                 items.append(
                     DatasetItem(
@@ -552,6 +581,10 @@ def build_dataset(
     crop_report: dict[str, object] = {
         "included": crops_included,
         "excluded_no_confident_box": crops_rejected,
+        # Кадры, где котов было двое. Считаются отдельно: это не шум съёмки, а
+        # проходы, которые стоит пересмотреть глазами — имя у них одно, а котов
+        # в кадре несколько.
+        "excluded_two_cats": crops_crowded,
         "by_view": crop_by_view,
     }
     if not items:
@@ -652,7 +685,12 @@ def create_macbook_export(
 
 def _write_status_unlocked(path: Path, values: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {"updated_at": datetime.now(UTC).isoformat(), **values}
+    # Каждая запись помечается процессом, который её сделал. Иначе оборванный
+    # прогон не отличить от идущего: состояние «готовлю кадры» выглядит
+    # одинаково и через минуту, и через восемь часов после смерти процесса.
+    # Явный `pid` в значениях сильнее: родитель, записавший «запускаюсь»,
+    # ставит туда идентификатор ребёнка, а не свой.
+    payload = {"updated_at": datetime.now(UTC).isoformat(), "pid": os.getpid(), **values}
     temporary = path.with_suffix(".tmp")
     temporary.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2),

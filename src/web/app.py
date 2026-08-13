@@ -16,7 +16,7 @@ from pathlib import Path
 # Под именем `Event` в этом модуле уже живёт строка события базы, а событие
 # потока рядом с ней читалось бы как та же сущность.
 from threading import Event as ThreadEvent
-from time import monotonic
+from time import monotonic, sleep, time
 from typing import Annotated, Literal
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -27,7 +27,7 @@ from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field, ValidationError
-from sqlalchemy import func, select
+from sqlalchemy import ColumnElement, func, select
 from sqlalchemy.orm import Session
 
 from src.common.archive_depth import ArchiveDepth, read_archive_depth
@@ -61,6 +61,12 @@ from src.common.capture_mode import (
     load_capture_mode,
     save_capture_mode,
 )
+from src.common.cat_door_config import (
+    CatDoorConfig,
+    cat_door_config_path,
+    load_cat_door_config,
+    save_cat_door_config,
+)
 from src.common.circuits import (
     CIRCUIT_TITLES,
     RECORDING_TITLES,
@@ -77,6 +83,7 @@ from src.common.database import (
     EvaluationRun,
     Event,
     EventPrediction,
+    GatePass,
     ModelVersion,
     create_session_factory,
     session_dependency,
@@ -88,8 +95,40 @@ from src.common.detection_config import (
     save_detection_config,
 )
 from src.common.detection_stats import read_detection_stats
-from src.common.frigate_config import RECORDING_RETENTION
-from src.common.gate_service import GateStatus, frigate_stats, gate_status
+from src.common.frigate_config import RECORDING_RETENTION, frigate_camera_name
+from src.common.gate_access_config import (
+    MOVEMENT_PRESET_NAME,
+    SECOND_CHANCE_PRESET_NAME,
+    GateAccessConfig,
+    GateSpec,
+    apply_movement_preset,
+    apply_second_chance_preset,
+    gate_access_config_path,
+    load_gate_access_config,
+    mask_mac,
+    rollback_movement_preset,
+    rollback_second_chance_preset,
+    save_gate_access_config,
+)
+from src.common.gate_open_request import (
+    TARGET_CAT_DOOR,
+    TARGET_GATE,
+    OpenRequest,
+    OpenResult,
+    boot_id,
+    heartbeat_age,
+    heartbeat_path,
+    load_open_result,
+    open_request_path,
+    open_result_path,
+    save_open_request,
+)
+from src.common.gate_service import (
+    GateStatus,
+    frigate_face_names,
+    frigate_stats,
+    gate_status,
+)
 from src.common.health import build_health, gpu_occupancy_percent, overall_status
 from src.common.model_registry import register_model_version
 from src.common.node_metrics import read_node_metrics
@@ -116,7 +155,7 @@ from src.recorder.preview import local_mjpeg_stream, preview_is_fresh, preview_p
 from src.recorder.status import read_recorder_status, recorder_status_path
 from src.web.door_monitor import DoorMonitor
 from src.web.live_stream import resilient_mjpeg_stream, until
-from training.workflow import create_macbook_export, write_status
+from training.workflow import write_status
 
 LABELS = {"pending", "known_cat", "foreign_cat", "not_visible", "multiple_cats"}
 TRAINING_TARGETS = {"excluded", "macbook", "local"}
@@ -135,6 +174,36 @@ LABELED_FILTERS = {
     "nocat": Event.label == "not_visible",
     "multi": Event.label == "multiple_cats",
     "all": Event.label != "pending",
+}
+# Журнал калитки: те же чипы-фильтры, что и у проходов дверцы. «Неузнанные»
+# отдельным ключом не для симметрии — это самая интересная часть журнала: по
+# ней видно, кого система не узнала и почему у калитки набирали код руками.
+# Люди и машины разведены намеренно: в журнале они отвечают на разные вопросы —
+# «кого пустили» и «кто приезжал», — и общий счётчик не отвечает ни на один.
+GATE_PASS_FILTERS = {
+    "all": GatePass.label.is_not("car"),
+    "named": GatePass.person_name.is_not(None),
+    "unknown": (GatePass.person_name.is_(None)) & (GatePass.label.is_not("car")),
+    "cars": GatePass.label == "car",
+}
+# Решения журнала калитки по-русски. Коды заведены все сразу, включая те, что
+# появятся с функцией решения: словарь в шаблоне не должен молча показать
+# английский код в тот день, когда служба научится его писать.
+GATE_PASS_DECISIONS = {
+    "denied_mode_off": "автооткрытие выключено",
+    "dry_run": "открыл бы",
+    "opened": "открыл",
+    "denied_not_allowed": "не в списке",
+    "denied_low_score": "узнан неуверенно",
+    "denied_window": "вне разрешённых часов",
+    "denied_cooldown": "пауза после прошлого",
+    "denied_second_factor": "нет второго фактора",
+    "denied_leaving": "уходит от калитки",
+    "denied_not_approaching": "не идёт к калитке",
+    "denied_movement_unknown": "куда идёт — пока не видно",
+    "denied_stale": "решение опоздало, человек ушёл",
+    "logged": "машина, только запись",
+    "error": "отказ",
 }
 # Состояние службы Frigate показывается в шапке каждой страницы, а узнаётся
 # запуском systemctl. Короткая память избавляет от процесса на отрисовку, не
@@ -159,6 +228,15 @@ HEARTBEAT_STALE_AFTER = timedelta(minutes=10)
 POSTER_WIDTH = 480
 
 
+def backup_status_path(data_dir: Path) -> Path:
+    """Отчёт ночной копии. Пишет его `scripts/backup_to_archive.sh` от root.
+
+    Лежит на внутреннем диске, а не в архиве: чаще всего копия не проходит
+    из-за переполненного архивного диска, и записать отчёт туда было бы некуда.
+    """
+    return data_dir / "runtime" / "backup-status.json"
+
+
 def poster_path(data_dir: Path, event_id: int, view: str) -> Path:
     return data_dir / "runtime" / "posters" / f"{event_id:08d}-{view}.jpg"
 # Подбор пути потока держит запрос открытым, а администратор ждёт ответ
@@ -167,6 +245,7 @@ def poster_path(data_dir: Path, event_id: int, view: str) -> Path:
 DISCOVERY_PROBE_LIMIT = 16
 DISCOVERY_PROBE_SECONDS = 6.0
 INTERRUPTED_MESSAGE = "Прерван без завершения: heartbeat не обновлялся более 10 минут"
+GONE_MESSAGE = "Прогон оборван: процесс не запущен, а состояние осталось рабочим"
 
 
 def _asset_version(path: Path):
@@ -217,6 +296,20 @@ def _notifications_view(settings: Settings) -> dict[str, object]:
 
 def _as_utc(value: datetime) -> datetime:
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
+def local_day_bounds(day: str, timezone: ZoneInfo) -> tuple[datetime, datetime] | None:
+    """Границы местных суток в UTC. `None` — день не разобрался.
+
+    Фильтр «за день» человек задаёт по своим часам, а база живёт в UTC: в
+    Москве полночь наступает на три часа раньше, и без пересчёта в список за
+    сегодня попадали бы три часа вчерашней ночи.
+    """
+    try:
+        start = datetime.strptime(day, "%Y-%m-%d").replace(tzinfo=timezone)
+    except ValueError:
+        return None
+    return (start.astimezone(UTC), (start + timedelta(days=1)).astimezone(UTC))
 
 
 def format_local_time(
@@ -285,14 +378,44 @@ def _expire_stale_evaluations(
     return expired
 
 
+def _process_is_gone(payload: dict[str, object]) -> bool:
+    """Жив ли процесс, записавший это состояние.
+
+    Отвечает «нет» только уверенно. Нет идентификатора — значит запись сделана
+    старой версией, и судить о ней нужно по времени, а не по догадке.
+    """
+    pid = payload.get("pid")
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        # Чужой процесс с этим номером: жив, хоть и не наш.
+        return False
+    return False
+
+
 def _expire_stale_training(
     status_path: Path,
     payload: dict[str, object],
     *,
     now: datetime | None = None,
 ) -> bool:
+    """Пометить брошенный прогон брошенным. `True` — пометили.
+
+    Два признака, и первый важнее. Процесс, которого нет, — это ответ сразу:
+    12 августа перезапуск веб-службы убил пересчёт эталонов, и восемь часов
+    подряд админка показывала «Готовлю кадры размеченных проходов», а кнопка
+    оставалась серой. Второй признак — молчание heartbeat — остаётся для
+    случаев, когда процесс жив, но работать перестал.
+    """
     if payload.get("state") not in ACTIVE_TRAINING_STATES:
         return False
+    if _process_is_gone(payload):
+        write_status(status_path, state="failed", message=GONE_MESSAGE)
+        return True
     try:
         fallback = datetime.fromtimestamp(status_path.stat().st_mtime, tz=UTC)
     except OSError:
@@ -355,6 +478,63 @@ class CircuitsPayload(BaseModel):
     enabled: bool | None = None
     exclusive: bool | None = None
     gate_recording: GateRecording | None = None
+
+
+class CatDoorPayload(BaseModel):
+    """Настройки дверцы из админки. Режим строкой — как у калитки."""
+
+    mode: str = "off"
+    relay: int = 2
+    hold_ms: int = 5000
+    allowed_cats: list[str] = Field(default_factory=list)
+    min_confidence: float = 0.9
+    cooldown_seconds: int = 30
+    open_delay_seconds: float = 5.0
+
+
+class GatePersonPayload(BaseModel):
+    name: str
+    phone_ip: str | None = None
+    # `null` — оставить сохранённый MAC. Наружу он выходит только замаскированным,
+    # и админка физически не может прислать обратно то, чего не получала.
+    phone_mac: str | None = None
+
+
+class MovementRulesPayload(BaseModel):
+    enabled: bool = False
+    approaching_ratio: float = 2.0
+    leaving_ratio: float = 0.5
+    open_when_still: bool = True
+    return_window_seconds: int = 30
+
+
+class SecondChanceRulesPayload(BaseModel):
+    enabled: bool = False
+    max_pulses: int = 2
+    gap_seconds: int = 8
+    require_closed: bool = True
+
+
+class GateAccessPayload(BaseModel):
+    """Настройки автооткрытия из админки.
+
+    Режим приходит строкой, а не перечислением: значение `on` должно отвергаться
+    внятной причиной — «требуется письменное разрешение владельца», — а не
+    списком допустимых вариантов, из которого причина не видна.
+    """
+
+    mode: str = "off"
+    gates: list[GateSpec] = Field(default_factory=list)
+    allowed_names: list[str] = Field(default_factory=list)
+    require_second_factor: bool = False
+    people: list[GatePersonPayload] = Field(default_factory=list)
+    min_score: float = 0.93
+    pulse_ms: int = 500
+    cooldown_seconds: int = 20
+    open_from: str = "07:00"
+    open_to: str = "23:00"
+    movement: MovementRulesPayload | None = None
+    second_chance: SecondChanceRulesPayload | None = None
 
 
 class DiscoveryPayload(BaseModel):
@@ -427,6 +607,117 @@ def _camera_view(camera: CameraRecord) -> dict[str, object]:
         "note": camera.note,
         "configured": bool(camera.rtsp_url()),
     }
+
+
+# Сколько ждать ответа службы на нажатие кнопки. Она смотрит файл раз в
+# секунду; три секунды покрывают опрос, импульс и запись в журнал, и человек у
+# калитки столько ждёт спокойно.
+OPEN_RESULT_TIMEOUT_SECONDS = 5.0
+# Насколько свежей должна быть отметка службы, чтобы считать её живой. Она
+# отмечается пять раз в секунду, так что три — с большим запасом.
+HEARTBEAT_FRESH_SECONDS = 3.0
+OPEN_RESULT_POLL_SECONDS = 0.1
+
+
+def _await_open_result(data_dir: Path, request_id: str) -> OpenResult | None:
+    """Дождаться ответа службы на просьбу. `None` — не дождались.
+
+    Ответ ищется по идентификатору просьбы, а не «по свежести файла»: рядом
+    лежит ответ на прошлое нажатие, и принять его за свой значило бы сказать
+    «открыл» там, где не открыл никто.
+    """
+    path = open_result_path(data_dir)
+    deadline = monotonic() + OPEN_RESULT_TIMEOUT_SECONDS
+    while True:
+        result = load_open_result(path)
+        if result is not None and result.id == request_id:
+            return result
+        if monotonic() >= deadline:
+            return None
+        sleep(OPEN_RESULT_POLL_SECONDS)
+
+
+def _error_messages(exc: ValidationError) -> list[str]:
+    """Только сообщения об ошибках.
+
+    Полный текст pydantic цитирует ещё и значения полей — а среди них MAC
+    телефона, то есть персональные данные, которым в ответе API делать нечего.
+    """
+    return [str(error["msg"]).removeprefix("Value error, ") for error in exc.errors()]
+
+
+def _gate_access_view(config: GateAccessConfig) -> dict[str, object]:
+    """Настройки калитки для API. MAC телефона наружу выходит только хвостом."""
+    return {
+        "mode": config.mode,
+        "gates": [gate.model_dump() for gate in config.gates],
+        "allowed_names": list(config.allowed_names),
+        "require_second_factor": config.require_second_factor,
+        "people": [
+            {
+                "name": person.name,
+                "phone_ip": person.phone_ip,
+                "phone_mac": mask_mac(person.phone_mac),
+                "has_phone_mac": bool(person.phone_mac),
+            }
+            for person in config.people
+        ],
+        "min_score": config.min_score,
+        "pulse_ms": config.pulse_ms,
+        "cooldown_seconds": config.cooldown_seconds,
+        "open_from": config.open_from,
+        "open_to": config.open_to,
+        "movement": config.movement.model_dump(),
+        "second_chance": config.second_chance.model_dump(),
+        # Есть ли к чему возвращаться: кнопка отката без этого бессмысленна.
+        "preset_applied": config.replaced_by_preset is not None,
+        "preset_name": MOVEMENT_PRESET_NAME,
+        "chance_preset_applied": config.replaced_by_chance_preset is not None,
+        "chance_preset_name": SECOND_CHANCE_PRESET_NAME,
+    }
+
+
+def _merge_gate_access(
+    payload: GateAccessPayload, stored: GateAccessConfig
+) -> GateAccessConfig:
+    """Наложить присланное на сохранённое.
+
+    Не присланный MAC означает «оставить как было»: админка получает его
+    замаскированным и вернуть настоящий не может. Пустая строка — это «стереть»,
+    и это разные намерения.
+    """
+    people = []
+    for person in payload.people:
+        known = stored.person(person.name)
+        people.append(
+            {
+                "name": person.name,
+                "phone_ip": (
+                    person.phone_ip
+                    if person.phone_ip is not None
+                    else (known.phone_ip if known else "")
+                ),
+                "phone_mac": (
+                    person.phone_mac
+                    if person.phone_mac is not None
+                    else (known.phone_mac if known else "")
+                ),
+            }
+        )
+    values = payload.model_dump(exclude={"people", "movement", "second_chance"})
+    # Правила движения без них же остаются прежними: панель настроек и
+    # переключатель пресета живут рядом и не должны затирать друг друга.
+    values["movement"] = (
+        payload.movement.model_dump() if payload.movement is not None else stored.movement.model_dump()
+    )
+    values["second_chance"] = (
+        payload.second_chance.model_dump()
+        if payload.second_chance is not None
+        else stored.second_chance.model_dump()
+    )
+    values["replaced_by_preset"] = stored.replaced_by_preset
+    values["replaced_by_chance_preset"] = stored.replaced_by_chance_preset
+    return GateAccessConfig.model_validate({**values, "people": people})
 
 
 def _apply_camera_payload(
@@ -602,6 +893,38 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     def current_circuits() -> NodeCircuits:
         return load_circuits(circuits_path(settings.data_dir))
+
+    def _latest_dataset(runs_root: Path) -> Path | None:
+        """Кропы последнего прогона, если они уцелели."""
+        for status in sorted(runs_root.glob("*/status.json"), reverse=True):
+            dataset = status.parent / "dataset"
+            if (dataset / "dataset.jsonl").is_file():
+                return dataset
+        return None
+
+    def _latest_status(runs_root: Path) -> dict[str, object] | None:
+        """Последнее состояние прогона, с поправкой на оборванные.
+
+        Проверка живучести делается при чтении, а не по расписанию: иначе
+        оборванный прогон держал бы кнопку серой до тех пор, пока кто-нибудь не
+        попробует запустить новый — то есть ровно до того момента, когда
+        пробовать уже незачем.
+        """
+        statuses = sorted(runs_root.glob("*/status.json"))
+        if not statuses:
+            return None
+        payload = _read_status(statuses[-1])
+        if payload is not None and _expire_stale_training(statuses[-1], payload):
+            return _read_status(statuses[-1])
+        return payload
+
+    def current_cat_door() -> CatDoorConfig:
+        return load_cat_door_config(cat_door_config_path(settings.data_dir), CatDoorConfig())
+
+    def current_gate_access() -> GateAccessConfig:
+        return load_gate_access_config(
+            gate_access_config_path(settings.data_dir), GateAccessConfig()
+        )
 
     def current_archive_depth() -> ArchiveDepth:
         _, motion_days = RECORDING_RETENTION.get(
@@ -906,6 +1229,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "stream_version": uuid4().hex,
                 "detection_config": current_detection_config(),
                 "notifications": _notifications_view(settings),
+                "cat_door": current_cat_door().model_dump(),
+                "prototypes_status": _latest_status(
+                    settings.data_dir / "training" / "prototypes"
+                ),
+                "export_status": _latest_status(settings.data_dir / "training" / "exports"),
             },
         )
 
@@ -1210,6 +1538,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             gate_detector_device=settings.gate_detector_device,
             metrics=metrics,
             gpu_name=str(status.get("detector_device_name") or "") or None,
+            backup_status=_read_status(backup_status_path(settings.data_dir)),
         )
         return {
             "status": overall_status(groups),
@@ -1317,9 +1646,83 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return circuits_view(circuits)
 
     @app.get("/gate", response_class=HTMLResponse)
-    def gate_page(request: Request) -> HTMLResponse:
+    def gate_page(
+        request: Request,
+        session: Annotated[Session, Depends(get_session)],
+        gpage: int = 1,
+        who: str = "all",
+        name: str | None = None,
+        day: str | None = None,
+    ) -> HTMLResponse:
         circuits = current_circuits()
         registry = current_registry()
+        access = current_gate_access()
+        # Имена берутся из библиотеки лиц Frigate, а не вводятся руками: два
+        # списка имён разъезжаются и, разъехавшись, молча перестают совпадать.
+        face_library = frigate_face_names(settings.gate_api_url)
+        orphan_names = [
+            name for name in access.allowed_names if face_library and name not in face_library
+        ]
+        timezone = ZoneInfo(settings.display_timezone)
+        midnight = datetime.now(timezone).replace(hour=0, minute=0, second=0, microsecond=0)
+        today = midnight.strftime("%Y-%m-%d")
+        today_bounds = (
+            midnight.astimezone(UTC),
+            (midnight + timedelta(days=1)).astimezone(UTC),
+        )
+        # Счётчики считаются по всей базе, а не по показанной странице: это
+        # ответ на вопрос «сколько людей у калитки», и он не зависит от того,
+        # что сейчас на экране.
+        summary_row = session.execute(
+            select(
+                func.count(GatePass.id).filter(GatePass.label.is_not("car")),
+                func.count(GatePass.id).filter(GatePass.person_name.is_not(None)),
+                func.count(GatePass.id).filter(
+                    (GatePass.person_name.is_(None)) & (GatePass.label.is_not("car"))
+                ),
+                func.count(GatePass.id).filter(
+                    GatePass.created_at >= today_bounds[0],
+                    GatePass.created_at < today_bounds[1],
+                ),
+                func.count(GatePass.id).filter(GatePass.label == "car"),
+            )
+        ).one()
+        person_names = session.scalars(
+            select(GatePass.person_name)
+            .where(GatePass.person_name.is_not(None))
+            .distinct()
+            .order_by(GatePass.person_name)
+        ).all()
+        # Незнакомые значения фильтров молча сбрасываются к умолчанию — так же,
+        # как на вкладке дверцы: сохранённая ссылка не должна отдавать ошибку.
+        if who not in GATE_PASS_FILTERS:
+            who = "all"
+        if name is not None and name not in person_names:
+            name = None
+        bounds = local_day_bounds(day, timezone) if day else None
+        if bounds is None:
+            day = None
+        criteria: list[ColumnElement[bool]] = [
+            GatePass.person_name == name if name is not None else GATE_PASS_FILTERS[who]
+        ]
+        if bounds is not None:
+            criteria.append(GatePass.created_at >= bounds[0])
+            criteria.append(GatePass.created_at < bounds[1])
+        total = session.execute(
+            select(func.count(GatePass.id)).where(*criteria)
+        ).scalar_one()
+        pages = max(1, ceil(total / EVENTS_PER_PAGE))
+        gpage = min(max(gpage, 1), pages)
+        passes = session.scalars(
+            select(GatePass)
+            .where(*criteria)
+            # Тай-брейк по id обязателен: события у калитки приходят пачками и
+            # делят время начала, а при неустойчивом порядке одна и та же
+            # строка прыгала бы между страницами.
+            .order_by(GatePass.created_at.desc(), GatePass.id.desc())
+            .limit(EVENTS_PER_PAGE)
+            .offset((gpage - 1) * EVENTS_PER_PAGE)
+        ).all()
         return templates.TemplateResponse(
             request,
             "gate.html",
@@ -1327,12 +1730,192 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "circuits": circuits_view(circuits),
                 "circuit_titles": CIRCUIT_TITLES,
                 "gate_cameras": [
-                    _camera_view(camera)
+                    # Имя во Frigate — рядом с карточкой камеры намеренно. В
+                    # настройках калитки хранится именно оно: события приходят
+                    # с ним, а не с идентификатором инвентаря, и `test-cam`
+                    # против `test_cam` означал бы «камера не назначена
+                    # калиткой» на каждый проход — молча.
+                    {**_camera_view(camera), "frigate_name": frigate_camera_name(camera.id)}
                     for camera in registry.cameras
                     if camera.circuit == "gate"
                 ],
                 "stream_version": uuid4().hex,
+                "passes": passes,
+                "pass_summary": {
+                    "total": summary_row[0],
+                    "named": summary_row[1],
+                    "unknown": summary_row[2],
+                    "today": summary_row[3],
+                    "cars": summary_row[4],
+                },
+                "pass_page": gpage,
+                "pass_pages": pages,
+                "pass_total": total,
+                "pass_who": who,
+                "pass_name": name,
+                "pass_day": day,
+                "pass_today": today,
+                "person_names": person_names,
+                "pass_decisions": GATE_PASS_DECISIONS,
+                "gate_access": _gate_access_view(access),
+                # `None` — библиотеку спросить не удалось; это не то же самое,
+                # что «лиц не заведено», и страница обязана различать.
+                "face_library": face_library,
+                # Имя, исчезнувшее из библиотеки, показывается отдельно: молча
+                # оставить его в разрешённых значит хранить настройку, которая
+                # никогда не сработает.
+                "orphan_names": orphan_names,
             },
+        )
+
+    @app.get("/api/gate/access-settings")
+    def get_gate_access_settings() -> dict[str, object]:
+        return _gate_access_view(current_gate_access())
+
+    @app.put("/api/gate/access-settings")
+    def update_gate_access_settings(payload: GateAccessPayload) -> dict[str, object]:
+        stored = current_gate_access()
+        try:
+            config = _merge_gate_access(payload, stored)
+        except ValidationError as exc:
+            # Пользовательские причины отказа доходят до человека целиком:
+            # «режим on требует разрешения владельца» — это то, что он должен
+            # прочитать, а не «422 Unprocessable Entity».
+            raise HTTPException(422, "; ".join(_error_messages(exc))) from exc
+        try:
+            save_gate_access_config(gate_access_config_path(settings.data_dir), config)
+        except OSError as exc:
+            raise HTTPException(500, "Не удалось сохранить настройки калитки") from exc
+        # Механику веб не трогает и здесь: файл читает служба
+        # `catdoor-gate-access`, у веб-процесса прав на плату нет и не будет.
+        return _gate_access_view(config)
+
+    def _request_open(target: str) -> dict[str, object]:
+        """Попросить службу открыть и дождаться ответа.
+
+        Общий путь для калитки и дверцы: плату держит один процесс, потому что
+        шлюз в прозрачном режиме второго соединения может не принять.
+        """
+        request = OpenRequest(
+            id=uuid4().hex,
+            requested_at=time(),
+            target=target,
+            source="admin",
+            # Загрузка, в которой нажали: после перезагрузки эта просьба уже не
+            # чья-то, и часам после обрыва питания верить нельзя.
+            boot_id=boot_id(),
+        )
+        try:
+            save_open_request(open_request_path(settings.data_dir), request)
+        except OSError as exc:
+            raise HTTPException(500, "Не удалось передать просьбу службе") from exc
+        result = _await_open_result(settings.data_dir, request.id)
+        if result is None:
+            # «Занята» и «не работает» ведут человека к разным действиям, и
+            # путать их нельзя: в первом случае надо повторить через секунду,
+            # во втором — идти чинить службу.
+            age = heartbeat_age(heartbeat_path(settings.data_dir))
+            if age is not None and age <= HEARTBEAT_FRESH_SECONDS:
+                raise HTTPException(
+                    503, "Служба занята другим делом — нажмите ещё раз через секунду"
+                )
+            raise HTTPException(504, "Служба не отвечает: проверьте catdoor-gate-access")
+        if not result.ok:
+            raise HTTPException(502, result.detail)
+        return {"ok": True, "detail": result.detail, "pulse_ms": result.pulse_ms}
+
+    @app.get("/api/cat-door/settings")
+    def get_cat_door_settings() -> dict[str, object]:
+        return current_cat_door().model_dump()
+
+    @app.put("/api/cat-door/settings")
+    def update_cat_door_settings(payload: CatDoorPayload) -> dict[str, object]:
+        try:
+            config = CatDoorConfig.model_validate(payload.model_dump())
+        except ValidationError as exc:
+            raise HTTPException(422, "; ".join(_error_messages(exc))) from exc
+        try:
+            save_cat_door_config(cat_door_config_path(settings.data_dir), config)
+        except OSError as exc:
+            raise HTTPException(500, "Не удалось сохранить настройки дверцы") from exc
+        # Механику веб не трогает и здесь: файл читает служба.
+        return config.model_dump()
+
+    @app.post("/api/cat-door/open")
+    def open_cat_door() -> dict[str, object]:
+        """Тестовое открытие дверцы — тем же путём, что и калитка."""
+        return _request_open(TARGET_CAT_DOOR)
+
+    @app.post("/api/gate/open")
+    def open_gate() -> dict[str, object]:
+        """Открыть калитку по кнопке в админке.
+
+        Веб механикой не распоряжается и здесь: он кладёт просьбу файлом, а
+        исполняет её служба `catdoor-gate-access` — единственная, которой
+        позволено писать на плату. Ответ ждём её же: сказать «открыл», не
+        дождавшись подтверждения, — это ровно та ложь, ради отсутствия которой
+        всё и разделено.
+        """
+        config = current_gate_access()
+        if not config.gates:
+            raise HTTPException(422, "Канал реле калитки не настроен")
+        return _request_open(TARGET_GATE)
+
+    @app.post("/api/gate/access-settings/preset")
+    def apply_gate_preset(rollback: bool = False) -> dict[str, object]:
+        """Накатить пресет правил движения или вернуть, как было.
+
+        Числа пресета подобраны разбором живых проходов 12 августа
+        (`docs/gate-direction-experiments.md`), и перебирать их руками человеку
+        незачем. Прежние правила запоминаются в том же файле, поэтому откат
+        работает и после перезагрузки узла, и через неделю.
+        """
+        stored = current_gate_access()
+        config = rollback_movement_preset(stored) if rollback else apply_movement_preset(stored)
+        try:
+            save_gate_access_config(gate_access_config_path(settings.data_dir), config)
+        except OSError as exc:
+            raise HTTPException(500, "Не удалось сохранить настройки калитки") from exc
+        return _gate_access_view(config)
+
+    @app.post("/api/gate/access-settings/second-chance-preset")
+    def apply_gate_chance_preset(rollback: bool = False) -> dict[str, object]:
+        """Накатить пресет второго шанса или вернуть, как было.
+
+        Пресет отдельный от правил движения намеренно: они решают разные задачи
+        и включаются порознь. Правила движения отказывают уходящему, второй шанс
+        доводит до конца открытие тому, кто пришёл, — и владелец, откативший
+        одно, не должен вместе с ним терять другое.
+        """
+        stored = current_gate_access()
+        config = (
+            rollback_second_chance_preset(stored)
+            if rollback
+            else apply_second_chance_preset(stored)
+        )
+        try:
+            save_gate_access_config(gate_access_config_path(settings.data_dir), config)
+        except OSError as exc:
+            raise HTTPException(500, "Не удалось сохранить настройки калитки") from exc
+        return _gate_access_view(config)
+
+    @app.get("/gate/passes/{pass_id}/snapshot")
+    def gate_pass_snapshot(
+        pass_id: int,
+        session: Annotated[Session, Depends(get_session)],
+    ) -> FileResponse:
+        """Кадр прохода. Запись прохода неизменяема, поэтому кэш навсегда."""
+        stored = session.get(GatePass, pass_id)
+        if stored is None or not stored.snapshot_path:
+            raise HTTPException(404, "Снимок не найден")
+        root = settings.data_dir.resolve()
+        path = (root / stored.snapshot_path).resolve()
+        if root not in path.parents or not path.is_file():
+            raise HTTPException(404, "Снимок не найден")
+        return FileResponse(
+            path,
+            media_type="image/jpeg",
+            headers={"Cache-Control": "public, max-age=31536000, immutable"},
         )
 
     @app.get("/nvr", response_class=HTMLResponse)
@@ -1522,22 +2105,120 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         session.delete(event)
         session.commit()
 
-    @app.get("/api/training/macbook/export")
-    def export_for_macbook(scope: str = "macbook") -> FileResponse:
+    @app.post("/api/training/macbook/export", status_code=202)
+    def start_macbook_export(scope: str = "macbook") -> dict[str, object]:
+        """Начать сборку набора. Ответ приходит сразу, работа идёт фоном.
+
+        Раньше архив собирался прямо здесь. На живом наборе это разваливалось:
+        11 августа узел резал кадры больше часа, веб-процесс висел на 145%
+        процессора, клиент отвалился по таймауту — и обучение пришлось вести на
+        наборе недельной давности. HTTP не умеет ждать час.
+        """
         if scope not in {"macbook", "all"}:
             raise HTTPException(422, "scope должен быть macbook или all")
+        runs_root = settings.data_dir / "training" / "exports"
+        existing = sorted(runs_root.glob("*/status.json"))
+        if existing:
+            latest = _read_status(existing[-1]) or {}
+            if (
+                latest.get("state") in ACTIVE_TRAINING_STATES
+                and not _expire_stale_training(existing[-1], latest)
+            ):
+                raise HTTPException(409, "Набор уже собирается")
+        run_id = f"{datetime.now(UTC):%Y%m%d-%H%M%S}-{uuid4().hex[:8]}"
+        output_dir = runs_root / run_id
+        status_path = output_dir / "status.json"
+        write_status(status_path, state="starting", message="Запуск отдельного процесса")
+        command = [
+            sys.executable,
+            "-m",
+            "training.export_job",
+            str(settings.resolved_database_path.resolve()),
+            str(settings.data_dir.resolve()),
+            settings.ffmpeg_path,
+            str(output_dir.resolve()),
+            "--detector-model",
+            str(settings.detector_model_path.resolve()),
+            "--detector-device",
+            settings.detector_device,
+            "--scope",
+            scope,
+        ]
         try:
-            archive = create_macbook_export(
-                settings.resolved_database_path,
-                settings.data_dir,
-                settings.ffmpeg_path,
-                settings.detector_model_path,
-                settings.detector_device,
-                DetectionConfig.from_settings(settings),
-                scope=scope,
-            )
-        except (OSError, RuntimeError, ValueError) as exc:
-            raise HTTPException(422, str(exc)) from exc
+            with (output_dir / "export.log").open("ab") as log:
+                process = spawn_detached(
+                    command,
+                    cwd=Path.cwd(),
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                )
+        except OSError as exc:
+            write_status(status_path, state="failed", message="Не удалось запустить Python")
+            raise HTTPException(500, "Не удалось запустить сборку набора") from exc
+        write_status(
+            status_path,
+            state="starting",
+            message="Запуск отдельного процесса",
+            pid=process.pid,
+        )
+        return {"run_id": run_id, "pid": process.pid, "state": "starting"}
+
+    def _ready_export() -> dict[str, object] | None:
+        """Самый свежий **собранный** набор, чей архив ещё лежит на диске.
+
+        Считается по всем прогонам, а не по последнему. Последний прогон
+        отвечает на вопрос «что происходит сейчас», и это разные вопросы:
+        13 августа рядом с законченной сборкой шла вторая, и по последнему
+        прогону выходило, что готового набора нет вовсе.
+        """
+        runs_root = settings.data_dir / "training" / "exports"
+        best: dict[str, object] | None = None
+        for path in sorted(runs_root.glob("*/status.json")):
+            payload = _read_status(path)
+            if payload is None or payload.get("state") != "completed":
+                continue
+            archive = payload.get("archive")
+            if not isinstance(archive, str) or not Path(archive).is_file():
+                # Архивы подчищаются: остаются три последних. Отчёт о
+                # собранном наборе переживает сам набор.
+                continue
+            best = payload
+        return best
+
+    @app.get("/api/training/macbook/export/status")
+    def macbook_export_status() -> dict[str, object]:
+        latest = _latest_status(settings.data_dir / "training" / "exports")
+        ready = _ready_export()
+        answer: dict[str, object] = (
+            dict(latest) if latest is not None
+            else {"state": "idle", "message": "Набор ещё не собирался"}
+        )
+        # Готовый набор — отдельное поле, а не подмена состояния: «идёт сборка»
+        # и «набор уже есть» бывают правдой одновременно.
+        if ready is not None:
+            answer["ready"] = {
+                "archive": Path(str(ready.get("archive"))).name,
+                "finished_at": ready.get("updated_at"),
+                "size_mb": ready.get("size_mb"),
+            }
+        return answer
+
+    @app.get("/api/training/macbook/export")
+    def export_for_macbook() -> FileResponse:
+        """Отдать собранный архив. Сборкой этот маршрут больше не занимается.
+
+        Пока набор не собран, честнее ответить отказом с внятной причиной, чем
+        начать часовую работу в ответ на запрос файла.
+        """
+        ready = _ready_export()
+        if ready is None:
+            latest = _latest_status(settings.data_dir / "training" / "exports") or {}
+            if latest.get("state") in ACTIVE_TRAINING_STATES:
+                raise HTTPException(409, "Набор ещё собирается — дождитесь окончания")
+            raise HTTPException(404, "Набор не собран: сначала запустите сборку")
+        # Идущая сборка отдать готовый набор не мешает: она делает следующий, а
+        # этот уже лежит целиком.
+        archive = Path(str(ready.get("archive")))
         return FileResponse(
             archive,
             media_type="application/zip",
@@ -1605,6 +2286,102 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return json.loads(statuses[-1].read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise HTTPException(500, "Не удалось прочитать статус обучения") from exc
+
+    @app.post("/api/identity/prototypes/rebuild", status_code=202)
+    def rebuild_prototypes(reuse: bool = False, include: str = "") -> dict[str, object]:
+        """Пересчитать эталоны котов по свежей разметке — прямо на узле.
+
+        Сеть при этом не обучается: размеченные проходы прогоняются через уже
+        стоящую модель, и эталон каждого кота пересчитывается как среднее его
+        векторов. Поэтому это минуты процессора, а не ночь, и поэтому новый кот
+        заводится без макбука вовсе.
+
+        Работа уходит отдельным процессом по той же причине, что и обучение:
+        перезапуск веб-службы не должен её обрывать.
+        """
+        runs_root = settings.data_dir / "training" / "prototypes"
+        existing = sorted(runs_root.glob("*/status.json"))
+        if existing:
+            latest = _read_status(existing[-1]) or {}
+            if (
+                latest.get("state") in ACTIVE_TRAINING_STATES
+                and not _expire_stale_training(existing[-1], latest)
+            ):
+                raise HTTPException(409, "Пересчёт эталонов уже выполняется")
+        identity_paths = {
+            role: path
+            for role, path in (
+                ("face", settings.identity_face_model_path),
+                ("side", settings.identity_side_model_path),
+            )
+            if path is not None and path.is_file()
+        }
+        if not identity_paths:
+            raise HTTPException(422, "Не установлена ни одна модель опознания")
+        run_id = f"{datetime.now(UTC):%Y%m%d-%H%M%S}-{uuid4().hex[:8]}"
+        output_dir = runs_root / run_id
+        status_path = output_dir / "status.json"
+        write_status(status_path, state="starting", message="Запуск отдельного процесса")
+        # Кадры нарезаются заново по умолчанию, и это стоит часа процессора.
+        # Дешёвая альтернатива — взять кропы прошлого прогона — молча
+        # игнорировала бы разметку, сделанную после них, а обычный порядок
+        # работы именно такой: разметил и нажал. Поэтому `reuse=true`
+        # запрашивается явно и годится, когда разметка не менялась: например,
+        # чтобы пересчитать с другим набором котов.
+        previous = _latest_dataset(runs_root) if reuse else None
+        command = [
+            sys.executable,
+            "-m",
+            "training.enrolment",
+            str(settings.resolved_database_path.resolve()),
+            str(settings.data_dir.resolve()),
+            settings.ffmpeg_path,
+            str(output_dir.resolve()),
+            "--detector-model",
+            str(settings.detector_model_path.resolve()),
+            "--detector-device",
+            settings.detector_device,
+        ]
+        for role, path in identity_paths.items():
+            command.extend([f"--{role}-model", str(path.resolve())])
+        if previous is not None:
+            command.extend(["--dataset", str(previous)])
+        if include.strip():
+            command.extend(["--include", *include.split(",")])
+        try:
+            with (output_dir / "enrolment.log").open("ab") as log:
+                process = spawn_detached(
+                    command,
+                    cwd=Path.cwd(),
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                )
+        except OSError as exc:
+            write_status(status_path, state="failed", message="Не удалось запустить Python")
+            raise HTTPException(500, "Не удалось запустить пересчёт эталонов") from exc
+        # Теперь состояние знает, за чьей жизнью следить. До первой записи
+        # самого процесса это единственный способ отличить «ещё запускается» от
+        # «умер на старте».
+        write_status(
+            status_path,
+            state="starting",
+            message="Запуск отдельного процесса",
+            pid=process.pid,
+        )
+        return {"run_id": run_id, "pid": process.pid, "state": "starting"}
+
+    @app.get("/api/identity/prototypes/status")
+    def prototypes_status() -> dict[str, object]:
+        """Состояние пересчёта — то же, что видит страница, включая оборванные.
+
+        Кнопку на странице гасит именно этот ответ, поэтому врать он не имеет
+        права: состояние «готовлю кадры» от процесса, которого больше нет, —
+        это серая кнопка навсегда.
+        """
+        latest = _latest_status(settings.data_dir / "training" / "prototypes")
+        if latest is None:
+            return {"state": "idle", "message": "Эталоны ещё не пересчитывались"}
+        return latest
 
     @app.post("/api/evaluations", status_code=202)
     def start_evaluation(

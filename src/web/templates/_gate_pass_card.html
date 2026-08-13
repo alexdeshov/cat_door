@@ -1,0 +1,53 @@
+{# Строка журнала калитки. Контекст: entry (GatePass), pass_decisions.
+
+   Карточка кошачьего прохода (`_event_card.html`) сюда не годится: она про
+   видео, метки и обучение. Общая у них только вёрстка, и она взята отсюда. #}
+<article class="pass" data-pass-id="{{ entry.id }}">
+  <div class="pass-media">
+    {% if entry.snapshot_path %}
+      <img class="viewport" loading="lazy"
+        alt="Кадр прохода {{ entry.person_name or 'неизвестного' }}"
+        src="/gate/passes/{{ entry.id }}/snapshot">
+    {% else %}
+      <div class="viewport viewport-empty">Кадра нет</div>
+    {% endif %}
+  </div>
+  <div class="pass-body">
+    <div class="pass-head">
+      <strong>
+        {%- if entry.label == "car" -%}
+          {{ entry.plate or "машина" }}
+        {%- else -%}
+          {{ entry.person_name or "неизвестный" }}
+        {%- endif -%}
+      </strong>
+      <span class="faint data">{{ entry.created_at | local_time }}</span>
+    </div>
+    <p class="muted" style="font-size: 13px">
+      {{ pass_decisions.get(entry.decision, entry.decision) }}
+      {%- if entry.score is not none %} · уверенность {{ "%.2f" | format(entry.score) }}{% endif -%}
+      {%- if entry.zone %} · {{ entry.zone }}{% endif -%}
+      · {{ entry.camera }}
+    </p>
+    {% if entry.reason and entry.decision != "denied_mode_off" %}
+      <p class="muted" style="font-size: 13px">{{ entry.reason }}</p>
+    {% endif %}
+    {# Обстоятельства: пока только наблюдаются, на решение не влияют. #}
+    {% if entry.approach or entry.gate_state_before %}
+      <p class="faint data" style="font-size: 12px">
+        {%- if entry.approach == "far" %}пришёл издалека
+        {%- elif entry.approach == "near" %}был вплотную
+        {%- else %}откуда — неизвестно{% endif -%}
+        {%- if entry.first_box_bottom is not none %} ({{ "%.2f" | format(entry.first_box_bottom) }}){% endif -%}
+        {%- set moves = {"approaching": "шёл к калитке", "leaving": "уходил",
+                         "still": "стоял рядом", "unknown": "движение неясно"} -%}
+        {%- if entry.movement %} · {{ moves.get(entry.movement, entry.movement) }}
+          {%- if entry.area_ratio %} (×{{ entry.area_ratio }}){% endif -%}
+        {% endif -%}
+        {%- set states = {"open": "открыта", "closed": "закрыта", "unknown": "неизвестно"} -%}
+        {%- if entry.gate_state_before %} · створка до: {{ states.get(entry.gate_state_before, entry.gate_state_before) }}{% endif -%}
+        {%- if entry.gate_state_after %} · после: {{ states.get(entry.gate_state_after, entry.gate_state_after) }}{% endif -%}
+      </p>
+    {% endif %}
+  </div>
+</article>

@@ -27,7 +27,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from src.common.camera_registry import camera_registry_path, load_registry
-from src.common.durable_write import write_text_durably
+from src.common.durable_write import publish_file_durably, write_text_durably
 from src.common.frigate_config import frigate_camera_name
 from src.common.notifications import NotificationGate, notification_snapshot_path
 from src.common.sd_notify import Notifier
@@ -57,6 +57,15 @@ class GateEvent:
     sub_label: str | None
     started_at: float
     has_snapshot: bool
+    # Уверенность распознавания лица, а не объекта: решение об открытии
+    # принимается по ней. Уведомлениям она не нужна, журналу калитки — нужна.
+    name_score: float | None = None
+    zones: tuple[str, ...] = ()
+    # `None` значит «событие ещё идёт»: Frigate закрывает его позже.
+    ended_at: float | None = None
+    # Площадь текущей рамки в долях кадра. Обновляется вместе с событием — по
+    # ней и её изменению видно, идёт человек к калитке или от неё.
+    area: float | None = None
 
 
 def gate_cameras(data_dir: Path) -> dict[str, str]:
@@ -113,6 +122,48 @@ def forget_old(sent: dict[str, float], *, older_than: float) -> dict[str, float]
     return {key: value for key, value in sent.items() if value >= older_than}
 
 
+def _optional_float(*values: object) -> float | None:
+    """Первое значение, которое похоже на число. Иначе `None`."""
+    for value in values:
+        if isinstance(value, int | float) and not isinstance(value, bool):
+            return float(value)
+    return None
+
+
+def _box_area(box: object) -> float | None:
+    """Площадь рамки в долях кадра. Frigate отдаёт её как [x, y, ширина, высота]."""
+    if not isinstance(box, list) or len(box) != 4:
+        return None
+    width, height = _optional_float(box[2]), _optional_float(box[3])
+    if width is None or height is None:
+        return None
+    return width * height
+
+
+def _event_from_payload(item: dict[str, object]) -> GateEvent:
+    """Событие Frigate из ответа API.
+
+    Уверенность распознавания лежит то в корне ответа, то во вложенном `data` —
+    Frigate переносил её между версиями. Читаются оба места: узел обновляют, а
+    журнал не должен молча остаться без цифры.
+    """
+    data = item.get("data")
+    data = data if isinstance(data, dict) else {}
+    zones = item.get("zones")
+    return GateEvent(
+        id=str(item.get("id", "")),
+        camera=str(item.get("camera", "")),
+        label=str(item.get("label", "")),
+        sub_label=(str(item["sub_label"]) if item.get("sub_label") else None),
+        started_at=_optional_float(item.get("start_time")) or 0.0,
+        has_snapshot=bool(item.get("has_snapshot")),
+        name_score=_optional_float(data.get("sub_label_score"), item.get("sub_label_score")),
+        zones=tuple(str(zone) for zone in zones) if isinstance(zones, list) else (),
+        ended_at=_optional_float(item.get("end_time")),
+        area=_box_area(data.get("box") or item.get("box")),
+    )
+
+
 def fetch_events(api_url: str, after: float, *, timeout: float = 10.0) -> list[GateEvent]:
     query = urllib.parse.urlencode({"after": f"{after:.3f}", "limit": EVENTS_PER_POLL})
     url = f"{api_url.rstrip('/')}/api/events?{query}"
@@ -125,18 +176,7 @@ def fetch_events(api_url: str, after: float, *, timeout: float = 10.0) -> list[G
         # Ответ не того вида — это тоже «Frigate не ответил» с точки зрения
         # вызывающего: он умеет только подождать и спросить снова.
         raise RuntimeError("Frigate вернул не список событий")  # noqa: TRY004
-    events = [
-        GateEvent(
-            id=str(item.get("id", "")),
-            camera=str(item.get("camera", "")),
-            label=str(item.get("label", "")),
-            sub_label=(str(item["sub_label"]) if item.get("sub_label") else None),
-            started_at=float(item.get("start_time", 0.0)),
-            has_snapshot=bool(item.get("has_snapshot")),
-        )
-        for item in payload
-        if isinstance(item, dict)
-    ]
+    events = [_event_from_payload(item) for item in payload if isinstance(item, dict)]
     # Frigate отдаёт свежие первыми, а рассказывать надо по порядку.
     return sorted(events, key=lambda event: event.started_at)
 
@@ -154,8 +194,70 @@ def fetch_snapshot(api_url: str, event: GateEvent, destination: Path, *, timeout
     if not body:
         return False
     destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_bytes(body)
+    # Через временный файл: снимок прохода живёт в журнале столько же, сколько
+    # строка, и обрыв питания посреди записи оставил бы в нём битую картинку
+    # навсегда. Уведомлениям это безразлично — они свой файл сразу удаляют, —
+    # но путь общий, а цена одна лишняя операция.
+    temporary = destination.with_name(f".{destination.name}.part")
+    temporary.write_bytes(body)
+    publish_file_durably(temporary, destination)
     return True
+
+
+# Ниже этой доли высоты кадра рамка считается «человек ещё идёт». Рамка,
+# упирающаяся в нижний край, означает, что человек стоит вплотную и обрезан
+# снизу: так выглядят выход, разворот у калитки и открытие кодом. Замер
+# 2026-08-12: одиннадцать событий разделились без ошибок — приходы 0.23–0.91,
+# всё остальное ровно 1.00.
+APPROACH_FAR_BELOW = 0.99
+APPROACH_FAR = "far"
+APPROACH_NEAR = "near"
+APPROACH_UNKNOWN = "unknown"
+
+
+def fetch_first_box(api_url: str, event_id: str, *, timeout: float = 5.0) -> float | None:
+    """Низ первой рамки события: 1.0 — у нижнего края кадра, 0.0 — у верхнего.
+
+    Берётся из таймлайна, где запись `visible` появляется в момент, когда
+    Frigate впервые увидел объект. Именно первая рамка отвечает на вопрос
+    «откуда он взялся»: конечная появляется только по окончании прохода, то
+    есть заведомо позже, чем нужно решать.
+    """
+    box = _first_timeline_box(api_url, event_id, timeout=timeout)
+    if box is None:
+        return None
+    return float(box[1]) + float(box[3])
+
+
+def _first_timeline_box(api_url: str, event_id: str, *, timeout: float = 5.0) -> list | None:
+    query = urllib.parse.urlencode({"source_id": event_id})
+    url = f"{api_url.rstrip('/')}/api/timeline?{query}"
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8", "replace"))
+    except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+        logger.warning("Таймлайн события %s не прочитан: %s", event_id, exc)
+        return None
+    if not isinstance(payload, list):
+        return None
+    for row in payload:
+        box = (row.get("data") or {}).get("box") if isinstance(row, dict) else None
+        if isinstance(box, list) and len(box) == 4:
+            return box
+    return None
+
+
+def fetch_first_area(api_url: str, event_id: str, *, timeout: float = 5.0) -> float | None:
+    """Площадь первой рамки события — то, с чем сравнивается текущая."""
+    box = _first_timeline_box(api_url, event_id, timeout=timeout)
+    return _box_area(box)
+
+
+def approach_from_box(bottom: float | None) -> str:
+    """«Издалека» или «вплотную» по первой рамке."""
+    if bottom is None:
+        return APPROACH_UNKNOWN
+    return APPROACH_FAR if bottom < APPROACH_FAR_BELOW else APPROACH_NEAR
 
 
 def recognised_name(event: GateEvent) -> str | None:

@@ -58,6 +58,12 @@ def build(**overrides: object) -> list[health.HealthGroup]:
         "gate_detector_device": "GPU",
         "metrics": metrics(),
         "gpu_name": "Intel(R) Iris(R) Xe Graphics (iGPU)",
+        # Эталон включает прошедшую копию: узел, чья копия ни разу не
+        # отчитывалась, приёмку проходить не должен — разметку восстановить
+        # нечем, она сделана руками.
+        "backup_status": {"finished_at": 1000.0, "ok": True, "detail": "копия прошла",
+                          "free_gb": 79.0},
+        "now": 1000.0 + 3600,
     }
     values.update(overrides)
     return health.build_health(**values)  # type: ignore[arg-type]
@@ -257,3 +263,100 @@ def test_an_unreadable_environment_is_a_refusal_not_an_absence(tmp_path: Path) -
             load_env_file(env)
     finally:
         env.chmod(0o644)
+
+
+def _disk(path: str, total_gb: float, free_gb: float) -> object:
+    from src.common.node_metrics import DiskUsage
+
+    return DiskUsage(path=path, total_gb=total_gb, free_gb=free_gb)
+
+
+def test_a_full_frigate_volume_is_not_an_alarm() -> None:
+    """Frigate не «заполняет диск», а держит его полным.
+
+    Проверено на узле 13 августа при 97% занятости: 6 августа удалено целиком,
+    5 августа стёрто до 150 МБ, 7 августа съедено со 130 до 23 ГБ. Уборка идёт,
+    и полнота здесь — рабочее состояние.
+
+    Общая мерка в 85% дала бы вечное жёлтое, а постоянное предупреждение хуже
+    отсутствующего: оно приучает не смотреть на страницу состояния.
+    """
+    from src.common.health import _disk_check
+
+    check = _disk_check(_disk("/var/lib/frigate/media/recordings", 916.0, 31.1))
+
+    assert check.status == "ok"
+    assert "так и задумано" in check.expected
+
+
+def test_a_frigate_volume_without_free_space_is_an_alarm() -> None:
+    """Смотреть надо не на занятость, а на то, успевает ли уборка."""
+    from src.common.health import _disk_check
+
+    tight = _disk_check(_disk("/var/lib/frigate/media", 916.0, 4.0))
+    empty = _disk_check(_disk("/var/lib/frigate/media", 916.0, 1.0))
+
+    assert tight.status == "warn"
+    assert empty.status == "fail"
+    assert "не успевает" in tight.hint
+
+
+def test_an_ordinary_volume_is_still_measured_the_ordinary_way() -> None:
+    """Послабление касается только тома с собственной уборкой."""
+    from src.common.health import _disk_check
+
+    check = _disk_check(_disk("/var/lib/catdoor", 360.0, 20.0))
+
+    assert check.status == "warn"
+    assert "занято до" in check.expected
+
+
+def test_a_backup_that_failed_is_said_out_loud() -> None:
+    """Копия ломается молча: таймер отработал, скрипт упал, никто не заметил.
+
+    Восстановить разметку нечем — она сделана руками за недели.
+    """
+    groups = build(
+        backup_status={"finished_at": 1000.0, "ok": False, "detail": "диск полон", "free_gb": 1.0},
+        now=1000.0 + 60,
+    )
+
+    assert find(groups, "backup_last_run").status == "fail"
+    assert "не прошла" in find(groups, "backup_last_run").actual
+    assert "диск полон" in find(groups, "backup_last_run").actual
+
+
+def test_a_backup_that_stopped_running_is_noticed() -> None:
+    """Остановленный таймер выглядит как тишина, а не как поломка."""
+    groups = build(
+        backup_status={"finished_at": 1000.0, "ok": True, "detail": "прошла", "free_gb": 79.0},
+        now=1000.0 + 40 * 3600,
+    )
+
+    assert find(groups, "backup_last_run").status == "warn"
+    assert "40 ч назад" in find(groups, "backup_last_run").actual
+
+
+def test_space_for_the_backup_is_counted_in_gigabytes() -> None:
+    """В процентах мерить нельзя: том заполнен на 97% всегда.
+
+    Frigate держит архивный диск полным по устройству, и копии нужны не
+    проценты, а гигабайты.
+    """
+    groups = build(
+        backup_status={"finished_at": 1000.0, "ok": True, "detail": "прошла", "free_gb": 8.0},
+        now=1000.0 + 60,
+    )
+
+    assert find(groups, "backup_free_space").status == "warn"
+    assert find(groups, "backup_last_run").status == "ok"
+
+
+def test_a_backup_that_never_reported_is_unknown_not_fine() -> None:
+    """«Отметок нет» — это и первый запуск, и остановленный таймер.
+
+    Молча считать это благополучием нельзя, объявлять поломкой — тоже.
+    """
+    groups = build(backup_status=None)
+
+    assert find(groups, "backup_last_run").status == "unknown"

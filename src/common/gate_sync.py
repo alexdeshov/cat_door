@@ -107,6 +107,11 @@ def apply_frigate_config(settings: Settings) -> bool:
         preserved=_foreign_config(settings),
         detector_device=settings.gate_detector_device,
         preserved_cameras=foreign_camera_settings(current),
+        mqtt=(
+            (settings.gate_mqtt_host, settings.gate_mqtt_port)
+            if settings.gate_mqtt_enabled
+            else None
+        ),
     )
     env = build_env(frigate_cameras(registry, circuits), settings.display_timezone)
     if _unchanged(settings.gate_applied_config_path, config) and _unchanged(

@@ -4,7 +4,17 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text, create_engine, event
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    create_engine,
+    event,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 SQLITE_BUSY_TIMEOUT_SECONDS = 10
@@ -106,6 +116,69 @@ class EventPrediction(Base):
     )
 
 
+class GatePass(Base):
+    """Проход у калитки: событие Frigate и решение системы о нём.
+
+    Отдельно от `Event`: у кошачьих проходов свои клипы, метки и обучение, а
+    здесь — люди, имена из библиотеки лиц Frigate и журнал решений.
+    """
+
+    __tablename__ = "gate_passes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # Ключ Frigate, а не наш: одно событие перечитывается несколько опросов
+    # подряд, пока распознавание не поставит имя. Уникальность превращает
+    # повторное чтение в обновление строки.
+    frigate_event_id: Mapped[str] = mapped_column(String(100), unique=True)
+    # Время начала события у Frigate, а не время записи строки.
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True
+    )
+    camera: Mapped[str] = mapped_column(String(100))
+    # Что это было: `person` или `car`. Машины пишутся только для отчёта —
+    # решений по ним не принимается.
+    label: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
+    person_name: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+    # Номер машины, если Frigate его прочитал. Отдельно от имени человека:
+    # столбец, где иногда лежит номер, врёт всем, кто его читает.
+    plate: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    zone: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    decision: Mapped[str] = mapped_column(String(40), index=True)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    snapshot_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # Какие факторы сказали «за», «против» и «не знаю». Пусто до появления
+    # функции решения; без этого разбирать отказы невозможно.
+    factors_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Что ушло на плату. Пусто: механика не подключена и кода записи нет.
+    pulse_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    modbus_ok: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # Сколько импульсов ушло по этому проходу и когда последний. Больше одного
+    # бывает только при включённом втором шансе.
+    pulses: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    last_pulse_at: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Какой была створка в момент импульса. По этому второй шанс отличает
+    # пропавший зря импульс от использованного.
+    pulse_gate_state: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # Открылась ли калитка на самом деле. Геркона на ней нет — поля заведены
+    # заранее и остаются пустыми. Ответ на тот же вопрос приходит от
+    # классификатора Frigate и живёт в `gate_state_*`: смешивать источники в
+    # одном столбце нельзя, они ошибаются по-разному.
+    reed_before: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    reed_after: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # Откуда человек пришёл: `far` — издалека, `near` — уже был вплотную,
+    # `unknown` — рамку узнать не удалось. Считается по первой рамке события.
+    approach: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    first_box_bottom: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Куда шёл человек и во сколько раз изменилась его рамка. Отношение нужно,
+    # чтобы пороги можно было перемерить, когда изменится геометрия камеры.
+    movement: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    area_ratio: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Что классификатор Frigate говорил про створку до прохода и после него.
+    gate_state_before: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    gate_state_after: Mapped[str | None] = mapped_column(String(20), nullable=True)
+
+
 def apply_migrations(database_path: Path) -> None:
     migrations_dir = Path(__file__).parent / "migrations"
     with sqlite3.connect(database_path, timeout=SQLITE_BUSY_TIMEOUT_SECONDS) as connection:
@@ -120,22 +193,45 @@ def apply_migrations(database_path: Path) -> None:
         for migration in sorted(migrations_dir.glob("*.sql")):
             if migration.stem in applied:
                 continue
-            try:
-                connection.executescript(migration.read_text(encoding="utf-8"))
-            except sqlite3.OperationalError as exc:
-                # `executescript` коммитит и работает вне транзакции, поэтому
-                # потеря питания между скриптом и записью версии оставляет
-                # миграцию применённой, но не отмеченной. При следующем старте
-                # повтор упирается в «duplicate column» — и раньше это клало
-                # обе службы в вечный рестарт до ручной правки базы. Такой
-                # повтор — свидетельство уже сделанной работы, а не ошибка.
-                if not _already_applied(exc):
-                    raise
+            # Команды выполняются по одной, а не скриптом целиком. Скрипт
+            # коммитит каждую команду сам, транзакции вокруг нет — и обрыв
+            # питания посреди миграции из нескольких `ALTER` оставлял часть
+            # столбцов недобавленными. При повторе первая же команда упиралась
+            # в «duplicate column», это считалось признаком сделанной работы, и
+            # **остальные команды не выполнялись никогда**. Версия при этом
+            # помечалась применённой, а служба падала на «no such column».
+            #
+            # Воспроизведено 2026-08-12 на миграции 009: из четырёх столбцов
+            # уцелел один. Поэтому «уже применено» решается для каждой команды
+            # отдельно, и обрыв лечится следующим запуском.
+            for statement in _statements(migration.read_text(encoding="utf-8")):
+                try:
+                    connection.execute(statement)
+                except sqlite3.OperationalError as exc:
+                    if not _already_applied(exc):
+                        raise
             connection.execute(
                 "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
                 (migration.stem, datetime.now(UTC).isoformat()),
             )
         connection.commit()
+
+
+def _statements(script: str) -> list[str]:
+    """Разбить миграцию на отдельные команды.
+
+    Миграции проекта — простой DDL без точек с запятой внутри строковых
+    литералов, поэтому деления по `;` достаточно. Но **не до** выброса
+    комментариев: они здесь по-русски и живые, а точка с запятой в русской
+    фразе — обычное дело. 12 августа такая запятая разрезала команду пополам, и
+    миграция упала с `near "импульс": syntax error`.
+
+    Поэтому сначала убираем строки комментариев, и только потом делим.
+    """
+    without_comments = "\n".join(
+        line for line in script.splitlines() if not line.strip().startswith("--")
+    )
+    return [chunk.strip() for chunk in without_comments.split(";") if chunk.strip()]
 
 
 def _already_applied(exc: sqlite3.OperationalError) -> bool:
