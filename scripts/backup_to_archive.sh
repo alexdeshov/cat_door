@@ -31,8 +31,30 @@ RECORDINGS_AGE_DAYS=${CATDOOR_ARCHIVE_RECORDINGS_AGE_DAYS:-7}
 # удаление разметки. Место позволяет — база весит сотни килобайт.
 KEEP_DB_SNAPSHOTS=${CATDOOR_ARCHIVE_DB_SNAPSHOTS:-30}
 
+# Отметка о копии для страницы состояния. Лежит **на внутреннем диске**, а не в
+# архиве, и это главное в ней: чаще всего копия не проходит из-за переполненного
+# архивного диска, и записать отчёт о такой неудаче было бы некуда.
+STATUS=${CATDOOR_BACKUP_STATUS:-$DATA/runtime/backup-status.json}
+reported=0
+
+# Отчёт пишется и при удаче, и при провале, и при обрыве посреди работы — иначе
+# «копия не прошла» и «копия давно не запускалась» на странице выглядели бы
+# одинаково, а ведут они к разным действиям.
+report() {
+    reported=1
+    free_gb=$(df -Pk "$ARCHIVE" 2>/dev/null | awk 'NR==2 {print int($4 / 1048576)}')
+    mkdir -p "$(dirname "$STATUS")" 2>/dev/null || return 0
+    printf '{"finished_at": %s, "ok": %s, "detail": "%s", "free_gb": %s}\n' \
+        "$(date +%s)" "$1" "$2" "${free_gb:-0}" > "$STATUS.tmp" 2>/dev/null || return 0
+    mv -f "$STATUS.tmp" "$STATUS" 2>/dev/null || true
+}
+
 say() { echo "архив: $1"; }
-fail() { echo "архив: $1" >&2; exit 1; }
+fail() { report false "$1"; echo "архив: $1" >&2; exit 1; }
+# Обрыв на полпути — тоже неудача: копия, прерванная выключением питания,
+# оставила бы отчёт об успехе прошлого раза и выглядела бы свежей.
+trap 'report false "копирование прервано"; exit 130' INT TERM
+trap 'code=$?; [ "$code" = 0 ] || [ "$reported" = 1 ] || report false "оборвалось с кодом $code"' EXIT
 
 # Внешний диск объявлен в fstab с `nofail`, то есть его может не быть. Писать
 # в этом случае некуда: без проверки копия ушла бы в каталог-заглушку на корне
@@ -130,4 +152,7 @@ elif [ -d "$FRIGATE/media/recordings" ]; then
     say "суток записей скопировано: $copied (старше $cutoff)"
 fi
 
-say "занято в архиве: $(du -sh "$root" | cut -f1), свободно $(df -h "$ARCHIVE" | awk 'NR==2 {print $4}')"
+occupied=$(du -sh "$root" | cut -f1)
+free_human=$(df -h "$ARCHIVE" | awk 'NR==2 {print $4}')
+say "занято в архиве: $occupied, свободно $free_human"
+report true "копия прошла: занято $occupied, свободно $free_human"

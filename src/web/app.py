@@ -228,6 +228,15 @@ HEARTBEAT_STALE_AFTER = timedelta(minutes=10)
 POSTER_WIDTH = 480
 
 
+def backup_status_path(data_dir: Path) -> Path:
+    """Отчёт ночной копии. Пишет его `scripts/backup_to_archive.sh` от root.
+
+    Лежит на внутреннем диске, а не в архиве: чаще всего копия не проходит
+    из-за переполненного архивного диска, и записать отчёт туда было бы некуда.
+    """
+    return data_dir / "runtime" / "backup-status.json"
+
+
 def poster_path(data_dir: Path, event_id: int, view: str) -> Path:
     return data_dir / "runtime" / "posters" / f"{event_id:08d}-{view}.jpg"
 # Подбор пути потока держит запрос открытым, а администратор ждёт ответ
@@ -1529,6 +1538,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             gate_detector_device=settings.gate_detector_device,
             metrics=metrics,
             gpu_name=str(status.get("detector_device_name") or "") or None,
+            backup_status=_read_status(backup_status_path(settings.data_dir)),
         )
         return {
             "status": overall_status(groups),

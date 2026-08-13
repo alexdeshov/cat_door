@@ -58,6 +58,12 @@ def build(**overrides: object) -> list[health.HealthGroup]:
         "gate_detector_device": "GPU",
         "metrics": metrics(),
         "gpu_name": "Intel(R) Iris(R) Xe Graphics (iGPU)",
+        # Эталон включает прошедшую копию: узел, чья копия ни разу не
+        # отчитывалась, приёмку проходить не должен — разметку восстановить
+        # нечем, она сделана руками.
+        "backup_status": {"finished_at": 1000.0, "ok": True, "detail": "копия прошла",
+                          "free_gb": 79.0},
+        "now": 1000.0 + 3600,
     }
     values.update(overrides)
     return health.build_health(**values)  # type: ignore[arg-type]
@@ -303,3 +309,54 @@ def test_an_ordinary_volume_is_still_measured_the_ordinary_way() -> None:
 
     assert check.status == "warn"
     assert "занято до" in check.expected
+
+
+def test_a_backup_that_failed_is_said_out_loud() -> None:
+    """Копия ломается молча: таймер отработал, скрипт упал, никто не заметил.
+
+    Восстановить разметку нечем — она сделана руками за недели.
+    """
+    groups = build(
+        backup_status={"finished_at": 1000.0, "ok": False, "detail": "диск полон", "free_gb": 1.0},
+        now=1000.0 + 60,
+    )
+
+    assert find(groups, "backup_last_run").status == "fail"
+    assert "не прошла" in find(groups, "backup_last_run").actual
+    assert "диск полон" in find(groups, "backup_last_run").actual
+
+
+def test_a_backup_that_stopped_running_is_noticed() -> None:
+    """Остановленный таймер выглядит как тишина, а не как поломка."""
+    groups = build(
+        backup_status={"finished_at": 1000.0, "ok": True, "detail": "прошла", "free_gb": 79.0},
+        now=1000.0 + 40 * 3600,
+    )
+
+    assert find(groups, "backup_last_run").status == "warn"
+    assert "40 ч назад" in find(groups, "backup_last_run").actual
+
+
+def test_space_for_the_backup_is_counted_in_gigabytes() -> None:
+    """В процентах мерить нельзя: том заполнен на 97% всегда.
+
+    Frigate держит архивный диск полным по устройству, и копии нужны не
+    проценты, а гигабайты.
+    """
+    groups = build(
+        backup_status={"finished_at": 1000.0, "ok": True, "detail": "прошла", "free_gb": 8.0},
+        now=1000.0 + 60,
+    )
+
+    assert find(groups, "backup_free_space").status == "warn"
+    assert find(groups, "backup_last_run").status == "ok"
+
+
+def test_a_backup_that_never_reported_is_unknown_not_fine() -> None:
+    """«Отметок нет» — это и первый запуск, и остановленный таймер.
+
+    Молча считать это благополучием нельзя, объявлять поломкой — тоже.
+    """
+    groups = build(backup_status=None)
+
+    assert find(groups, "backup_last_run").status == "unknown"
