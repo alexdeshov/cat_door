@@ -67,7 +67,7 @@ from src.common.gate_open_request import (
 from src.common.sd_notify import Notifier
 from src.common.settings import ConfigurationError, Settings, validate_runtime_paths
 from src.common.telegram import TelegramClient
-from src.gate.decision import DECISION_DRY_RUN, Factor, decide
+from src.gate.decision import DECISION_COOLDOWN, DECISION_DRY_RUN, Factor, decide
 from src.gate.gate_state import OPEN as GATE_STATE_OPEN
 from src.gate.gate_state import UNKNOWN as GATE_STATE_UNKNOWN
 from src.gate.gate_state import GateStateWatcher
@@ -82,6 +82,7 @@ from src.gate.notify import (
     fetch_events,
     fetch_first_area,
     fetch_first_box,
+    fetch_ongoing_events,
     fetch_snapshot,
     gate_cameras,
     recognised_name,
@@ -104,6 +105,18 @@ OPENING_DECISIONS = frozenset({DECISION_DRY_RUN, "opened"})
 # ушёл, и это факт о физическом мире. Переоценка того же события на следующем
 # опросе фактом не является и переписать его не может.
 TERMINAL_DECISIONS = frozenset({"opened", "error"})
+# Сколько ждать после отказа платы перед новой попыткой по тому же событию.
+#
+# Раньше `error` был приговором: плата промолчала дважды за три секунды — и
+# человек у калитки не получал больше ни одной попытки, пока не выйдет из
+# кадра и не породит новое событие (17:04 это стоило Лёше четырнадцати секунд
+# ожидания у закрытой калитки). Приговор защищал плату от долбёжки раз в
+# секунду; пауза защищает так же, но человеку достаётся вторая попытка.
+ERROR_RETRY_SECONDS = 10.0
+# Предел возраста незаконченного события. Час гостевого разговора у калитки —
+# щедрый запас; событие старше — почти наверняка «бессмертный» огрызок после
+# перезапуска Frigate, а не человек.
+ONGOING_MAX_AGE_SECONDS = 3600.0
 # Сколько импульс имеет право опоздать после того, как человек ушёл из кадра.
 #
 # Событие перечитывается всё окно наблюдения, и решение по нему честно меняется:
@@ -268,6 +281,7 @@ def passes_from_events(
     config: GateAccessConfig,
     timezone: ZoneInfo,
     last_opening: LastOpening | None = None,
+    now: datetime | None = None,
     factors_for: Callable[[str], list[Factor]] | None = None,
     approach_for: Callable[[str], tuple[str, float | None]] | None = None,
     geometry_for: Callable[[GateEvent], tuple[str, float | None]] | None = None,
@@ -287,6 +301,17 @@ def passes_from_events(
     """
     records = []
     opening = last_opening
+    # Настоящее «сейчас», одно на весь пересчёт. До 13 августа решению
+    # передавалось начало события — и оно замерзало: событие перечитывается
+    # каждую секунду, а его «сейчас» не двигалось. Пауза, начавшаяся до
+    # события, не кончалась для него никогда («прошло 5 с из 10 с» навсегда),
+    # а пауза от более позднего открытия делала возраст отрицательным и
+    # запирала событие до denied_stale. Живой случай: проход 17:14:11 простоял
+    # в denied_cooldown до самой смерти в 17:17:16 — узнанный и разрешённый.
+    #
+    # Начало события остаётся началом события: created_at в журнале, отметка
+    # паузы — им время решения не принадлежит.
+    decision_now = datetime.now(UTC) if now is None else now
     for event in events:
         if event.label not in PASS_LABELS:
             continue
@@ -330,7 +355,7 @@ def passes_from_events(
             score=event.name_score,
             zones=event.zones,
             config=config,
-            now=moment.astimezone(timezone),
+            now=decision_now.astimezone(timezone),
             # Собственное прошлое решение по этому же событию паузой не считается.
             last_opened_at=(
                 opening.at
@@ -341,8 +366,17 @@ def passes_from_events(
             movement=movement,
             gate_just_closed=gate_just_closed,
         )
-        if verdict.would_open:
-            opening = LastOpening(event.id, moment)
+        if (
+            verdict.would_open
+            and config.mode != "on"
+            and (opening is None or opening.frigate_event_id != event.id)
+        ):
+            # В наблюдении импульса не будет, и пауза честно считается от
+            # решения — иначе dry не воспроизводил бы поведение on. В режиме
+            # on паузу взводит только ушедший импульс (см. execute_openings):
+            # решение, умершее в denied_stale или в отказе платы, не должно
+            # заставлять следующего человека ждать несуществующего открытия.
+            opening = LastOpening(event.id, decision_now)
         records.append(
             GatePassRecord(
                 frigate_event_id=event.id,
@@ -380,8 +414,13 @@ def execute_openings(
     gate_closed_at: float | None = None,
     now: float | None = None,
     notify: Callable[[str], None] | None = None,
-) -> list[GatePassRecord]:
+) -> tuple[list[GatePassRecord], LastOpening | None]:
     """Довести решение «открыл бы» до импульса, если режим это позволяет.
+
+    Второе значение — отметка ушедшего импульса для паузы; `None`, если ни один
+    не ушёл. Пауза считается от щелчка реле, а не от намерения: решение,
+    умершее в denied_stale или в отказе платы, не заставит следующего человека
+    ждать несуществующего открытия.
 
     Отделено от самого решения намеренно: решение — чистая функция, которую
     проверяют таблицей случаев, а исполнение трогает железо. Смешав их, нельзя
@@ -393,17 +432,26 @@ def execute_openings(
     без остановки. Строка, у которой уже есть исход, второй раз не исполняется.
     """
     if config.mode != "on" or not config.gates:
-        return records
+        return records, None
     relay = config.gates[0].relay
     moment = time.time() if now is None else now
-    executed = []
+    executed: list[GatePassRecord] = []
+    # Когда ушёл импульс — для паузы. Намерение её больше не взводит: решение,
+    # умершее в denied_stale или в отказе платы, не заставит следующего ждать.
+    pulsed_at: LastOpening | None = None
     for record in records:
         if record.decision != DECISION_DRY_RUN:
             executed.append(record)
             continue
         prior = already.get(record.frigate_event_id)
         repeat = False
-        if prior is not None and prior.decision in TERMINAL_DECISIONS:
+        if prior is not None and prior.decision == "error":
+            waited = moment - prior.last_pulse_at if prior.last_pulse_at else None
+            if waited is None or not 0 <= waited or waited < ERROR_RETRY_SECONDS:
+                executed.append(replace(record, decision=prior.decision))
+                continue
+            # Пауза выдержана — событию положена новая попытка.
+        elif prior is not None and prior.decision in TERMINAL_DECISIONS:
             if not second_chance_allowed(
                 prior,
                 rules=config.second_chance,
@@ -414,6 +462,18 @@ def execute_openings(
                 executed.append(replace(record, decision=prior.decision))
                 continue
             repeat = True
+        if pulsed_at is not None and config.cooldown_seconds > 0:
+            # Пауза обязана действовать и внутри одного опроса: два события в
+            # одной пачке — два человека или один, разорванный Frigate на два
+            # трека, — иначе реле щёлкает дважды подряд.
+            executed.append(
+                replace(
+                    record,
+                    decision=DECISION_COOLDOWN,
+                    reason="Пауза: калитка открыта мгновение назад",
+                )
+            )
+            continue
         gone_for = moment - record.ended_at if record.ended_at is not None else 0.0
         # Отрицательное — часы идут позади события. После обрыва питания так
         # и бывает, пока время не синхронизировалось: событие «из будущего»
@@ -437,6 +497,16 @@ def execute_openings(
             )
             continue
         pulse = opener.pulse(relay, config.pulse_ms)
+        if repeat and prior is not None and not pulse.ok:
+            # Второй шанс не удался. Разжаловать «opened» в «error» нельзя:
+            # успешное открытие уже случилось, и журнал не должен его терять, а
+            # запись «error» открывала бы обход всех лимитов второго шанса
+            # через ветку повтора. Несём прежний исход; время попытки — в
+            # запись, чтобы следующая ждала нового закрытия створки.
+            executed.append(
+                replace(record, decision=prior.decision, last_pulse_at=moment)
+            )
+            continue
         sent = (prior.pulses if prior is not None else 0) + 1
         if pulse.ok and repeat:
             reason = (
@@ -455,7 +525,9 @@ def execute_openings(
                 pulse_ms=pulse.pulse_ms,
                 modbus_ok=pulse.ok,
                 pulses=sent if pulse.ok else (prior.pulses if prior is not None else 0),
-                last_pulse_at=moment if pulse.ok else record.last_pulse_at,
+                # Время попытки пишется и при отказе платы: по нему считается
+                # пауза перед следующей попыткой (см. ERROR_RETRY_SECONDS).
+                last_pulse_at=moment,
                 pulse_gate_state=(
                     (gate_state or record.gate_state_before)
                     if pulse.ok
@@ -463,6 +535,8 @@ def execute_openings(
                 ),
             )
         )
+        if pulse.ok:
+            pulsed_at = LastOpening(record.frigate_event_id, datetime.fromtimestamp(moment, UTC))
         if notify is not None:
             # Уведомление на каждое открытие — условие разрешения владельца.
             notify(
@@ -470,7 +544,7 @@ def execute_openings(
                 f"по лицу — {record.person_name}"
                 + (" (второй раз: створка закрылась, а человек ещё здесь)" if repeat else "")
             )
-    return executed
+    return executed, pulsed_at
 
 
 def record_passes(
@@ -568,6 +642,7 @@ def record_passes(
             stored.decision = record.decision
             stored.pulse_ms = record.pulse_ms
             stored.modbus_ok = record.modbus_ok
+            stored.last_pulse_at = record.last_pulse_at or stored.last_pulse_at
             changed = True
         if (
             record.reason != stored.reason or record.factors_json != stored.factors_json
@@ -582,6 +657,15 @@ def record_passes(
             stored.reason = record.reason
             stored.factors_json = record.factors_json
             changed = True
+        if record.last_pulse_at and (stored.last_pulse_at or 0.0) < record.last_pulse_at:
+            # Время последней попытки — и удачной, и нет. Без этого троттлинг
+            # повторов после отказа платы работал ровно один раз: в базе
+            # навсегда оставалось время первой неудачи, каждый следующий опрос
+            # видел «пауза выдержана» — и получалась та самая долбёжка раз в
+            # секунду, от которой пауза должна защищать. Найдено адверсарным
+            # ревью 2026-08-14, подтверждено симуляцией цикла опроса.
+            stored.last_pulse_at = record.last_pulse_at
+            changed = True
         if record.pulses > (stored.pulses or 0):
             # Второй импульс по тому же событию: решение не изменилось, оно и
             # там и там «открыл», поэтому ветка выше эту строку не поймает.
@@ -591,7 +675,6 @@ def record_passes(
                 record.pulses,
             )
             stored.pulses = record.pulses
-            stored.last_pulse_at = record.last_pulse_at
             stored.pulse_gate_state = record.pulse_gate_state
             stored.reason = record.reason
             stored.pulse_ms = record.pulse_ms
@@ -753,6 +836,10 @@ def last_opening(session: Session) -> LastOpening | None:
     ).scalar_one_or_none()
     if row is None:
         return None
+    if row.last_pulse_at:
+        # Время настоящего импульса точнее начала события: между ними бывают
+        # десятки секунд распознавания, и пауза не должна их наследовать.
+        return LastOpening(row.frigate_event_id, datetime.fromtimestamp(row.last_pulse_at, UTC))
     moment = row.created_at
     # sqlite отдаёт метки без зоны, а записаны они в UTC.
     if moment.tzinfo is None:
@@ -1035,6 +1122,19 @@ def run(*, once: bool = False) -> None:
         window_start = time.time() - WATCH_WINDOW_SECONDS
         try:
             events = fetch_events(settings.gate_api_url, window_start)
+            # Плюс незаконченные старше окна: фильтр по началу события терял
+            # человека, простоявшего у калитки дольше пяти минут. Но не любого
+            # возраста: Frigate после неаккуратного перезапуска оставляет
+            # события с пустым end_time навсегда, и «бессмертное» событие без
+            # предела возраста могло бы дать импульс человеку, ушедшему месяц
+            # назад, — как только чистка журнала удалит его строку-предохранитель.
+            seen_ids = {event.id for event in events}
+            oldest = time.time() - ONGOING_MAX_AGE_SECONDS
+            events.extend(
+                event
+                for event in fetch_ongoing_events(settings.gate_api_url)
+                if event.id not in seen_ids and event.started_at >= oldest
+            )
         except RuntimeError as exc:
             # Frigate перезапускают; это не повод падать.
             logger.warning("%s", exc)
@@ -1088,7 +1188,7 @@ def run(*, once: bool = False) -> None:
                 }
                 automatic: list[str] = []
                 with board_lock:
-                    records = execute_openings(
+                    records, pulsed = execute_openings(
                         records,
                         config=config,
                         opener=opener,
@@ -1098,6 +1198,9 @@ def run(*, once: bool = False) -> None:
                         now=time.time(),
                         notify=automatic.append,
                     )
+                    if pulsed is not None:
+                        # Пауза считается от щелчка реле, а не от намерения.
+                        opening = pulsed
                 added, refined = record_passes(
                     session,
                     records,
