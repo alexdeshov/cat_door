@@ -159,3 +159,45 @@ def test_an_indistinguishable_cat_poisons_the_threshold() -> None:
     assert after_threshold > before_threshold
     assert after.recognised < before.recognised
     assert not after.not_worse_than(before)
+
+
+def test_one_stranger_crop_does_not_set_the_boundary() -> None:
+    """13 августа границу назначил один кроп — и модель стала неработающей.
+
+    Пространство развело котов прекрасно: свои на 0.85 от своего эталона, чужие
+    около нуля. Но у Ксюши нашёлся кроп с похожестью 0.939 на Черныша, и порог
+    уехал выше, чем живут собственные коты модели.
+    """
+    rng = np.random.default_rng(0)
+    same = list(rng.normal(0.85, 0.05, 200).clip(0.4, 0.99))
+    other = [*rng.normal(0.0, 0.15, 60).clip(-0.5, 0.5), 0.939]
+
+    threshold, stats = choose_threshold(same, other)
+
+    assert threshold < 0.9
+    assert stats["same_above_threshold"] >= 0.85
+
+
+def test_a_model_that_cannot_tell_a_stranger_apart_stays_strict() -> None:
+    """Послабление не должно превращаться в открытую дверь.
+
+    Если чужие похожи на своих не меньше самих своих, единственный безопасный
+    ответ — отказывать всем: пустить чужого кота в дом дороже, чем не узнать
+    своего.
+    """
+    threshold, stats = choose_threshold([0.3, 0.35], [0.9, 0.88])
+
+    assert threshold > 0.88
+    assert stats["same_above_threshold"] == 0.0
+
+
+def test_a_large_stranger_sample_is_trusted_as_before() -> None:
+    """Сотня чужих кропов позволяет оценить процент честно, без поправок."""
+    rng = np.random.default_rng(1)
+    same = list(rng.normal(0.85, 0.05, 300).clip(0.4, 0.99))
+    other = list(rng.normal(0.1, 0.2, 400).clip(-0.5, 0.95))
+
+    _, stats = choose_threshold(same, other)
+
+    assert stats["other_above_threshold"] <= 0.02
+    assert stats["same_above_threshold"] >= 0.8
