@@ -1,4 +1,6 @@
 import asyncio
+import base64
+import hashlib
 import json
 import os
 import shutil
@@ -1877,6 +1879,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "put",
             lambda: client.put_object(
                 Bucket=config.bucket, Key=probe_key, Body=b"catdoor probe"
+            ),
+        )
+        # Бакет с блокировкой по умолчанию требует Content-MD5, а свежий boto3
+        # шлёт вместо него CRC32 — вторая попытка различает «политика не пускает»
+        # и «нужен MD5».
+        digest = base64.b64encode(hashlib.md5(b"catdoor probe").digest()).decode()
+        attempt(
+            "put_md5",
+            lambda: client.put_object(
+                Bucket=config.bucket,
+                Key=probe_key,
+                Body=b"catdoor probe",
+                ContentMD5=digest,
             ),
         )
         attempt("get", lambda: client.get_object(Bucket=config.bucket, Key=probe_key))
