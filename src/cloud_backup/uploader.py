@@ -209,6 +209,15 @@ def run(settings: Settings, *, once: bool = False) -> None:
                         f"Догоняю: {sent_events + 1} из {len(batch)}, "
                         f"{sent_bytes / 1e6:.0f} МБ"
                     )
+                    # Журнал залитого — в каждое промежуточное сохранение.
+                    # Оба первых догоняющих цикла умерли до конца, и час
+                    # выгрузки не оставил ни одной отметки: 460 клипов поехали
+                    # по второму разу, а при версионировании с блокировкой
+                    # каждая перезаливка — лишняя запертая версия и деньги.
+                    state["uploaded"] = list(uploaded)[-REMEMBER_IDS:]
+                    state["attempts"] = {
+                        key: value for key, value in attempts.items() if value < 5
+                    }
                     _save_state(state_path, state)
                 try:
                     snapshot = _fetch_bytes(
