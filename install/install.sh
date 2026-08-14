@@ -62,6 +62,7 @@ chmod 640 "$CONFIG_FILE"
 for unit in catdoor-recorder.service catdoor-web.service \
         catdoor-gate-sync.service catdoor-gate-sync.path catdoor-gate-sync.timer \
         catdoor-gate-notify.service catdoor-gate-access.service \
+        catdoor-cloud-backup.service \
         catdoor-cpu-thermal.service \
         catdoor-backup.service catdoor-backup.timer; do
     install -m 644 "$REPO_DIR/install/$unit" "$UNIT_DIR/$unit"

@@ -209,6 +209,7 @@ DATA_UNITS = (
     "catdoor-recorder.service",
     "catdoor-web.service",
     "catdoor-gate-notify.service",
+        "catdoor-cloud-backup.service",
     "catdoor-gate-access.service",
     "catdoor-gate-sync.service",
     "catdoor-backup.service",

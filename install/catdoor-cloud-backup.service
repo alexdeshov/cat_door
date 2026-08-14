@@ -1,0 +1,50 @@
+[Unit]
+Description=CatDoor — облачная копия клипов событий
+Documentation=https://github.com/alexdeshov/cat_door/blob/main/docs/admin-mvp.md
+# Опрашивать Frigate до того, как он поднялся, бессмысленно, но и падать от
+# этого служба не должна: она просто ждёт и спрашивает снова.
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+# Каталог данных лежит на отдельном томе, и systemd сам про него не знает:
+# путь приходит из окружения, а не из юнита. Без этой строки служба стартует
+# раньше монтирования и пишет в пустой каталог под точкой монтирования.
+#
+# 2026-08-09 ровно это случилось с Frigate: контейнер поднялся на 2.3 секунды
+# раньше тома, четыре часа писал записи не на тот диск и не видел библиотеки
+# лиц. Гонка проигрывалась и при чистой загрузке — просто её маскировали наши
+# же перезапуски по другим поводам.
+RequiresMountsFor=/var/lib/catdoor
+
+[Service]
+Type=notify
+NotifyAccess=main
+# Цикл раз в минуту; большой клип может грузиться десятки секунд.
+# оставляет запас на неспешный ответ Frigate и на таймауты Телеграма.
+WatchdogSec=300
+
+User=catdoor
+Group=catdoor
+WorkingDirectory=/opt/catdoor
+EnvironmentFile=/etc/catdoor/catdoor.env
+ExecStart=/opt/catdoor/.venv/bin/python -m src.cloud_backup.uploader
+
+# Та же выдержка, что у остальных служб узла: сдаваться нельзя, но и
+# долбиться каждую секунду незачем.
+Restart=always
+RestartSec=5
+RestartSteps=5
+RestartMaxDelaySec=1800
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+ReadWritePaths=/var/lib/catdoor
+
+[Install]
+WantedBy=multi-user.target

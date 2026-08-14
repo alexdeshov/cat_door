@@ -79,6 +79,13 @@ from src.common.circuits import (
     load_circuits,
     save_circuits,
 )
+from src.common.cloud_backup_config import (
+    CloudBackupConfig,
+    cloud_backup_config_path,
+    cloud_backup_state_path,
+    load_cloud_backup_config,
+    save_cloud_backup_config,
+)
 from src.common.database import (
     EvaluationRun,
     Event,
@@ -535,6 +542,19 @@ class GateAccessPayload(BaseModel):
     open_to: str = "23:00"
     movement: MovementRulesPayload | None = None
     second_chance: SecondChanceRulesPayload | None = None
+
+
+class CloudBackupPayload(BaseModel):
+    enabled: bool = False
+    bucket: str = ""
+    endpoint: str = "https://storage.yandexcloud.net"
+    region: str = "ru-central1"
+    prefix: str = "events"
+    lookback_hours: int = 24
+    cameras: list[str] = Field(default_factory=list)
+    # Пусто — «оставить прежний»: секрет наружу не выходит и вернуться не может.
+    access_key_id: str = ""
+    secret_key: str = ""
 
 
 class DiscoveryPayload(BaseModel):
@@ -1772,6 +1792,42 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             },
         }
 
+    def _cloud_backup_view(config: CloudBackupConfig) -> dict[str, object]:
+        """Настройки для админки: секрет наружу не выходит, только его наличие."""
+        values = config.model_dump(exclude={"secret_key", "access_key_id"})
+        values["has_secret"] = bool(config.secret_key)
+        values["access_key_hint"] = (
+            config.access_key_id[:4] + "…" if config.access_key_id else ""
+        )
+        return values
+
+    @app.get("/api/cloud-backup/settings")
+    def get_cloud_backup_settings() -> dict[str, object]:
+        return _cloud_backup_view(
+            load_cloud_backup_config(
+                cloud_backup_config_path(settings.data_dir), CloudBackupConfig()
+            )
+        )
+
+    @app.put("/api/cloud-backup/settings")
+    def update_cloud_backup_settings(payload: CloudBackupPayload) -> dict[str, object]:
+        """Пустые ключи в запросе означают «оставить прежние».
+
+        Админка получает секрет замаскированным и вернуть его не может — тот же
+        приём, что с MAC телефонов у калитки.
+        """
+        path = cloud_backup_config_path(settings.data_dir)
+        stored = load_cloud_backup_config(path, CloudBackupConfig())
+        values = payload.model_dump(exclude={"access_key_id", "secret_key"})
+        values["access_key_id"] = payload.access_key_id or stored.access_key_id
+        values["secret_key"] = payload.secret_key or stored.secret_key
+        config = CloudBackupConfig.model_validate(values)
+        try:
+            save_cloud_backup_config(path, config)
+        except OSError as exc:
+            raise HTTPException(500, "Не удалось сохранить настройки облака") from exc
+        return _cloud_backup_view(config)
+
     @app.get("/health", response_class=HTMLResponse)
     def health_page(
         request: Request,
@@ -1784,6 +1840,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "circuit": "health",
                 "health": current_health(),
                 "dashboard": _health_dashboard(session),
+                "cloud_backup": _cloud_backup_view(
+                    load_cloud_backup_config(
+                        cloud_backup_config_path(settings.data_dir), CloudBackupConfig()
+                    )
+                ),
+                "cloud_state": _read_status(
+                    cloud_backup_state_path(settings.data_dir)
+                ),
             },
         )
 

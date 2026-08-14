@@ -2,6 +2,44 @@
 {% set circuit = "health" %}
 {% block title %}CatDoor — состояние узла{% endblock %}
 
+{% block scripts %}
+<script>
+  document.querySelector("#save-cloud")?.addEventListener("click", async event => {
+    const button = event.currentTarget;
+    const status = document.querySelector("#cloud-save-status");
+    button.disabled = true;
+    status.textContent = "…";
+    status.classList.remove("bad");
+    try {
+      const response = await fetch("/api/cloud-backup/settings", {
+        method: "PUT",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({
+          enabled: document.querySelector("#cloud-enabled").checked,
+          bucket: document.querySelector("#cloud-bucket").value.trim(),
+          prefix: document.querySelector("#cloud-prefix").value.trim() || "events",
+          lookback_hours: Number(document.querySelector("#cloud-lookback").value),
+          endpoint: document.querySelector("#cloud-endpoint").value.trim(),
+          region: document.querySelector("#cloud-region").value.trim(),
+          access_key_id: document.querySelector("#cloud-key-id").value.trim(),
+          secret_key: document.querySelector("#cloud-secret").value
+        })
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.detail || `ошибка ${response.status}`);
+      status.textContent = "сохранено — служба подхватит в течение минуты";
+      document.querySelector("#cloud-secret").value = "";
+      document.querySelector("#cloud-key-id").value = "";
+    } catch (error) {
+      status.textContent = error.message;
+      status.classList.add("bad");
+    } finally {
+      button.disabled = false;
+    }
+  });
+</script>
+{% endblock %}
+
 {% block content %}
 {% set tone = {"ok": "beacon-ok", "warn": "beacon-warn", "fail": "beacon-bad", "unknown": ""} %}
 {% set verdicts = {
@@ -145,6 +183,61 @@
     </div>
   </div>
 </section>
+
+{# Облачная копия событий: страховка от выноса оборудования. Ключ только на
+   запись, секрет наружу не выходит — пустое поле значит «оставить прежний». #}
+<details class="panel folded-panel" {% if not cloud_backup.enabled %}open{% endif %}>
+  <summary class="panel-head">
+    <h2>Облачная копия событий</h2>
+    <span class="state-line muted data">
+      {{ "включена" if cloud_backup.enabled else "выключена" }}
+      {%- if cloud_state %} · {{ cloud_state.message }}{% endif %}
+    </span>
+  </summary>
+  <div class="panel-body">
+    <div class="controls">
+      <label class="controls" style="font-size: 13px">
+        <input id="cloud-enabled" type="checkbox" {{ "checked" if cloud_backup.enabled }}>
+        выгружать клипы событий в бакет
+      </label>
+    </div>
+    <div class="controls">
+      <label for="cloud-bucket">бакет</label>
+      <input id="cloud-bucket" type="text" value="{{ cloud_backup.bucket }}" style="width: 14em">
+      <label for="cloud-prefix">префикс</label>
+      <input id="cloud-prefix" type="text" value="{{ cloud_backup.prefix }}" style="width: 8em">
+      <label for="cloud-lookback">оглядка, ч</label>
+      <input id="cloud-lookback" type="number" min="1" max="168"
+        value="{{ cloud_backup.lookback_hours }}">
+    </div>
+    <div class="controls">
+      <label for="cloud-endpoint">endpoint</label>
+      <input id="cloud-endpoint" type="text" value="{{ cloud_backup.endpoint }}" style="width: 18em">
+      <label for="cloud-region">регион</label>
+      <input id="cloud-region" type="text" value="{{ cloud_backup.region }}" style="width: 8em">
+    </div>
+    <div class="controls">
+      <label for="cloud-key-id">key id</label>
+      <input id="cloud-key-id" type="text" autocomplete="off"
+        placeholder="{{ cloud_backup.access_key_hint or 'не задан' }}" style="width: 12em">
+      <label for="cloud-secret">secret</label>
+      <input id="cloud-secret" type="password" autocomplete="new-password"
+        placeholder="{{ 'сохранён' if cloud_backup.has_secret else 'не задан' }}" style="width: 14em">
+      <button id="save-cloud" type="button">Сохранить</button>
+      <span id="cloud-save-status" class="muted data" style="font-size: 12px"></span>
+    </div>
+    <p class="muted" style="font-size: 13px">
+      Ключ — только на запись (PutObject; bucket policy запрещает чтение и
+      удаление), в бакете compliance-блокировка по умолчанию и lifecycle-уборка:
+      украденный вместе с сервером ключ не умеет стереть архив. Пустые поля
+      ключей означают «оставить прежние» — секрет наружу не выходит. Чистит
+      бакет само облако, службе удалять нечего и нечем.
+    </p>
+    {% if cloud_state and cloud_state.last_error %}
+      <p class="notice notice-bad">Последняя ошибка: {{ cloud_state.last_error }}</p>
+    {% endif %}
+  </div>
+</details>
 
 {% for group in health.groups %}
   <section class="panel" id="group-{{ loop.index }}">
