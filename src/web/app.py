@@ -554,6 +554,7 @@ class CloudBackupPayload(BaseModel):
     prefix: str = "events"
     lookback_hours: int = 24
     cameras: list[str] = Field(default_factory=list)
+    retention_days: int = 30
     # Пусто — «оставить прежний»: секрет наружу не выходит и вернуться не может.
     access_key_id: str = ""
     secret_key: str = ""
@@ -1798,6 +1799,31 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         """Настройки для админки: секрет наружу не выходит, только его наличие."""
         values = config.model_dump(exclude={"secret_key", "access_key_id"})
         values["has_secret"] = bool(config.secret_key)
+        # Уборку в облаке делает lifecycle бакета, а не служба: её ключ не
+        # умеет удалять по построению. Команду настройки печатаем готовой —
+        # владелец выполняет один раз со своей машины со своим админским
+        # профилем (тот же приём, что с активацией моделей).
+        if config.bucket and config.retention_days:
+            rules = {
+                "Rules": [
+                    {
+                        "ID": "catdoor-events-retention",
+                        "Status": "Enabled",
+                        "Filter": {"Prefix": f"{config.prefix}/"},
+                        "Expiration": {"Days": config.retention_days},
+                        "NoncurrentVersionExpiration": {
+                            "NoncurrentDays": config.retention_days
+                        },
+                        "AbortIncompleteMultipartUpload": {"DaysAfterInitiation": 1},
+                    }
+                ]
+            }
+            values["lifecycle_command"] = (
+                f"aws --endpoint-url {config.endpoint} "
+                f"s3api put-bucket-lifecycle-configuration "
+                f"--bucket {config.bucket} "
+                f"--lifecycle-configuration '{json.dumps(rules, separators=(',', ':'))}'"
+            )
         # Длина — безопасная диагностика: у секретов Яндекса она всегда 40, и
         # «37» или «41» мгновенно выдаёт обрезанную или слипшуюся вставку,
         # которую иначе видно только как SignatureDoesNotMatch.

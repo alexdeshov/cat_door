@@ -226,6 +226,18 @@ def _state(data_dir: Path) -> dict[str, Any]:
     return json.loads(cloud_backup_state_path(data_dir).read_text(encoding="utf-8"))
 
 
+def _age_attempts(data_dir: Path, seconds: float) -> None:
+    """Состарить отметки попыток: «прошло N секунд» без настоящего ожидания.
+
+    Бэкофф откладывает повтор от `last_at`; тесты не спят, а сдвигают отметку.
+    """
+    path = cloud_backup_state_path(data_dir)
+    state = json.loads(path.read_text(encoding="utf-8"))
+    for entry in (state.get("attempts") or {}).values():
+        entry["last_at"] -= seconds
+    path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+
+
 def _uploaded_clips(s3: _FakeS3) -> Counter[str]:
     return Counter(key for key in s3.stored if key.endswith(".mp4"))
 
@@ -249,7 +261,9 @@ def test_a_dead_uplink_leaves_the_journal_empty(
 
     state = _state(runtime_path)
     assert state["uploaded"] == []
-    assert state["attempts"] == {"a": 1, "b": 1, "c": 1}
+    assert {key: value["count"] for key, value in state["attempts"].items()} == {
+        "a": 1, "b": 1, "c": 1
+    }
     assert state["day_events"] == 0
     # После правки 14.08 полное отсутствие доставки — это не «ok, отложено»,
     # а честная ошибка: зелёная строка неделю врала бы при пустом бакете.
@@ -282,7 +296,9 @@ def test_only_delivered_events_enter_the_journal_when_the_link_dies_mid_queue(
 
     state = _state(runtime_path)
     assert set(state["uploaded"]) == delivered
-    assert state["attempts"] == {"e2": 1, "e1": 1, "e0": 1}
+    assert {key: value["count"] for key, value in state["attempts"].items()} == {
+        "e2": 1, "e1": 1, "e0": 1
+    }
     # У доехавших событий в бакете и клип, и снимок.
     assert sorted(_uploaded_clips(s3).values()) == [1, 1, 1]
     assert len([key for key in s3.stored if key.endswith(".jpg")]) == 3
@@ -342,6 +358,7 @@ def test_the_returning_link_catches_up_without_paying_twice(
 
     run(settings, once=True)  # канала нет на хвосте очереди
     s3.fail = lambda key: False  # канал вернулся
+    _age_attempts(runtime_path, 3600)  # бэкофф выждан
     run(settings, once=True)
 
     state = _state(runtime_path)
@@ -384,28 +401,57 @@ def test_the_lookback_window_is_the_only_memory_of_a_pending_event(
     assert state["pending"] == 0
 
 
-def test_five_offline_cycles_do_not_write_the_event_off(
+def test_no_amount_of_failures_writes_the_event_off(
     runtime_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Пять минут без интернета не должны хоронить очередь.
+    """Сколько бы попыток ни провалилось — событие не хоронится никогда.
 
-    Порог в пять попыток задумывался против «ядовитого» клипа, который узел не
-    может отдать. Но счётчик рос по циклам, а цикл — минута: пять минут обрыва
-    списывали ВСЮ очередь как залитую, и вернувшаяся связь уже не догоняла ни
-    одного клипа — включая тот, ради которого копия и заводилась. Списание
-    допустимо только когда канал в том же цикле доказал, что жив.
+    Списание при однонаправленном ключе необратимо (чтения нет — проверить,
+    залито ли, нельзя), а его сигналы на рваной связи оказались ложными:
+    попытки копились в мёртвых циклах, «живость» канала доказывалась одним
+    мелким объектом (находка ревью 15.08). Теперь неудача лишь отодвигает
+    следующую попытку; из памяти событие выходит только с окном оглядки.
     """
-    frigate = _Frigate([_event("вор", start=1000.0)])
+    now = time.time()
+    frigate = _Frigate([_event("вор", now - 3600)])
     s3 = _FakeS3(fail=lambda key: True)
     settings = _install(monkeypatch, runtime_path, frigate, s3)
 
     for _ in range(6):
         run(settings, once=True)
+        _age_attempts(runtime_path, 7200)  # каждый цикл — с выжданным бэкоффом
 
     state = _state(runtime_path)
     assert state["uploaded"] == []  # ничего не похоронено
-    assert state["attempts"]["вор"] == 6  # попытки честно копятся
+    assert state["attempts"]["вор"]["count"] == 6  # попытки честно копятся
     assert _uploaded_clips(s3) == Counter()
+
+
+def test_a_failure_defers_the_retry_instead_of_hammering(
+    runtime_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Упавшее событие отдыхает по бэкоффу, а не долбится каждый цикл.
+
+    Ядовитый клип, который узел не может отдать, раньше тратил таймаут в
+    каждом 30-секундном цикле. Теперь после неудачи событие ждёт своей
+    очереди — минута, две, четыре… потолок час — и не мешает остальным.
+    """
+    now = time.time()
+    frigate = _Frigate([_event("яд", now - 3600)])
+    s3 = _FakeS3(fail=lambda key: True)
+    settings = _install(monkeypatch, runtime_path, frigate, s3)
+
+    run(settings, once=True)  # первая неудача
+    tried = len(s3.attempted)
+    run(settings, once=True)  # сразу следом: событие отдыхает
+    assert len(s3.attempted) == tried  # второй попытки не было
+    state = _state(runtime_path)
+    assert state["attempts"]["яд"]["count"] == 1
+    assert "отложено 1" in state["message"] or "Жду повтора" in state["message"]
+
+    _age_attempts(runtime_path, 3600)  # бэкофф вышел
+    run(settings, once=True)
+    assert len(s3.attempted) > tried  # попытка вернулась
 
 def test_the_returning_link_must_catch_up_events_that_waited_out_the_outage(
     runtime_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -423,6 +469,7 @@ def test_the_returning_link_must_catch_up_events_that_waited_out_the_outage(
 
     for _ in range(5):
         run(settings, once=True)
+        _age_attempts(runtime_path, 7200)
     s3.fail = lambda key: False  # канал вернулся
     run(settings, once=True)
 
@@ -479,18 +526,27 @@ def test_frigate_outage_neither_crashes_the_service_nor_wipes_the_journal(
 def test_the_journal_stops_growing_at_the_remembered_limit(
     runtime_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Файл состояния не растёт бесконечно: помним ровно REMEMBER_IDS отметок."""
+    """Файл состояния не растёт бесконечно — но помнит не меньше двух выборок.
+
+    Журнал в 4000 при выборке в 4800 ронял отметки о свежезалитом и перезаливал
+    излишек по кругу (находка ревью 15.08): потолок обязан быть не меньше
+    удвоенного предела выборки текущего окна.
+    """
+    from src.cloud_backup.uploader import events_limit
+
+    cap = max(REMEMBER_IDS, 2 * events_limit(24))
     now = time.time()
     settings = _install(monkeypatch, runtime_path, _Frigate([_event("a", now - 300)]), _FakeS3())
     cloud_backup_state_path(runtime_path).parent.mkdir(parents=True, exist_ok=True)
     cloud_backup_state_path(runtime_path).write_text(
-        json.dumps({"uploaded": [f"old-{index:05d}" for index in range(REMEMBER_IDS + 400)]}),
+        json.dumps({"uploaded": [f"old-{index:05d}" for index in range(cap + 400)]}),
         encoding="utf-8",
     )
 
     run(settings, once=True)
 
-    assert len(_state(runtime_path)["uploaded"]) == REMEMBER_IDS
+    assert len(_state(runtime_path)["uploaded"]) == cap
+    assert cap >= 2 * events_limit(24)
 
 
 def test_trimming_the_journal_keeps_the_freshest_marks(
@@ -501,15 +557,17 @@ def test_trimming_the_journal_keeps_the_freshest_marks(
     Отметка живёт ради окна оглядки — событие суточной давности ещё вернётся
     в выборке Frigate. Потерянная сегодняшняя отметка означает повторную
     заливку того же клипа, то есть лишнюю запертую версию и оплату за неё;
-    выброшенная старая не стоит ничего. Сейчас код выбирает произвольные:
-    хвост берётся у списка, собранного из множества.
+    выброшенная старая не стоит ничего.
     """
+    from src.cloud_backup.uploader import events_limit
+
+    cap = max(REMEMBER_IDS, 2 * events_limit(24))
     now = time.time()
     fresh = [f"fresh-{index:05d}" for index in range(400)]
     settings = _install(monkeypatch, runtime_path, _Frigate([_event("a", now - 300)]), _FakeS3())
     cloud_backup_state_path(runtime_path).parent.mkdir(parents=True, exist_ok=True)
     cloud_backup_state_path(runtime_path).write_text(
-        json.dumps({"uploaded": [f"old-{index:05d}" for index in range(REMEMBER_IDS)] + fresh}),
+        json.dumps({"uploaded": [f"old-{index:05d}" for index in range(cap)] + fresh}),
         encoding="utf-8",
     )
 
@@ -768,3 +826,253 @@ def test_the_events_limit_grows_with_the_lookback_window() -> None:
     assert events_limit(1) == 500  # пол не ниже прежнего предела
     assert events_limit(24) == 4800  # десятикратный запас к замеренным 465
     assert events_limit(168) == EVENTS_LIMIT_CEILING  # неделя упирается в потолок
+
+
+# ── Находки адверсарного ревью 15.08 ───────────────────────────────
+
+
+def test_an_unreadable_state_file_does_not_wipe_the_journal(
+    runtime_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Сбойное чтение состояния — пропущенный цикл, а не стёртый журнал.
+
+    Раньше любой сбойный read выглядел как чистый старт: цикл работал с пустым
+    журналом и в конце перезаписывал файл без отметок — всё окно ехало по
+    второму разу. Нечитаемый файл обязан оставлять журнал нетронутым.
+    """
+    now = time.time()
+    s3 = _FakeS3()
+    settings = _install(monkeypatch, runtime_path, _Frigate([_event("a", now - 300)]), s3)
+    path = cloud_backup_state_path(runtime_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('{"uploaded": ["a"]', encoding="utf-8")  # обрезанный json
+
+    run(settings, once=True)
+
+    # Файл не перезаписан «чистым листом», клип не поехал по второму разу.
+    assert path.read_text(encoding="utf-8") == '{"uploaded": ["a"]'
+    assert s3.attempted == []
+
+
+def test_a_garbage_event_does_not_stall_the_whole_queue(
+    runtime_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Кривое событие в выдаче Frigate пропускается, остальные едут.
+
+    Одна мусорная строка (нечисловое время) раньше роняла отбор целиком —
+    и каждые 30 секунд, пока событие не выйдет из окна оглядки.
+    """
+    now = time.time()
+    events = [
+        {"id": "мусор", "camera": "gate", "start_time": "не число", "end_time": now - 60},
+        _event("живое", now - 300),
+    ]
+    s3 = _FakeS3()
+    settings = _install(monkeypatch, runtime_path, _Frigate(events), s3)
+
+    run(settings, once=True)
+
+    assert any(key.endswith("/живое.mp4") for key in s3.stored)
+    assert _state(runtime_path)["status"] == "ok"
+
+
+def test_a_transient_has_clip_false_is_not_a_death_sentence() -> None:
+    """`has_clip=False` сразу после конца события — ещё не «записи нет».
+
+    Флаг у Frigate выставляется с задержкой: событие, увиденное без него в
+    первые секунды, раньше помечалось пропуском навсегда — и появившийся
+    клип не уезжал уже никогда.
+    """
+    from src.cloud_backup.uploader import HAS_CLIP_GRACE_SECONDS, eligible_events
+
+    now = 100_000.0
+    fresh = {"id": "свежее", "camera": "gate", "start_time": now - 40,
+             "end_time": now - 30, "has_clip": False}
+    stale = {"id": "старое", "camera": "gate", "start_time": now - 4000,
+             "end_time": now - 3990, "has_clip": False}
+
+    selected = eligible_events([fresh, stale], CloudBackupConfig(), set(), now=now)
+
+    ids = {event["id"]: event for event in selected}
+    assert "свежее" not in ids  # без пометки: вернёмся, когда флаг дозреет
+    assert ids["старое"].get("_skip") is True  # старому ждать нечего
+    # Флаг дозрел — событие снова в отборе, как обычное.
+    ripened = {**fresh, "has_clip": True}
+    later = eligible_events(
+        [ripened], CloudBackupConfig(), set(), now=now + HAS_CLIP_GRACE_SECONDS
+    )
+    assert [event["id"] for event in later] == ["свежее"]
+
+
+def test_a_duplicate_id_in_the_feed_uploads_once() -> None:
+    """Дубликат id в выдаче Frigate не уезжает дважды за цикл."""
+    now = 100_000.0
+    twice = [_event("одно", now - 300), _event("одно", now - 300)]
+
+    selected = eligible_events(twice, CloudBackupConfig(), set(), now=now)
+
+    assert len(selected) == 1
+
+
+def test_a_mismatched_camera_filter_is_an_error_not_an_empty_queue(
+    runtime_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Фильтр камер, не совпавший ни с чем, — честная ошибка.
+
+    Прецедент `test-cam` против `test_cam`: события шли, фильтр их отсекал,
+    панель писала «Очередь пуста» со свежим успехом — и тревога молчала
+    неделями при пустом бакете.
+    """
+    now = time.time()
+    frigate = _Frigate([_event("a", now - 300)])  # камера gate
+    settings = _install(monkeypatch, runtime_path, frigate, _FakeS3())
+    save_cloud_backup_config(
+        cloud_backup_config_path(runtime_path),
+        CloudBackupConfig(
+            enabled=True, bucket="catdoor-events", access_key_id="AKID",
+            secret_key="s3cr3t", cameras=["test-cam"],  # а во Frigate «gate»
+        ),
+    )
+
+    run(settings, once=True)
+
+    state = _state(runtime_path)
+    assert state["status"] == "error"
+    assert "Фильтр камер" in state["last_error"]
+    assert "last_success_at" not in state
+
+
+def test_waiting_out_backoff_does_not_refresh_the_health_mark(
+    runtime_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Цикл, где вся очередь отдыхает по бэкоффу, не притворяется здоровым.
+
+    Свежая отметка успеха в таком цикле глушила бы тревогу при неделями
+    стоящих клипах: канал ничего не доказал.
+    """
+    now = time.time()
+    s3 = _FakeS3(fail=lambda key: True)
+    settings = _install(monkeypatch, runtime_path, _Frigate([_event("a", now - 300)]), s3)
+
+    run(settings, once=True)  # неудача: события в бэкоффе
+    state = _state(runtime_path)
+    assert "last_success_at" not in state
+
+    run(settings, once=True)  # очередь отдыхает — успех не рисуется
+    state = _state(runtime_path)
+    assert "last_success_at" not in state
+    assert "Жду повтора" in state["message"]
+
+
+def test_attempts_for_events_outside_the_window_are_forgotten(
+    runtime_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Память о попытках живёт вместе с окном оглядки.
+
+    Событие, ушедшее из окна, Frigate больше не отдаст — его запись только
+    копила бы файл состояния навсегда.
+    """
+    now = time.time()
+    s3 = _FakeS3()
+    settings = _install(monkeypatch, runtime_path, _Frigate([_event("a", now - 300)]), s3)
+    path = cloud_backup_state_path(runtime_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"attempts": {"давно-ушедшее": {"count": 3, "last_at": now - 90000}}}),
+        encoding="utf-8",
+    )
+
+    run(settings, once=True)
+
+    assert _state(runtime_path)["attempts"] == {}
+
+
+def test_the_heartbeat_thread_does_not_feed_the_watchdog_forever() -> None:
+    """У нити-кормильца есть потолок жизни: зависшую передачу нельзя прятать.
+
+    Таймауты передач по-операционные: полуживое соединение, отдающее байт раз
+    в сто секунд, держит put_object вечно — и бесконечный пинг делал бы это
+    зависание невидимым для systemd навсегда.
+    """
+    from src.cloud_backup.uploader import _heartbeat
+
+    pings: list[int] = []
+    notifier = SimpleNamespace(
+        watchdog_interval_seconds=0.01, watchdog=lambda: pings.append(1)
+    )
+    # Потолок пересчитывается от интервала: подменять константу не нужно —
+    # хватает того, что нить считает прожитое как beats * interval.
+    import src.cloud_backup.uploader as uploader_module
+
+    original = uploader_module.HEARTBEAT_LIFETIME_SECONDS
+    uploader_module.HEARTBEAT_LIFETIME_SECONDS = 0.03
+    try:
+        with _heartbeat(notifier):  # type: ignore[arg-type]
+            time.sleep(0.15)  # «передача» живёт дольше потолка
+    finally:
+        uploader_module.HEARTBEAT_LIFETIME_SECONDS = original
+
+    assert len(pings) <= 4  # ~3 пинга до потолка, дальше тишина
+
+
+def test_the_bucket_is_measured_and_a_dead_lifecycle_is_called_out(
+    runtime_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Служба меряет бакет и говорит вслух, если уборка не работает.
+
+    Удалять она не умеет по построению — уборку делает lifecycle, который
+    настраивает владелец; забытая настройка означала бы бесконечный счёт.
+    """
+    from datetime import UTC, timedelta
+    from datetime import datetime as dt
+
+    now = time.time()
+    settings = _install(monkeypatch, runtime_path, _Frigate([_event("a", now - 300)]), _FakeS3())
+    save_cloud_backup_config(
+        cloud_backup_config_path(runtime_path),
+        CloudBackupConfig(
+            enabled=True, bucket="catdoor-events", access_key_id="AKID",
+            secret_key="s3cr3t", retention_days=30,
+        ),
+    )
+    stale = dt.now(UTC) - timedelta(days=40)  # старше срока + люфта
+
+    class _ListingS3(_FakeS3):
+        def list_objects_v2(self, **kwargs: Any) -> dict[str, Any]:
+            return {
+                "Contents": [
+                    {"Size": 1000, "LastModified": stale},
+                    {"Size": 2000, "LastModified": dt.now(UTC)},
+                ],
+                "IsTruncated": False,
+            }
+
+    s3 = _ListingS3()
+    monkeypatch.setitem(
+        sys.modules, "boto3", SimpleNamespace(client=lambda *args, **kwargs: s3)
+    )
+
+    run(settings, once=True)
+
+    cloud = _state(runtime_path)["cloud"]
+    assert cloud["bytes"] == 3000 and cloud["objects"] == 2
+    assert cloud["retention_working"] is False  # уборка не убирает — сказано вслух
+
+
+def test_the_panel_prints_the_lifecycle_command_for_the_owner(
+    runtime_path: Path, monkeypatch
+) -> None:
+    """Панель печатает готовую команду настройки уборки — владелец выполняет."""
+    from tests.test_admin import make_client
+
+    client = make_client(runtime_path, monkeypatch)
+    saved = client.put(
+        "/api/cloud-backup/settings",
+        json={"enabled": True, "bucket": "b1", "retention_days": 30,
+              "access_key_id": "AKIDXYZW", "secret_key": "verysecret"},
+    ).json()
+
+    command = saved["lifecycle_command"]
+    assert "put-bucket-lifecycle-configuration" in command
+    assert '"Days":30' in command and "--bucket b1" in command
+    assert "verysecret" not in command  # команда — без секретов
