@@ -68,6 +68,7 @@
           bucket: document.querySelector("#cloud-bucket").value.trim(),
           prefix: document.querySelector("#cloud-prefix").value.trim() || "events",
           lookback_hours: Number(document.querySelector("#cloud-lookback").value),
+          retention_days: Number(document.querySelector("#cloud-retention").value),
           endpoint: document.querySelector("#cloud-endpoint").value.trim(),
           region: document.querySelector("#cloud-region").value.trim(),
           access_key_id: document.querySelector("#cloud-key-id").value.trim(),
@@ -258,6 +259,9 @@
       <label for="cloud-lookback">оглядка, ч</label>
       <input id="cloud-lookback" type="number" min="1" max="168"
         value="{{ cloud_backup.lookback_hours }}">
+      <label for="cloud-retention">хранить, дн</label>
+      <input id="cloud-retention" type="number" min="0" max="3650"
+        value="{{ cloud_backup.retention_days }}">
     </div>
     <div class="controls">
       <label for="cloud-endpoint">endpoint</label>
@@ -285,12 +289,35 @@
       каждые шесть часов, пока не починится; о возвращении тоже скажет.
       Оговорка честная: при мёртвом канале сообщение само не уйдёт и придёт с
       возвратом связи — тревога дополняет эту страницу, а не заменяет.
-      Ключ — только на запись (PutObject; bucket policy запрещает чтение и
-      удаление), в бакете compliance-блокировка по умолчанию и lifecycle-уборка:
-      украденный вместе с сервером ключ не умеет стереть архив. Пустые поля
-      ключей означают «оставить прежние» — секрет наружу не выходит. Чистит
-      бакет само облако, службе удалять нечего и нечем.
+      Ключ — только на запись и перечисление: украденный вместе с сервером
+      ключ не умеет ни читать архив, ни стереть его. Пустые поля ключей
+      означают «оставить прежние» — секрет наружу не выходит.
     </p>
+    {% if cloud_state and cloud_state.cloud %}
+    <p class="muted data" style="font-size: 13px">
+      В бакете: {{ cloud_state.cloud.objects }} объектов,
+      {{ "%.1f"|format(cloud_state.cloud.bytes / 1e9) }} ГБ
+      {%- if cloud_state.cloud.oldest_at %},
+      старейший — {{ cloud_state.cloud.oldest_at[:10] }}{% endif %}.
+      {% if cloud_state.cloud.retention_working is defined %}
+        {% if cloud_state.cloud.retention_working %}
+        Уборка работает: возраст в пределах срока.
+        {% else %}
+        <strong>Уборка не работает:</strong> старейший объект пережил срок
+        хранения — lifecycle не настроен или не применился.
+        {% endif %}
+      {% endif %}
+    </p>
+    {% endif %}
+    {% if cloud_backup.lifecycle_command %}
+    <p class="muted" style="font-size: 13px">
+      Старые события чистит lifecycle бакета — служба удалять не умеет по
+      построению, поэтому уборку настраивает владелец один раз со своей машины
+      (админский профиль aws), командой под текущий срок хранения
+      ({{ cloud_backup.retention_days }} дн):
+    </p>
+    <pre class="data" style="font-size: 11px; overflow-x: auto; user-select: all">{{ cloud_backup.lifecycle_command }}</pre>
+    {% endif %}
     <div id="cloud-progress-row" hidden style="margin-top: 8px">
       <progress id="cloud-progress" max="100" value="0" style="width: 100%"></progress>
       <span id="cloud-progress-text" class="muted data" style="font-size: 12px"></span>

@@ -61,6 +61,10 @@ def _passes(events, **overrides):  # type: ignore[no-untyped-def]
         "cameras": {"gate": "Калитка"},
         "config": _config(mode="off"),
         "timezone": MOSCOW,
+        # «Сейчас» фиксировано и дневное: без него решения брали настоящие
+        # часы, и вся пачка тестов падала каждый день с 23:00 до 07:00 МСК —
+        # окно автопроходов по умолчанию закрыто ночью (denied_window).
+        "now": datetime(2026, 8, 14, 12, 0, tzinfo=MOSCOW),
     }
     values.update(overrides)
     return passes_from_events(events, **values)  # type: ignore[arg-type]

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import socket
+import threading
 from collections.abc import Mapping
 
 
@@ -57,6 +58,10 @@ class Notifier:
         self._address = _resolve_address(address)
         self._watchdog_usec = max(watchdog_usec, 0)
         self._socket: socket.socket | None = None
+        # Пинговать могут двое: главный поток и нить-кормилец на время долгой
+        # передачи (облачная копия). Без замка они делят один сокет — двойное
+        # создание с утечкой дескриптора или sendto по закрытому соседом.
+        self._lock = threading.Lock()
 
     @classmethod
     def from_environment(cls, environ: Mapping[str, str] | None = None) -> Notifier:
@@ -91,6 +96,10 @@ class Notifier:
         self._send(f"STATUS={_single_line(text)}")
 
     def close(self) -> None:
+        with self._lock:
+            self._close_locked()
+
+    def _close_locked(self) -> None:
         if self._socket is not None:
             self._socket.close()
             self._socket = None
@@ -104,12 +113,13 @@ class Notifier:
         """
         if not self.enabled:
             return
-        try:
-            if self._socket is None:
-                self._socket = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
-            self._socket.sendto(message.encode("utf-8"), self._address)
-        except OSError:
-            self.close()
+        with self._lock:
+            try:
+                if self._socket is None:
+                    self._socket = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+                self._socket.sendto(message.encode("utf-8"), self._address)
+            except OSError:
+                self._close_locked()
 
 
 def _single_line(text: str) -> str:
