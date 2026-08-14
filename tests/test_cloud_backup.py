@@ -89,3 +89,21 @@ def test_the_queue_weight_is_estimated_from_durations() -> None:
     # Гигабайты, когда их больше одного; иначе мегабайты.
     assert human_size(2.5e9) == "2.5 ГБ"
     assert human_size(4e7) == "40 МБ"
+
+
+def test_new_events_go_first() -> None:
+    """Свежие минуты важнее позавчерашних: ради них копия и заводилась.
+
+    Канал узла 1.8–3.6 Мбит/с, суточный хвост едет часами — порядок решает,
+    что окажется в облаке к моменту, когда оборудование вынесли.
+    """
+    from src.cloud_backup.uploader import eligible_events
+
+    events = [
+        {"id": "старое", "camera": "gate", "start_time": 100.0, "end_time": 110.0},
+        {"id": "свежее", "camera": "gate", "start_time": 900.0, "end_time": 910.0},
+    ]
+
+    order = [event["id"] for event in eligible_events(events, CloudBackupConfig(), set())]
+
+    assert order == ["свежее", "старое"]
