@@ -28,6 +28,7 @@ import json
 import logging
 import time
 import urllib.request
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -41,6 +42,7 @@ from src.common.cloud_backup_config import (
 from src.common.durable_write import write_text_durably
 from src.common.sd_notify import Notifier
 from src.common.settings import Settings
+from src.common.telegram import TelegramClient, TelegramError
 
 logger = logging.getLogger("catdoor.cloud-backup")
 
@@ -48,6 +50,13 @@ POLL_SECONDS = 60.0
 # Сколько идентификаторов помнить. Событий ~400 в сутки, окно оглядки сутки —
 # четырёх тысяч хватает с десятикратным запасом, а файл состояния не растёт.
 REMEMBER_IDS = 4000
+# Сколько копия может молчать, прежде чем это станет поводом разбудить
+# человека. Час — примерно два десятка событий обычного дня: достаточно, чтобы
+# переждать перезагрузку роутера, и мало, чтобы узнать о беде тем же вечером.
+ALERT_AFTER_SECONDS = 3600.0
+# Как часто напоминать, пока не починено. Тревога раз в минуту превратилась бы
+# в шум, который перестают читать, — и настоящую беду в нём не заметят.
+ALERT_REPEAT_SECONDS = 6 * 3600.0
 
 
 def _fetch_json(url: str, timeout: float = 15.0) -> Any:
@@ -124,6 +133,33 @@ def _object_key(config: CloudBackupConfig, event: dict[str, Any], suffix: str) -
     return f"{config.prefix}/{day}/{camera}/{event['id']}.{suffix}"
 
 
+def alert_decision(
+    state: dict[str, Any],
+    *,
+    now: float,
+    after: float = ALERT_AFTER_SECONDS,
+    repeat: float = ALERT_REPEAT_SECONDS,
+) -> str | None:
+    """О чём сказать человеку: `alarm`, `recovered` или молчание.
+
+    Чистая функция: решение о тревоге проверяется таблицей случаев, а не
+    ожиданием у телефона. Отсчёт идёт от последней удачной выгрузки, а если её
+    не было ни разу — от момента, когда копию включили: «ни разу не заработало»
+    — такая же беда, как «перестало».
+    """
+    reference = float(state.get("last_success_at") or state.get("watching_since") or 0.0)
+    if not reference:
+        return None
+    silent_for = now - reference
+    alerted_at = float(state.get("alerted_at") or 0.0)
+    if silent_for < after:
+        # Всё в порядке. Если перед этим тревожили — сказать, что отпустило.
+        return "recovered" if alerted_at else None
+    if alerted_at and now - alerted_at < repeat:
+        return None
+    return "alarm"
+
+
 def _remember(uploaded: set[str], order: list[str], event_id: str) -> None:
     """Отметить залитым, сохранив порядок: по нему обрезается журнал."""
     if event_id not in uploaded:
@@ -144,12 +180,61 @@ def _save_state(path: Path, state: dict[str, Any]) -> None:
     write_text_durably(path, json.dumps(state, ensure_ascii=False), mode=0o600)
 
 
+def _alert_sender(settings: Settings) -> Callable[[str], None] | None:
+    """Отправитель тревог. `None` — бот не настроен, тогда только журнал."""
+    client = TelegramClient(
+        settings.telegram_bot_token,
+        settings.telegram_chat_id,
+        api_base=settings.telegram_api_base,
+    )
+    if not client.configured:
+        logger.warning("Бот не настроен: о простое копии будет знать только журнал")
+        return None
+
+    def send(text: str) -> None:
+        try:
+            client.send_message(text)
+        except (TelegramError, OSError) as exc:
+            # Тревога, которая роняет службу, хуже отсутствующей.
+            logger.warning("Тревога не ушла в Телеграм: %s", exc)
+
+    return send
+
+
+def _notify_about_silence(
+    state: dict[str, Any], send: Callable[[str], None] | None, *, now: float
+) -> None:
+    decision = alert_decision(state, now=now)
+    if decision is None:
+        return
+    if decision == "recovered":
+        state.pop("alerted_at", None)
+        logger.info("Копия снова работает")
+        if send is not None:
+            send("Облачная копия снова работает — очередь пошла")
+        return
+    reference = float(state.get("last_success_at") or state.get("watching_since") or now)
+    hours = max(0.0, (now - reference) / 3600)
+    state["alerted_at"] = now
+    logger.warning("Копия молчит %.0f ч", hours)
+    if send is not None:
+        # Про телеграм сказано честно: при мёртвом канале это сообщение само
+        # не уйдёт и придёт с возвратом связи — тревога не заменяет проверки
+        # страницы «Состояние», а дополняет её.
+        send(
+            f"Облачная копия не выгружает {hours:.0f} ч.\n"
+            f"Последняя причина: {state.get('last_error') or state.get('message') or '—'}\n"
+            "Подробности — страница «Состояние» узла."
+        )
+
+
 def run(settings: Settings, *, once: bool = False) -> None:
     notifier = Notifier.from_environment()
     notifier.ready("Облачная копия событий на связи")
     config_path = cloud_backup_config_path(settings.data_dir)
     state_path = cloud_backup_state_path(settings.data_dir)
     config = CloudBackupConfig()
+    alert = _alert_sender(settings)
     client = None
     client_key: tuple[str, str, str, str] | None = None
     while True:
@@ -157,6 +242,10 @@ def run(settings: Settings, *, once: bool = False) -> None:
         config = load_cloud_backup_config(config_path, config)
         state = _load_state(state_path)
         if not config.enabled or not config.ready:
+            # Выключенная копия не тревожит: молчание по решению владельца —
+            # не беда. Отсчёт начнётся заново, когда её включат.
+            state.pop("watching_since", None)
+            state.pop("alerted_at", None)
             state["status"] = "disabled" if not config.enabled else "not_configured"
             state["message"] = (
                 "Выключено в админке" if not config.enabled
@@ -167,6 +256,7 @@ def run(settings: Settings, *, once: bool = False) -> None:
                 return
             time.sleep(POLL_SECONDS)
             continue
+        state.setdefault("watching_since", time.time())
         try:
             import boto3  # type: ignore[import-not-found]  # ставится на узле, в dev-среде не нужен
 
@@ -373,6 +463,7 @@ def run(settings: Settings, *, once: bool = False) -> None:
             state["last_error"] = str(exc)[:300]
             state["message"] = f"Ошибка выгрузки: {str(exc)[:120]}"
             logger.warning("Цикл выгрузки не удался: %s", exc)
+        _notify_about_silence(state, alert, now=time.time())
         _save_state(state_path, state)
         if once:
             return
