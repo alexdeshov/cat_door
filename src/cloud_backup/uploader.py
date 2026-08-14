@@ -150,7 +150,7 @@ def run(settings: Settings, *, once: bool = False) -> None:
                 f"after={after:.0f}&limit=500"
             )
             if not isinstance(events, list):
-                raise RuntimeError("Frigate вернул не список событий")
+                raise RuntimeError("Frigate вернул не список событий")  # noqa: TRY004 — это отказ API, не тип
             uploaded = set(state.get("uploaded") or [])
             sent_bytes = 0
             sent_events = 0
