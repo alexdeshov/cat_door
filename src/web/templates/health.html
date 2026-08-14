@@ -4,6 +4,32 @@
 
 {% block scripts %}
 <script>
+  async function refreshCloudProgress() {
+    try {
+      const response = await fetch("/api/cloud-backup/state");
+      if (!response.ok) return;
+      const state = await response.json();
+      const row = document.querySelector("#cloud-progress-row");
+      const bar = document.querySelector("#cloud-progress");
+      const text = document.querySelector("#cloud-progress-text");
+      const summary = document.querySelector("details.folded-panel .state-line");
+      if (summary && state.message) {
+        summary.textContent = (summary.textContent.split("·")[0] || "").trim()
+          + " · " + state.message;
+      }
+      if (state.progress && state.progress.total) {
+        row.hidden = false;
+        bar.max = state.progress.total;
+        bar.value = state.progress.done;
+        text.textContent = state.message || `${state.progress.done} из ${state.progress.total}`;
+      } else {
+        row.hidden = true;
+      }
+    } catch (error) { /* сеть моргнула — следующий тик покажет */ }
+  }
+  refreshCloudProgress();
+  setInterval(refreshCloudProgress, 5000);
+
   document.querySelector("#test-cloud")?.addEventListener("click", async event => {
     const button = event.currentTarget;
     const status = document.querySelector("#cloud-save-status");
@@ -254,6 +280,10 @@
       ключей означают «оставить прежние» — секрет наружу не выходит. Чистит
       бакет само облако, службе удалять нечего и нечем.
     </p>
+    <div id="cloud-progress-row" hidden style="margin-top: 8px">
+      <progress id="cloud-progress" max="100" value="0" style="width: 100%"></progress>
+      <span id="cloud-progress-text" class="muted data" style="font-size: 12px"></span>
+    </div>
     {% if cloud_state and cloud_state.last_error %}
       <p class="notice notice-bad">Последняя ошибка: {{ cloud_state.last_error }}</p>
     {% endif %}

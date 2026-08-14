@@ -160,6 +160,13 @@ def run(settings: Settings, *, once: bool = False) -> None:
             sent_events = 0
             failed = 0
             batch = eligible_events(events, config, uploaded)
+            if len(batch) > 20:
+                # Длинный хвост — сразу показать фронт работ, не дожидаясь
+                # первого промежуточного сохранения.
+                state["status"] = "running"
+                state["progress"] = {"done": 0, "total": len(batch)}
+                state["message"] = f"Догоняю: 0 из {len(batch)}"
+                _save_state(state_path, state)
             for position, event in enumerate(batch):
                 event_id = str(event["id"])
                 if event.get("_skip"):
@@ -205,6 +212,7 @@ def run(settings: Settings, *, once: bool = False) -> None:
                     # августа это дважды прочиталось как «сломано», хотя шла
                     # успешная выгрузка на 3 МБ/с. Прогресс пишется по ходу.
                     state["status"] = "running"
+                    state["progress"] = {"done": sent_events + 1, "total": len(batch)}
                     state["message"] = (
                         f"Догоняю: {sent_events + 1} из {len(batch)}, "
                         f"{sent_bytes / 1e6:.0f} МБ"
@@ -248,6 +256,7 @@ def run(settings: Settings, *, once: bool = False) -> None:
             state["day_events"] = int(state.get("day_events") or 0) + sent_events
             state["day_bytes"] = int(state.get("day_bytes") or 0) + sent_bytes
             state["status"] = "ok"
+            state.pop("progress", None)
             tail = f", отложено {failed}" if failed else ""
             state["message"] = (
                 f"За сутки: {state['day_events']} событий, "
