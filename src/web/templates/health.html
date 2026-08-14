@@ -21,7 +21,10 @@
         row.hidden = false;
         bar.max = state.progress.total;
         bar.value = state.progress.done;
-        text.textContent = state.message || `${state.progress.done} из ${state.progress.total}`;
+        const left = state.progress.remaining_bytes;
+        const size = left >= 1e9 ? `${(left / 1e9).toFixed(1)} ГБ` : `${Math.round(left / 1e6)} МБ`;
+        text.textContent = state.message
+          || `${state.progress.done} из ${state.progress.total}, осталось ~${size}`;
       } else {
         row.hidden = true;
       }

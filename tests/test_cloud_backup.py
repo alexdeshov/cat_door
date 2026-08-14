@@ -71,3 +71,21 @@ def test_the_admin_masks_the_secret(runtime_path: Path, monkeypatch) -> None:
     # Пустые ключи во втором запросе не стёрли сохранённые.
     assert kept["bucket"] == "b2" and kept["has_secret"] is True
     assert "Облачная копия событий" in page.text
+
+
+def test_the_queue_weight_is_estimated_from_durations() -> None:
+    """«Осталось N файлов» ничего не говорит: события бывают по три секунды и
+    по три минуты. Вес считается по длительности и наблюдаемому весу секунды.
+    """
+    from src.cloud_backup.uploader import human_size, video_seconds
+
+    events = [
+        {"start_time": 100.0, "end_time": 130.0},
+        {"start_time": 200.0, "end_time": 200.0},
+        {"start_time": 300.0, "end_time": 360.0},
+    ]
+
+    assert video_seconds(events) == 90.0
+    # Гигабайты, когда их больше одного; иначе мегабайты.
+    assert human_size(2.5e9) == "2.5 ГБ"
+    assert human_size(4e7) == "40 МБ"

@@ -92,6 +92,29 @@ def eligible_events(
     return selected
 
 
+# Сколько весит секунда видео, пока своих замеров нет: 5 Мбит/с основного
+# потока. Первые же залитые клипы заменят это число фактом.
+FALLBACK_BYTES_PER_SECOND = 640_000
+
+
+def video_seconds(events: list[dict[str, Any]]) -> float:
+    """Длительность очереди в секундах видео — из неё считается вес."""
+    total = 0.0
+    for event in events:
+        start = float(event.get("start_time") or 0)
+        end = float(event.get("end_time") or start)
+        total += max(0.0, end - start)
+    return total
+
+
+def human_size(size_bytes: float) -> str:
+    """Гигабайты, когда их больше одного, иначе мегабайты: «осталось 0.04 ГБ»
+    человеку не говорит ничего."""
+    if size_bytes >= 1e9:
+        return f"{size_bytes / 1e9:.1f} ГБ"
+    return f"{size_bytes / 1e6:.0f} МБ"
+
+
 def _object_key(config: CloudBackupConfig, event: dict[str, Any], suffix: str) -> str:
     day = datetime.fromtimestamp(float(event["start_time"]), UTC).strftime("%Y-%m-%d")
     camera = str(event.get("camera") or "unknown")
@@ -160,12 +183,26 @@ def run(settings: Settings, *, once: bool = False) -> None:
             sent_events = 0
             failed = 0
             batch = eligible_events(events, config, uploaded)
+            # Вес очереди считается по длительности клипов и наблюдаемому
+            # весу секунды видео: у Frigate нет способа спросить размер клипа
+            # заранее, а «осталось N файлов» ничего не говорит о времени —
+            # события бывают и по три секунды, и по три минуты.
+            rate = float(state.get("bytes_per_video_second") or FALLBACK_BYTES_PER_SECOND)
+            queue_seconds = video_seconds(batch)
+            done_seconds = 0.0
             if len(batch) > 20:
                 # Длинный хвост — сразу показать фронт работ, не дожидаясь
                 # первого промежуточного сохранения.
                 state["status"] = "running"
-                state["progress"] = {"done": 0, "total": len(batch)}
-                state["message"] = f"Догоняю: 0 из {len(batch)}"
+                state["progress"] = {
+                    "done": 0,
+                    "total": len(batch),
+                    "remaining_bytes": int(queue_seconds * rate),
+                }
+                state["message"] = (
+                    f"Догоняю: 0 из {len(batch)}, "
+                    f"осталось ~{human_size(queue_seconds * rate)}"
+                )
                 _save_state(state_path, state)
             for position, event in enumerate(batch):
                 event_id = str(event["id"])
@@ -206,16 +243,31 @@ def run(settings: Settings, *, once: bool = False) -> None:
                     continue
                 attempts.pop(event_id, None)
                 sent_bytes += len(clip)
+                done_seconds += max(
+                    0.0,
+                    float(event.get("end_time") or 0) - float(event.get("start_time") or 0),
+                )
+                if done_seconds > 0:
+                    # Свой замер точнее умолчания: битрейт зависит от камеры и
+                    # сцены, а не от паспортных цифр.
+                    rate = sent_bytes / done_seconds
+                    state["bytes_per_video_second"] = round(rate)
                 if sent_events % 20 == 0:
                     # Догоняющий цикл идёт десятки минут, и страница всё это
                     # время показывала бы последнее прошлое состояние — 14
                     # августа это дважды прочиталось как «сломано», хотя шла
                     # успешная выгрузка на 3 МБ/с. Прогресс пишется по ходу.
                     state["status"] = "running"
-                    state["progress"] = {"done": sent_events + 1, "total": len(batch)}
+                    remaining = max(0.0, (queue_seconds - done_seconds) * rate)
+                    state["progress"] = {
+                        "done": sent_events + 1,
+                        "total": len(batch),
+                        "remaining_bytes": int(remaining),
+                    }
                     state["message"] = (
                         f"Догоняю: {sent_events + 1} из {len(batch)}, "
-                        f"{sent_bytes / 1e6:.0f} МБ"
+                        f"залито {human_size(sent_bytes)}, "
+                        f"осталось ~{human_size(remaining)}"
                     )
                     # Журнал залитого — в каждое промежуточное сохранение.
                     # Оба первых догоняющих цикла умерли до конца, и час
