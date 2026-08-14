@@ -587,3 +587,30 @@ def test_the_alarm_text_carries_the_reason(runtime_path: Path) -> None:
     assert "2 ч" in sent[0]
     assert "AccessDenied" in sent[0]
     assert state["alerted_at"] == now
+
+
+def test_a_three_hour_event_does_not_stall_the_queue() -> None:
+    """14 августа машина простояла у калитки 162 минуты.
+
+    Клип такого события — около гигабайта: Frigate собирает его дольше любого
+    разумного таймаута, а канал на 300 КБ/с отдавал бы час. Событие встало
+    первым в очереди (новые вперёд) и остановило выгрузку целиком при живом
+    канале. От таких событий уезжает снимок — факт и кадр важнее трёх часов
+    записи стоящей машины, а ролик остаётся на узле и в ночной копии.
+    """
+    from src.cloud_backup.uploader import MAX_CLIP_SECONDS, eligible_events, video_seconds
+
+    events = [
+        {"id": "машина", "camera": "gate", "start_time": 0.0,
+         "end_time": MAX_CLIP_SECONDS + 60},
+        {"id": "человек", "camera": "gate", "start_time": 0.0, "end_time": 30.0},
+    ]
+
+    selected = eligible_events(events, CloudBackupConfig(), set())
+
+    assert [event["id"] for event in selected] == ["машина", "человек"]
+    assert selected[0]["_snapshot_only"] is True
+    assert "_snapshot_only" not in selected[1]
+    # Вес очереди считается без неподъёмного ролика: иначе «осталось N ГБ»
+    # состояло бы из того, что никто не собирается заливать.
+    assert video_seconds(selected) == 30.0
