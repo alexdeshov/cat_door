@@ -22,7 +22,7 @@ Type=notify
 NotifyAccess=main
 # Цикл раз в минуту; большой клип может грузиться десятки секунд.
 # оставляет запас на неспешный ответ Frigate и на таймауты Телеграма.
-WatchdogSec=300
+WatchdogSec=900
 
 User=catdoor
 Group=catdoor

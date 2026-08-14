@@ -72,6 +72,9 @@ def eligible_events(
     закрыла бы дорогу повтору.
     """
     selected = []
+    # Старые вперёд: хвост должен рассасываться хронологически, иначе одно
+    # долгое событие в середине навсегда заслоняет всё, что старше.
+    events = sorted(events, key=lambda item: float(item.get("start_time") or 0))
     for event in events:
         event_id = str(event.get("id") or "")
         if not event_id or event_id in uploaded:
@@ -152,22 +155,49 @@ def run(settings: Settings, *, once: bool = False) -> None:
             if not isinstance(events, list):
                 raise RuntimeError("Frigate вернул не список событий")  # noqa: TRY004 — это отказ API, не тип
             uploaded = set(state.get("uploaded") or [])
+            attempts: dict[str, int] = dict(state.get("attempts") or {})
             sent_bytes = 0
             sent_events = 0
-            for event in eligible_events(events, config, uploaded):
+            failed = 0
+            batch = eligible_events(events, config, uploaded)
+            for position, event in enumerate(batch):
                 event_id = str(event["id"])
                 if event.get("_skip"):
                     uploaded.add(event_id)
                     continue
-                clip = _fetch_bytes(
-                    f"{settings.gate_api_url.rstrip('/')}/api/events/{event_id}/clip.mp4"
-                )
-                client.put_object(
-                    Bucket=config.bucket,
-                    Key=_object_key(config, event, "mp4"),
-                    Body=clip,
-                    ContentType="video/mp4",
-                )
+                # Одно ядовитое событие не должно ронять цикл: Frigate может
+                # собирать клип часового события дольше любого таймаута.
+                # 14 августа такой клип оборвал догоняющую выгрузку, а
+                # застрявший сторож перезапустил службу целиком.
+                try:
+                    clip = _fetch_bytes(
+                        f"{settings.gate_api_url.rstrip('/')}/api/events/{event_id}/clip.mp4"
+                    )
+                    client.put_object(
+                        Bucket=config.bucket,
+                        Key=_object_key(config, event, "mp4"),
+                        Body=clip,
+                        ContentType="video/mp4",
+                    )
+                except Exception as exc:  # noqa: BLE001 — пропуск, не крушение
+                    attempts[event_id] = attempts.get(event_id, 0) + 1
+                    failed += 1
+                    if attempts[event_id] >= 5:
+                        # Пять попыток по циклу на каждую — этот клип не отдать.
+                        # Прекращаем жечь на нём таймауты; снимок ниже мог уйти.
+                        uploaded.add(event_id)
+                        logger.warning(
+                            "Событие %s не отдалось за %d попыток, пропускаю: %s",
+                            event_id, attempts[event_id], str(exc)[:120],
+                        )
+                    else:
+                        logger.info(
+                            "Событие %s отложено (попытка %d): %s",
+                            event_id, attempts[event_id], str(exc)[:120],
+                        )
+                    notifier.watchdog()
+                    continue
+                attempts.pop(event_id, None)
                 sent_bytes += len(clip)
                 try:
                     snapshot = _fetch_bytes(
@@ -187,6 +217,9 @@ def run(settings: Settings, *, once: bool = False) -> None:
                 sent_events += 1
                 notifier.watchdog()
             state["uploaded"] = list(uploaded)[-REMEMBER_IDS:]
+            state["attempts"] = {
+                key: value for key, value in attempts.items() if value < 5
+            }
             today = datetime.now(UTC).strftime("%Y-%m-%d")
             if state.get("day") != today:
                 state["day"] = today
@@ -195,9 +228,10 @@ def run(settings: Settings, *, once: bool = False) -> None:
             state["day_events"] = int(state.get("day_events") or 0) + sent_events
             state["day_bytes"] = int(state.get("day_bytes") or 0) + sent_bytes
             state["status"] = "ok"
+            tail = f", отложено {failed}" if failed else ""
             state["message"] = (
                 f"За сутки: {state['day_events']} событий, "
-                f"{state['day_bytes'] / 1e6:.0f} МБ"
+                f"{state['day_bytes'] / 1e6:.0f} МБ{tail}"
             )
             state["last_success_at"] = time.time()
             state.pop("last_error", None)
