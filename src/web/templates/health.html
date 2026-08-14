@@ -239,7 +239,7 @@
     <div class="controls">
       <label for="cloud-key-id">key id</label>
       <input id="cloud-key-id" type="text" autocomplete="off"
-        placeholder="{{ cloud_backup.access_key_hint or 'не задан' }}" style="width: 12em">
+        placeholder="{{ cloud_backup.access_key_id or 'не задан' }}" style="width: 12em">
       <label for="cloud-secret">secret</label>
       <input id="cloud-secret" type="password" autocomplete="new-password"
         placeholder="{{ 'сохранён' if cloud_backup.has_secret else 'не задан' }}" style="width: 14em">

@@ -67,7 +67,7 @@ def test_the_admin_masks_the_secret(runtime_path: Path, monkeypatch) -> None:
 
     assert "verysecret" not in str(saved) and "verysecret" not in page.text
     assert saved["has_secret"] is True
-    assert saved["access_key_hint"] == "AKID…"
+    assert saved["access_key_id"] == "AKIDXYZW"  # id не секрет, сверяется с policy
     # Пустые ключи во втором запросе не стёрли сохранённые.
     assert kept["bucket"] == "b2" and kept["has_secret"] is True
     assert "Облачная копия событий" in page.text
