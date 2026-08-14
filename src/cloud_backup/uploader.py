@@ -199,6 +199,17 @@ def run(settings: Settings, *, once: bool = False) -> None:
                     continue
                 attempts.pop(event_id, None)
                 sent_bytes += len(clip)
+                if sent_events % 20 == 0:
+                    # Догоняющий цикл идёт десятки минут, и страница всё это
+                    # время показывала бы последнее прошлое состояние — 14
+                    # августа это дважды прочиталось как «сломано», хотя шла
+                    # успешная выгрузка на 3 МБ/с. Прогресс пишется по ходу.
+                    state["status"] = "running"
+                    state["message"] = (
+                        f"Догоняю: {sent_events + 1} из {len(batch)}, "
+                        f"{sent_bytes / 1e6:.0f} МБ"
+                    )
+                    _save_state(state_path, state)
                 try:
                     snapshot = _fetch_bytes(
                         f"{settings.gate_api_url.rstrip('/')}/api/events/{event_id}/snapshot.jpg"
