@@ -1828,6 +1828,61 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(500, "Не удалось сохранить настройки облака") from exc
         return _cloud_backup_view(config)
 
+    @app.post("/api/cloud-backup/test")
+    def test_cloud_backup() -> dict[str, object]:
+        """Прогон четырёх операций S3 — чтобы отказ прав читался картиной.
+
+        PutObject должен пройти; Get и Delete по нашей же схеме обязаны быть
+        запрещены — их «отказ» здесь успех. Паттерн «всё запрещено» означает
+        bucket policy, глушащую ключ целиком (условие не совпало), «разрешено
+        всё» — policy нет и ключ шире задуманного.
+        """
+        config = load_cloud_backup_config(
+            cloud_backup_config_path(settings.data_dir), CloudBackupConfig()
+        )
+        if not config.ready:
+            raise HTTPException(422, "Сначала задайте бакет и ключи")
+        try:
+            import boto3  # type: ignore[import-not-found]
+            from botocore.exceptions import (  # type: ignore[import-not-found]
+                ClientError,
+            )
+        except ImportError as exc:
+            raise HTTPException(500, "boto3 не установлен в venv узла") from exc
+        client = boto3.client(
+            "s3",
+            endpoint_url=config.endpoint,
+            region_name=config.region,
+            aws_access_key_id=config.access_key_id,
+            aws_secret_access_key=config.secret_key,
+        )
+        probe_key = f"{config.prefix}/probe.txt"
+        results: dict[str, str] = {}
+
+        def attempt(name: str, call) -> None:
+            try:
+                call()
+                results[name] = "ok"
+            except ClientError as exc:
+                results[name] = str(
+                    exc.response.get("Error", {}).get("Code") or exc
+                )[:80]
+            except Exception as exc:  # noqa: BLE001 — сеть и DNS тоже ответы
+                results[name] = str(exc)[:120]
+
+        attempt("list", lambda: client.list_objects_v2(Bucket=config.bucket, MaxKeys=1))
+        attempt(
+            "put",
+            lambda: client.put_object(
+                Bucket=config.bucket, Key=probe_key, Body=b"catdoor probe"
+            ),
+        )
+        attempt("get", lambda: client.get_object(Bucket=config.bucket, Key=probe_key))
+        attempt(
+            "delete", lambda: client.delete_object(Bucket=config.bucket, Key=probe_key)
+        )
+        return {"bucket": config.bucket, "results": results}
+
     @app.get("/health", response_class=HTMLResponse)
     def health_page(
         request: Request,
