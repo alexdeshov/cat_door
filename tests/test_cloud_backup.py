@@ -614,3 +614,47 @@ def test_a_three_hour_event_does_not_stall_the_queue() -> None:
     # Вес очереди считается без неподъёмного ролика: иначе «осталось N ГБ»
     # состояло бы из того, что никто не собирается заливать.
     assert video_seconds(selected) == 30.0
+
+
+def test_the_broker_wakes_the_cycle_only_when_an_event_ends() -> None:
+    """Событие человека живёт 8 секунд (замер 14.08), а опрос занимал минуту.
+
+    Почти вся задержка между «человек ушёл» и «клип в облаке» приходилась на
+    ожидание следующего круга. Будильник от брокера её снимает — но только на
+    конце события: у начатого клип ещё растёт, и будить цикл на него значит
+    гонять его вхолостую.
+    """
+    import json as json_module
+    from types import SimpleNamespace
+
+    from src.cloud_backup.uploader import EventTrigger
+
+    trigger = EventTrigger("127.0.0.1")
+
+    def send(payload: object) -> None:
+        trigger._on_message(
+            None, None, SimpleNamespace(payload=json_module.dumps(payload).encode())
+        )
+
+    send({"type": "new", "after": {"id": "a"}})
+    assert not trigger._wake.is_set()  # начало события цикл не будит
+
+    send({"type": "end", "after": {"id": "a"}})
+    assert trigger._wake.is_set()
+
+    trigger.wait(0)
+    assert not trigger._wake.is_set()  # разбудились один раз, флаг снят
+    # Мусор в теме не должен ронять подписчика.
+    trigger._on_message(None, None, SimpleNamespace(payload="не json".encode()))
+
+
+def test_without_a_broker_the_cycle_falls_back_to_the_timer() -> None:
+    """Подписка дополняет опрос, а не заменяет: сообщение, пришедшее в мёртвую
+    службу, потеряно навсегда, а опрос переживает и перезапуск, и падение
+    брокера.
+    """
+    from src.cloud_backup.uploader import EventTrigger
+
+    assert EventTrigger("").start() is False
+    # Ожидание без брокера просто выдерживает таймаут.
+    EventTrigger("").wait(0.01)
