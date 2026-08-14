@@ -26,6 +26,10 @@
   калитки и открывает её по узнанному лицу импульсом на плату реле
   Waveshare (Modbus TCP); уведомления шлёт `catdoor-gate-notify`.
 
+Клипы событий уезжают в S3-бакет отдельной службой `catdoor-cloud-backup` —
+страховка от выноса оборудования: ключ у неё только на запись, стереть архив
+украденным ключом нельзя (`docs/cloud-backup.md`).
+
 Состояние контуров сводит примиритель `catdoor-gate-sync`. Конфигурация Frigate
 собирается из инвентаря камер автоматически, ручные разделы (лица, номера)
 переживают пересборку.
@@ -83,6 +87,8 @@ python -m scripts.identity_pipeline all --cats Черныш,Яся
 | Обучение идентификации | `docs/identity-training.md` |
 | Метрики моделей | `docs/metrics.md` |
 | Замеры моделей и динамика | `docs/model-benchmarks.md` |
+| Облачная копия событий | `docs/cloud-backup.md` |
+| Второй узел у второй калитки | `docs/second-node-plan.md` |
 | Контуры узла | `docs/two-circuits-plan.md` |
 | Брокер MQTT и состояние створки | `docs/mqtt-broker.md` |
 | Разборы поведения калитки | `docs/gate-direction-experiments.md` |
