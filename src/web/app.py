@@ -1798,6 +1798,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         """Настройки для админки: секрет наружу не выходит, только его наличие."""
         values = config.model_dump(exclude={"secret_key", "access_key_id"})
         values["has_secret"] = bool(config.secret_key)
+        # Длина — безопасная диагностика: у секретов Яндекса она всегда 40, и
+        # «37» или «41» мгновенно выдаёт обрезанную или слипшуюся вставку,
+        # которую иначе видно только как SignatureDoesNotMatch.
+        values["secret_length"] = len(config.secret_key)
         # Key id — не секрет (секретна только вторая половина пары), а сверять
         # его с bucket policy приходится посимвольно: первая подсказка из
         # четырёх букв оказалась бесполезной — с «YCAJ» начинаются все ключи
