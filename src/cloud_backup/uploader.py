@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 import urllib.request
 from collections.abc import Callable
@@ -46,7 +47,10 @@ from src.common.telegram import TelegramClient, TelegramError
 
 logger = logging.getLogger("catdoor.cloud-backup")
 
-POLL_SECONDS = 60.0
+# Как часто спрашивать Frigate, если брокер молчит. Опрос — страховочная сеть:
+# он догоняет всё, что случилось, пока служба или брокер лежали. Тридцать
+# секунд — компромисс между «узнать быстро» и «не дёргать зря».
+POLL_SECONDS = 30.0
 # Сколько идентификаторов помнить. Событий ~400 в сутки, окно оглядки сутки —
 # четырёх тысяч хватает с десятикратным запасом, а файл состояния не растёт.
 REMEMBER_IDS = 4000
@@ -182,6 +186,68 @@ def alert_decision(
     return "alarm"
 
 
+class EventTrigger:
+    """Будильник от брокера: событие закончилось — не ждать конца опроса.
+
+    Замер 14 августа: событие человека живёт 8 секунд (медиана), а опрос
+    занимал минуту — то есть почти вся задержка между «человек ушёл» и
+    «клип в облаке» приходилась именно на ожидание следующего круга.
+    Подписка на `frigate/events` будит цикл сразу.
+
+    Подписка **дополняет** опрос, а не заменяет: сообщение, пришедшее в
+    мёртвую службу, потеряно навсегда, а опрос переживает и перезапуск, и
+    падение брокера. Поэтому брокера нет — просто ждём по таймеру.
+    """
+
+    def __init__(self, host: str, port: int = 1883) -> None:
+        self.host = host
+        self.port = port
+        self._wake = threading.Event()
+        self._client: Any = None
+
+    def start(self) -> bool:
+        if not self.host:
+            return False
+        try:
+            import paho.mqtt.client as mqtt
+        except ImportError:
+            logger.info("paho-mqtt нет: выгрузка пойдёт по таймеру")
+            return False
+        client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="catdoor-cloud-backup")
+        client.on_connect = lambda c, *_: c.subscribe("frigate/events")
+        client.on_message = self._on_message
+        try:
+            client.connect(self.host, self.port, 60)
+        except OSError as exc:
+            logger.info("Брокер %s:%s недоступен: пойду по таймеру (%s)", self.host, self.port, exc)
+            return False
+        client.loop_start()
+        self._client = client
+        logger.info("Слушаю окончания событий: frigate/events")
+        return True
+
+    def _on_message(self, _client: Any, _userdata: Any, message: Any) -> None:
+        try:
+            payload = json.loads(getattr(message, "payload", b"").decode("utf-8", "replace"))
+        except ValueError:
+            return
+        # Только конец события: у начатого клип ещё растёт, и будить цикл на
+        # него значит гонять его вхолостую.
+        if isinstance(payload, dict) and payload.get("type") == "end":
+            self._wake.set()
+
+    def wait(self, timeout: float) -> None:
+        self._wake.wait(timeout)
+        self._wake.clear()
+
+    def stop(self) -> None:
+        client = self._client
+        if client is not None:
+            client.loop_stop()
+            client.disconnect()
+            self._client = None
+
+
 def _remember(uploaded: set[str], order: list[str], event_id: str) -> None:
     """Отметить залитым, сохранив порядок: по нему обрезается журнал."""
     if event_id not in uploaded:
@@ -256,6 +322,8 @@ def run(settings: Settings, *, once: bool = False) -> None:
     config_path = cloud_backup_config_path(settings.data_dir)
     state_path = cloud_backup_state_path(settings.data_dir)
     config = CloudBackupConfig()
+    trigger = EventTrigger(settings.mqtt_host, settings.mqtt_port)
+    trigger.start()
     alert = _alert_sender(settings)
     client = None
     client_key: tuple[str, str, str, str] | None = None
@@ -276,7 +344,7 @@ def run(settings: Settings, *, once: bool = False) -> None:
             _save_state(state_path, state)
             if once:
                 return
-            time.sleep(POLL_SECONDS)
+            trigger.wait(POLL_SECONDS)
             continue
         state.setdefault("watching_since", time.time())
         try:
@@ -523,7 +591,7 @@ def run(settings: Settings, *, once: bool = False) -> None:
         _save_state(state_path, state)
         if once:
             return
-        time.sleep(POLL_SECONDS)
+        trigger.wait(POLL_SECONDS)
 
 
 def main() -> None:
