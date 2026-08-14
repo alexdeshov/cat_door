@@ -1400,8 +1400,20 @@ def _notify_about_pass(
     из-за недоступного мессенджера — значит менять важное на второстепенное.
     """
     confidence = max(request.confidence_face, request.confidence_side)
+    # Роль для гейта — не «кто начал», а «докуда дошло». Ночью коты заходят
+    # через террасу, событие начинается с подхода — и правило «подход молчит»
+    # глушило проход, даже когда кот дошёл до самой дверцы и был узнан:
+    # 13–14 августа восемь ночных проходов подряд ушли в
+    # `camera_not_notified:side`, и владелец счёл уведомления сломанными.
+    # Дверца, увидевшая кота уверенно, делает проход «дверным», с кого бы он
+    # ни начался; чисто террасные прогулки остаются тихими.
+    effective_role = (
+        "face"
+        if request.confidence_face >= settings.notify_min_confidence
+        else request.initiating_camera
+    )
     reason = _notification_gate(settings).blocked_reason(
-        request.initiating_camera,
+        effective_role,
         time.monotonic(),
         confidence,
     )
@@ -1430,7 +1442,9 @@ def _notify_about_pass(
     caption = pass_caption(
         when=event.created_at,
         timezone=settings.display_timezone,
-        role=request.initiating_camera,
+        # Подпись согласована с гейтом: сообщение уходит потому, что кот дошёл
+        # до дверцы, — это и пишем, с какой бы камеры проход ни начался.
+        role=effective_role,
         confidence=confidence,
         identity=identity,
     )
