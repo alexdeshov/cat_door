@@ -1839,6 +1839,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(500, "Не удалось сохранить настройки облака") from exc
         return _cloud_backup_view(config)
 
+    @app.get("/api/cloud-backup/state")
+    def cloud_backup_state() -> dict[str, object]:
+        """Живое состояние выгрузчика — для прогресс-бара на «Состоянии»."""
+        return _read_status(cloud_backup_state_path(settings.data_dir)) or {
+            "status": "idle",
+            "message": "Выгрузчик ещё не отчитывался",
+        }
+
     @app.post("/api/cloud-backup/test")
     def test_cloud_backup() -> dict[str, object]:
         """Прогон четырёх операций S3 — чтобы отказ прав читался картиной.
