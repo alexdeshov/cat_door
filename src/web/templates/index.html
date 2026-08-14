@@ -129,17 +129,23 @@
 
 {# Опознанные: размеченные проходы, по умолчанию свои коты с именами. Фишки —
    те же ссылки без JS, что были у фильтров: состояние живёт в адресе. #}
-<section class="panel" id="recognized">
-  <div class="panel-head">
+{# Размеченные проходы — под катом: ежедневная работа владельца — очередь
+   разметки выше, а сюда заглядывают за историей и фильтрами. Свёрнутая панель
+   показывает главное своё число в заголовке. #}
+{# Пришли по фильтру или листают страницы — кат раскрыт сам: спрятанный
+   результат фильтра выглядит как «ничего не нашлось». #}
+<details class="panel folded-panel" id="recognized"
+  {% if labeled_who != "named" or labeled_cat or labeled_page > 1 %}open{% endif %}>
+  <summary class="panel-head">
     <h2>Опознанные проходы</h2>
-    <span class="muted">
+    <span class="state-line muted data">
       {%- if labeled_total -%}
         {{ labeled_total }} шт.
       {%- else -%}
         под фильтр ничего не попало
       {%- endif -%}
     </span>
-  </div>
+  </summary>
   <div class="filter-chips" style="margin: 0 0 12px">
     {% for name in known_cat_names %}
       <a class="filter-chip{{ ' filter-chip-active' if labeled_cat == name }}"
@@ -178,7 +184,7 @@
       {% endif %}
     </nav>
   {% endif %}
-</section>
+</details>
 
 <datalist id="known-cat-names">
   {% for name in known_cat_names %}<option value="{{ name }}">{% endfor %}

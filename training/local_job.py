@@ -80,6 +80,60 @@ def _restrict_manifest(manifest: Path, cats: set[str]) -> None:
     manifest.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def _score_distribution(
+    onnx_path: Path,
+    model_info: dict[str, Any],
+    items: list[Any],
+    dataset_root: Path,
+    limit: int = 400,
+) -> dict[str, object]:
+    """Как разложились свои и чужие по сходству — и таблица рабочих точек."""
+    import numpy as np
+    import onnxruntime as ort
+    from PIL import Image
+
+    prototypes = model_info.get("prototypes")
+    if not isinstance(prototypes, dict) or not prototypes:
+        return {}
+    session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
+    input_name = session.get_inputs()[0].name
+    size = int(model_info.get("image_size", 224))
+    mean = np.asarray(model_info.get("normalization_mean", [0.485, 0.456, 0.406]))
+    std = np.asarray(model_info.get("normalization_std", [0.229, 0.224, 0.225]))
+    matrix = np.stack([np.asarray(v, np.float32) for v in prototypes.values()])
+    names = list(prototypes)
+    same: list[float] = []
+    other: list[float] = []
+    for item in items[:limit]:
+        with Image.open(dataset_root / item.image_path) as image:
+            array = np.asarray(image.convert("RGB").resize((size, size)), np.float32)
+        array = ((array / 255.0 - mean) / std).transpose(2, 0, 1)[None].astype(np.float32)
+        vector = session.run(None, {input_name: array})[0][0]
+        vector = vector / np.linalg.norm(vector)
+        scores = matrix @ vector
+        if item.label in prototypes:
+            same.append(float(scores[names.index(item.label)]))
+        else:
+            other.append(float(scores.max()))
+    if not same or not other:
+        return {}
+    same_array = np.asarray(same)
+    other_array = np.asarray(other)
+    return {
+        "same_median": round(float(np.median(same_array)), 3),
+        "same_p10": round(float(np.percentile(same_array, 10)), 3),
+        "other_median": round(float(np.median(other_array)), 3),
+        "other_top": [round(float(x), 3) for x in np.sort(other_array)[::-1][:3]],
+        "points": {
+            f"{t:.2f}": {
+                "recognised": round(float(np.mean(same_array >= t)), 2),
+                "accepted": round(float(np.mean(other_array >= t)), 2),
+            }
+            for t in (0.5, 0.6, 0.7, 0.8)
+        },
+    }
+
+
 def _metrics_dict(metrics: Any) -> dict[str, object]:
     return {
         "accuracy": round(metrics.accuracy, 3),
@@ -135,11 +189,17 @@ def run_job(
     try:
         write_status(status_path, state="preparing", message="Готовлю кадры размеченных проходов")
         dataset_dir = output_dir / "dataset"
+        # Кураторский набор «macbook», а не «all» — паритет с макбучным циклом.
+        # Первый автономный прогон учился на «all» и получил классом 26 событий
+        # «кота не видно» — тени и листву, которых макбучный набор не имел
+        # вовсе; ArcFace-голова тратила ёмкость пространства на «отличай тени
+        # от котов» и размыла главное. Больше данных — не лучше, когда среди
+        # них мусорный класс.
         manifest, report = build_dataset(
             database_path,
             data_dir,
             ffmpeg_path,
-            "all",
+            "macbook",
             dataset_dir,
             detector_model_path=detector_model_path,
             detector_device=detector_device,
@@ -216,6 +276,15 @@ def run_job(
                 "new": _metrics_dict(new_metrics),
                 "image_size": image_size,
                 "threshold": model_info.get("threshold"),
+                # Распределения — чтобы вопрос «порог задушил или пространство
+                # слабое» решался взглядом на отчёт, а не ночными раскопками
+                # с sudo: 14 августа ровно такой вопрос потребовал владельца.
+                "distribution": _score_distribution(
+                    onnx_path,
+                    model_info,
+                    [item for item in items_by_view[view] if item.split == "validation"],
+                    dataset_dir,
+                ),
             }
             stale_path = installed.get(view)
             if stale_path is not None and stale_path.is_file():

@@ -1138,3 +1138,25 @@ a.dash-module:hover { border-color: var(--line-strong); }
 .dash-ok { color: var(--ok); }
 .dash-warn { color: var(--signal); }
 .dash-stat p { margin: 0 0 4px; }
+
+/* ── Панель-раскрывашка целиком: «Опознанные проходы» под катом ────── */
+details.folded-panel > summary {
+  list-style: none;
+  cursor: pointer;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+details.folded-panel > summary::-webkit-details-marker { display: none; }
+details.folded-panel > summary::after {
+  content: "▸";
+  color: var(--text-faint);
+  font-size: 12px;
+  margin-left: auto;
+}
+details[open].folded-panel > summary::after { content: "▾"; }
+details.folded-panel > summary .state-line { font-size: 12.5px; }
+details.folded-panel > summary:focus-visible {
+  outline: 2px solid var(--signal);
+  outline-offset: 2px;
+}
