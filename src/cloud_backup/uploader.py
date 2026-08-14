@@ -124,6 +124,13 @@ def _object_key(config: CloudBackupConfig, event: dict[str, Any], suffix: str) -
     return f"{config.prefix}/{day}/{camera}/{event['id']}.{suffix}"
 
 
+def _remember(uploaded: set[str], order: list[str], event_id: str) -> None:
+    """Отметить залитым, сохранив порядок: по нему обрезается журнал."""
+    if event_id not in uploaded:
+        uploaded.add(event_id)
+        order.append(event_id)
+
+
 def _load_state(path: Path) -> dict[str, Any]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -165,8 +172,26 @@ def run(settings: Settings, *, once: bool = False) -> None:
 
             wanted = (config.endpoint, config.region, config.access_key_id, config.secret_key)
             if client is None or client_key != wanted:
+                # Умолчания botocore (минута на соединение, несколько попыток)
+                # растягивали «минутный» цикл на часы при мёртвом облаке — и всё
+                # это время сторож исправно кормился. Настройка необязательна:
+                # без botocore клиент создаётся с умолчаниями, а не падает.
+                extra: dict[str, Any] = {}
+                try:
+                    from botocore.config import (  # type: ignore[import-not-found]
+                        Config as BotoConfig,
+                    )
+
+                    extra["config"] = BotoConfig(
+                        connect_timeout=15,
+                        read_timeout=120,
+                        retries={"max_attempts": 2},
+                    )
+                except ImportError:
+                    pass
                 client = boto3.client(
                     "s3",
+                    **extra,
                     endpoint_url=config.endpoint,
                     region_name=config.region,
                     aws_access_key_id=config.access_key_id,
@@ -180,7 +205,12 @@ def run(settings: Settings, *, once: bool = False) -> None:
             )
             if not isinstance(events, list):
                 raise RuntimeError("Frigate вернул не список событий")  # noqa: TRY004 — это отказ API, не тип
-            uploaded = set(state.get("uploaded") or [])
+            # Журнал — список, а не множество: обрезка по REMEMBER_IDS должна
+            # выбрасывать самые старые отметки, а обход set() отдаёт их в
+            # произвольном порядке и жертвует случайными (находка ревью 14.08).
+            uploaded_order: list[str] = list(state.get("uploaded") or [])
+            uploaded = set(uploaded_order)
+
             attempts: dict[str, int] = dict(state.get("attempts") or {})
             sent_bytes = 0
             sent_events = 0
@@ -210,7 +240,7 @@ def run(settings: Settings, *, once: bool = False) -> None:
             for position, event in enumerate(batch):
                 event_id = str(event["id"])
                 if event.get("_skip"):
-                    uploaded.add(event_id)
+                    _remember(uploaded, uploaded_order, event_id)
                     continue
                 # Одно ядовитое событие не должно ронять цикл: Frigate может
                 # собирать клип часового события дольше любого таймаута.
@@ -229,19 +259,16 @@ def run(settings: Settings, *, once: bool = False) -> None:
                 except Exception as exc:  # noqa: BLE001 — пропуск, не крушение
                     attempts[event_id] = attempts.get(event_id, 0) + 1
                     failed += 1
-                    if attempts[event_id] >= 5:
-                        # Пять попыток по циклу на каждую — этот клип не отдать.
-                        # Прекращаем жечь на нём таймауты; снимок ниже мог уйти.
-                        uploaded.add(event_id)
-                        logger.warning(
-                            "Событие %s не отдалось за %d попыток, пропускаю: %s",
-                            event_id, attempts[event_id], str(exc)[:120],
-                        )
-                    else:
-                        logger.info(
-                            "Событие %s отложено (попытка %d): %s",
-                            event_id, attempts[event_id], str(exc)[:120],
-                        )
+                    # Списание — только в конце цикла и только если канал в этом
+                    # же цикле доказал, что жив. Иначе пять минут без интернета
+                    # (пять циклов) списывали бы ВСЮ очередь как «залитую», и
+                    # вернувшаяся связь уже не догнала бы ни одного клипа —
+                    # включая тот, ради которого копия и заводилась. Найдено
+                    # адверсарным ревью 14 августа.
+                    logger.info(
+                        "Событие %s отложено (попытка %d): %s",
+                        event_id, attempts[event_id], str(exc)[:120],
+                    )
                     notifier.watchdog()
                     continue
                 attempts.pop(event_id, None)
@@ -277,10 +304,8 @@ def run(settings: Settings, *, once: bool = False) -> None:
                     # выгрузки не оставил ни одной отметки: 460 клипов поехали
                     # по второму разу, а при версионировании с блокировкой
                     # каждая перезаливка — лишняя запертая версия и деньги.
-                    state["uploaded"] = list(uploaded)[-REMEMBER_IDS:]
-                    state["attempts"] = {
-                        key: value for key, value in attempts.items() if value < 5
-                    }
+                    state["uploaded"] = uploaded_order[-REMEMBER_IDS:]
+                    state["attempts"] = attempts
                     _save_state(state_path, state)
                 try:
                     snapshot = _fetch_bytes(
@@ -293,16 +318,27 @@ def run(settings: Settings, *, once: bool = False) -> None:
                         ContentType="image/jpeg",
                     )
                     sent_bytes += len(snapshot)
-                except OSError:
-                    # Снимка может не быть — клип важнее, не срываем цикл.
-                    logger.info("Событие %s без снимка", event_id)
-                uploaded.add(event_id)
+                except Exception:  # noqa: BLE001 — снимок второстепенен
+                    # Ловить надо всё: ошибки botocore не наследуют OSError, и
+                    # отказ на снимке вылетал из цикла мимо отметки о клипе —
+                    # тот же клип заливался заново каждую минуту, а очередь
+                    # стояла (находка ревью 14.08).
+                    logger.info("Событие %s: снимок не ушёл", event_id)
+                _remember(uploaded, uploaded_order, event_id)
                 sent_events += 1
                 notifier.watchdog()
-            state["uploaded"] = list(uploaded)[-REMEMBER_IDS:]
-            state["attempts"] = {
-                key: value for key, value in attempts.items() if value < 5
-            }
+            if sent_events:
+                # Канал жив — значит, застрявшие клипы застряли сами по себе.
+                for event_id, count in list(attempts.items()):
+                    if count >= 5:
+                        _remember(uploaded, uploaded_order, event_id)
+                        attempts.pop(event_id, None)
+                        logger.warning(
+                            "Событие %s не отдалось за %d попыток при живом канале",
+                            event_id, count,
+                        )
+            state["uploaded"] = uploaded_order[-REMEMBER_IDS:]
+            state["attempts"] = attempts
             today = datetime.now(UTC).strftime("%Y-%m-%d")
             if state.get("day") != today:
                 state["day"] = today
@@ -310,15 +346,24 @@ def run(settings: Settings, *, once: bool = False) -> None:
                 state["day_bytes"] = 0
             state["day_events"] = int(state.get("day_events") or 0) + sent_events
             state["day_bytes"] = int(state.get("day_bytes") or 0) + sent_bytes
-            state["status"] = "ok"
             state.pop("progress", None)
-            tail = f", отложено {failed}" if failed else ""
-            state["message"] = (
-                f"За сутки: {state['day_events']} событий, "
-                f"{state['day_bytes'] / 1e6:.0f} МБ{tail}"
-            )
-            state["last_success_at"] = time.time()
-            state.pop("last_error", None)
+            if failed and not sent_events:
+                # Ни одного доставленного при непустой очереди — это не успех.
+                # Зелёная строка со свежим «последний успех» врала бы неделю,
+                # пока в облаке пусто (находка ревью 14.08).
+                state["status"] = "error"
+                state["message"] = (
+                    f"Не удалось залить ни одного события: ждут {failed}"
+                )
+            else:
+                state["status"] = "ok"
+                tail = f", отложено {failed}" if failed else ""
+                state["message"] = (
+                    f"За сутки: {state['day_events']} событий, "
+                    f"{state['day_bytes'] / 1e6:.0f} МБ{tail}"
+                )
+                state["last_success_at"] = time.time()
+                state.pop("last_error", None)
             if sent_events:
                 logger.info(
                     "Залито %d событий, %.1f МБ", sent_events, sent_bytes / 1e6
