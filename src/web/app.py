@@ -1796,9 +1796,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         """Настройки для админки: секрет наружу не выходит, только его наличие."""
         values = config.model_dump(exclude={"secret_key", "access_key_id"})
         values["has_secret"] = bool(config.secret_key)
-        values["access_key_hint"] = (
-            config.access_key_id[:4] + "…" if config.access_key_id else ""
-        )
+        # Key id — не секрет (секретна только вторая половина пары), а сверять
+        # его с bucket policy приходится посимвольно: первая подсказка из
+        # четырёх букв оказалась бесполезной — с «YCAJ» начинаются все ключи
+        # Яндекса, и именно это скрыло несовпадение ключей 14 августа.
+        values["access_key_id"] = config.access_key_id
         return values
 
     @app.get("/api/cloud-backup/settings")
