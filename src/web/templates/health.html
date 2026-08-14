@@ -4,6 +4,26 @@
 
 {% block scripts %}
 <script>
+  document.querySelector("#test-cloud")?.addEventListener("click", async event => {
+    const button = event.currentTarget;
+    const status = document.querySelector("#cloud-save-status");
+    button.disabled = true;
+    status.textContent = "…";
+    try {
+      const response = await fetch("/api/cloud-backup/test", {method: "POST"});
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.detail || `ошибка ${response.status}`);
+      const r = result.results;
+      status.textContent =
+        `запись: ${r.put} · список: ${r.list} · чтение: ${r.get} · удаление: ${r.delete}`;
+    } catch (error) {
+      status.textContent = error.message;
+      status.classList.add("bad");
+    } finally {
+      button.disabled = false;
+    }
+  });
+
   document.querySelector("#save-cloud")?.addEventListener("click", async event => {
     const button = event.currentTarget;
     const status = document.querySelector("#cloud-save-status");
@@ -224,6 +244,7 @@
       <input id="cloud-secret" type="password" autocomplete="new-password"
         placeholder="{{ 'сохранён' if cloud_backup.has_secret else 'не задан' }}" style="width: 14em">
       <button id="save-cloud" type="button">Сохранить</button>
+      <button id="test-cloud" type="button">Проверить соединение</button>
       <span id="cloud-save-status" class="muted data" style="font-size: 12px"></span>
     </div>
     <p class="muted" style="font-size: 13px">
