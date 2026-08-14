@@ -447,3 +447,80 @@ def test_caption_takes_the_name_from_aggregated_decision(
     journal.close()
 
     assert captions and captions[0].startswith("Черныш: проход")
+
+
+def test_a_night_pass_that_reaches_the_door_is_notified(runtime_path: Path, monkeypatch) -> None:
+    """Ночью коты заходят через террасу, и событие начинается с подхода.
+
+    13–14 августа восемь ночных проходов подряд ушли в
+    `camera_not_notified:side`, хотя кот дошёл до самой дверцы и был узнан, —
+    владелец счёл уведомления сломанными. Роль для гейта — «докуда дошло», а
+    не «кто начал»: дверца, увидевшая кота уверенно, делает проход дверным.
+    """
+    from src.common.settings import Settings
+    from src.recorder import app as recorder_app
+    from src.recorder.detection_journal import DetectionJournal
+    from src.recorder.events import AutomaticEventRequest
+
+    recorder_app.reset_notification_gate()
+    settings = Settings.model_construct(
+        data_dir=runtime_path,
+        database_path=runtime_path / "catdoor.sqlite3",
+        ffmpeg_path="ffmpeg",
+        ring_segment_seconds=0,
+        display_timezone="Europe/Moscow",
+        telegram_bot_token=TOKEN,
+        telegram_chat_id="12345",
+        notify_roles=["face"],
+        notify_cooldown_seconds=300.0,
+    )
+    event = type(
+        "StoredEvent",
+        (),
+        {
+            "id": 545,
+            "created_at": datetime(2026, 8, 14, 4, 43),  # noqa: DTZ001
+            "media_path": "events/00000545/face.mp4",
+            "side_media_path": None,
+        },
+    )()
+    sent: list[str] = []
+
+    def fake_extract(ffmpeg_path, video, destination, **kwargs):
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(b"\xff\xd8jpeg\xff\xd9")
+        return True
+
+    monkeypatch.setattr("src.recorder.app.extract_frame", fake_extract)
+    monkeypatch.setattr(
+        "src.common.telegram.TelegramClient.send_photo",
+        lambda self, photo, caption: sent.append(caption),
+    )
+    journal = DetectionJournal(
+        runtime_path / "runtime" / "detection.jsonl", max_bytes=100_000, backup_count=1
+    )
+
+    # Начал подход, но дверца увидела кота уверенно — раньше это молчало.
+    reached_door = AutomaticEventRequest(
+        started_at=1.0,
+        ended_at=9.0,
+        initiating_camera="side",
+        confidence_face=0.90,
+        confidence_side=0.95,
+    )
+    recorder_app._notify_about_pass(settings, reached_door, event, journal)
+
+    # Чисто террасная прогулка остаётся тихой.
+    recorder_app.reset_notification_gate()
+    terrace_only = AutomaticEventRequest(
+        started_at=1.0,
+        ended_at=9.0,
+        initiating_camera="side",
+        confidence_face=0.2,
+        confidence_side=0.97,
+    )
+    recorder_app._notify_about_pass(settings, terrace_only, event, journal)
+    journal.close()
+
+    assert len(sent) == 1
+    assert "дверца" in sent[0]
