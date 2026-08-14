@@ -269,7 +269,13 @@ def test_detect_resolution_is_left_to_frigate() -> None:
     parsed = yaml.safe_load(config)
     detect = parsed["cameras"]["gate_1"]["detect"]
 
-    assert detect == {"enabled": True, "fps": 5}
+    assert detect == {
+        "enabled": True,
+        "fps": 5,
+        # Разрешение по-прежнему не задаём — Frigate возьмёт его из потока.
+        # Единственная добавка: замершая машина не держит событие вечно.
+        "stationary": {"max_frames": {"objects": {"car": 300}}},
+    }
 
 
 def test_camera_named_with_a_digit_does_not_topple_frigate() -> None:
@@ -448,3 +454,29 @@ def test_the_broker_address_is_the_one_frigate_can_reach() -> None:
     assert parsed["mqtt"]["enabled"] is True
     assert parsed["mqtt"]["host"] == "mqtt"
     assert parsed["mqtt"]["port"] == 1883
+
+
+def test_a_parked_car_stops_holding_the_event_open() -> None:
+    """14 августа машина простояла у калитки 162 минуты — одно событие.
+
+    Клип такого события около гигабайта: он остановил облачную копию и не
+    помещался ни в какой разумный таймаут. Событие закрывается через минуту
+    после того, как машина замерла; отъезд станет новым событием.
+
+    Человека это не касается: замерший у калитки человек — ровно то, что
+    терять из виду нельзя.
+    """
+    registry = CameraRegistry(
+        cameras=[
+            CameraRecord(
+                id="gate-1", title="Калитка", host="10.0.0.5", username="admin",
+                password="secret", stream_path="/main", circuit="gate",
+            )
+        ]
+    )
+
+    parsed = yaml.safe_load(build_config(registry, NodeCircuits(cats=False, gate=True)))
+
+    stationary = parsed["cameras"]["gate_1"]["detect"]["stationary"]
+    assert stationary["max_frames"]["objects"] == {"car": 300}
+    assert "person" not in stationary["max_frames"]["objects"]
