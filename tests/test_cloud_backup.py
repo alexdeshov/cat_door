@@ -507,3 +507,83 @@ def test_trimming_the_journal_keeps_the_freshest_marks(
 
     kept = set(_state(runtime_path)["uploaded"])
     assert set(fresh) <= kept
+
+
+# ── Тревога о простое копии ────────────────────────────────────────
+
+
+def test_an_hour_of_silence_raises_the_alarm() -> None:
+    """Копия ломается молча: бакет пуст, а на узле всё «работает».
+
+    Час выбран как примерно два десятка событий обычного дня: достаточно,
+    чтобы переждать перезагрузку роутера, и мало, чтобы узнать о беде вечером.
+    """
+    from src.cloud_backup.uploader import alert_decision
+
+    now = 100_000.0
+    fresh = {"last_success_at": now - 600}
+    stale = {"last_success_at": now - 3700}
+
+    assert alert_decision(fresh, now=now) is None
+    assert alert_decision(stale, now=now) == "alarm"
+
+
+def test_a_backup_that_never_worked_alarms_too() -> None:
+    """«Ни разу не заработало» — такая же беда, как «перестало».
+
+    Отсчёт идёт от момента включения, иначе неверный ключ молчал бы вечно.
+    """
+    from src.cloud_backup.uploader import alert_decision
+
+    now = 100_000.0
+
+    assert alert_decision({"watching_since": now - 3700}, now=now) == "alarm"
+    assert alert_decision({"watching_since": now - 60}, now=now) is None
+    # Копия ещё не включалась — тревожить не о чем.
+    assert alert_decision({}, now=now) is None
+
+
+def test_the_alarm_does_not_repeat_every_minute() -> None:
+    """Тревога раз в минуту превращается в шум, который перестают читать."""
+    from src.cloud_backup.uploader import alert_decision
+
+    now = 100_000.0
+    state = {"last_success_at": now - 7200, "alerted_at": now - 600}
+
+    assert alert_decision(state, now=now) is None
+    # Через шесть часов напомнить стоит: беда не рассосалась.
+    assert alert_decision(state, now=now + 6 * 3600) == "alarm"
+
+
+def test_recovery_is_announced_once() -> None:
+    """О возвращении надо сказать — иначе человек ждёт вторую тревогу зря."""
+    from src.cloud_backup.uploader import _notify_about_silence, alert_decision
+
+    now = 100_000.0
+    state = {"last_success_at": now - 60, "alerted_at": now - 7200}
+    sent: list[str] = []
+
+    assert alert_decision(state, now=now) == "recovered"
+    _notify_about_silence(state, sent.append, now=now)
+
+    assert "снова работает" in sent[0]
+    assert "alerted_at" not in state  # второй раз о том же не скажет
+    assert alert_decision(state, now=now) is None
+
+
+def test_the_alarm_text_carries_the_reason(runtime_path: Path) -> None:
+    """Сообщение обязано отвечать «почему», иначе человек идёт искать вслепую."""
+    from src.cloud_backup.uploader import _notify_about_silence
+
+    now = 100_000.0
+    state = {
+        "last_success_at": now - 7200,
+        "last_error": "AccessDenied при PutObject",
+    }
+    sent: list[str] = []
+
+    _notify_about_silence(state, sent.append, now=now)
+
+    assert "2 ч" in sent[0]
+    assert "AccessDenied" in sent[0]
+    assert state["alerted_at"] == now
