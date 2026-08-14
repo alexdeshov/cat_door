@@ -1823,8 +1823,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         path = cloud_backup_config_path(settings.data_dir)
         stored = load_cloud_backup_config(path, CloudBackupConfig())
         values = payload.model_dump(exclude={"access_key_id", "secret_key"})
-        values["access_key_id"] = payload.access_key_id or stored.access_key_id
-        values["secret_key"] = payload.secret_key or stored.secret_key
+        # strip обязателен: секрет копируют из консоли, и невидимый перенос
+        # строки на конце превращается в SignatureDoesNotMatch — 14 августа
+        # именно он съел вечер.
+        values["access_key_id"] = payload.access_key_id.strip() or stored.access_key_id
+        values["secret_key"] = payload.secret_key.strip() or stored.secret_key
         config = CloudBackupConfig.model_validate(values)
         try:
             save_cloud_backup_config(path, config)
