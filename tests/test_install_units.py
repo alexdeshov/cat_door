@@ -312,3 +312,13 @@ def test_the_web_unit_lets_its_long_jobs_finish() -> None:
     unit = (Path("install") / "catdoor-web.service").read_text(encoding="utf-8")
 
     assert "KillMode=process" in unit
+
+
+def test_the_cloud_backup_service_starts_after_a_reboot() -> None:
+    """Забытый `enable` означал бы, что после перезагрузки страховка от выноса
+    оборудования молча не поднялась — и узнать об этом можно было бы только
+    тогда, когда она понадобится.
+    """
+    script = (Path("install") / "install.sh").read_text(encoding="utf-8")
+
+    assert "systemctl enable catdoor-cloud-backup.service" in script
