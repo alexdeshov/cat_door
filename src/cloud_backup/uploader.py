@@ -1,12 +1,13 @@
-"""Выгрузка клипов событий Frigate в S3-бакет — раз в минуту.
+"""Выгрузка клипов событий Frigate в S3-бакет.
 
 Назначение — страховка от выноса оборудования: к моменту, когда вор дошёл от
 калитки до сервера, клип его подхода уже в облаке. Отсюда устройство:
 
-- **опрос, а не подписка**: раз в минуту спрашиваем у Frigate завершённые
-  события за окно оглядки и заливаем недостающие. Опрос идемпотентен и
-  догоняет после любого простоя — облака, узла, самого выгрузчика; подписка
-  на MQTT теряла бы всё, что случилось, пока служба лежала;
+- **опрос, а брокер сверх него**: раз в полминуты спрашиваем у Frigate
+  завершённые события за окно оглядки и заливаем недостающие. Опрос
+  идемпотентен и догоняет после любого простоя — облака, узла, самого
+  выгрузчика; подписка на MQTT теряла бы всё, что случилось, пока служба
+  лежала, поэтому она только будит цикл раньше срока;
 - **клип целиком, а не сегменты**: `GET /api/events/<id>/clip.mp4` отдаёт
   склеенный ролик события — смотреть его после кражи можно без плясок с
   10-секундными кусками;
@@ -29,7 +30,8 @@ import logging
 import threading
 import time
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -71,6 +73,47 @@ ALERT_REPEAT_SECONDS = 6 * 3600.0
 # на узле и в ночной локальной копии. Для страховки от выноса важен факт и
 # кадр, а не три часа записи стоящей машины.
 MAX_CLIP_SECONDS = 600.0
+# Сколько дать Frigate на сборку клипа, прежде чем его просить. Будильник
+# брокера приходит в ту же секунду, в которую событие закончилось, а клипа в
+# этот момент ещё нет: 14 августа КАЖДОЕ новое событие получало
+# `HTTP 400 Bad Request` на первой попытке — время отказа совпадало с
+# `end_time` до секунды. Выигрыша это не давало (событие всё равно уезжало
+# следующим кругом), зато копило попытки, а пять попыток при живом канале
+# списывают событие как «залитое», не залив его.
+CLIP_READY_SECONDS = 10.0
+
+
+@contextmanager
+def _heartbeat(notifier: Notifier) -> Iterator[None]:
+    """Кормить сторожа во время передачи, а не только между событиями.
+
+    Клип в десять минут — это около 150 МБ, а восходящий канал узла отдаёт
+    300 КБ/с: один `put_object` идёт восемь минут и больше. 14 августа сторож
+    (тогда 300 с) трижды убил выгрузчик посреди заливки, и каждый SIGABRT стоил
+    потерянных отметок и повторной заливки уже залитого окна — оплаченных
+    лишних версий в бакете.
+
+    Нить пингует от имени того же процесса, поэтому `NotifyAccess=main` не
+    против: проверка идёт по pid. Без сторожа (`watchdog_interval_seconds` —
+    `None`) нить не заводится вовсе.
+    """
+    interval = notifier.watchdog_interval_seconds
+    if interval is None:
+        yield
+        return
+    done = threading.Event()
+
+    def beat() -> None:
+        while not done.wait(interval):
+            notifier.watchdog()
+
+    thread = threading.Thread(target=beat, name="cloud-backup-watchdog", daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        done.set()
+        thread.join(timeout=1.0)
 
 
 def _fetch_json(url: str, timeout: float = 15.0) -> Any:
@@ -87,13 +130,18 @@ def eligible_events(
     events: list[dict[str, Any]],
     config: CloudBackupConfig,
     uploaded: set[str],
+    *,
+    now: float | None = None,
 ) -> list[dict[str, Any]]:
     """Что заливать: завершённые, с записью, нужной камеры, ещё не залитые.
 
     Незавершённые события пропускаются без пометки — их клип ещё растёт, и
     заливать половину значило бы никогда не залить целое: пометка «сделано»
-    закрыла бы дорогу повтору.
+    закрыла бы дорогу повтору. По той же причине пропускаются только что
+    закончившиеся: у Frigate клипа ещё нет, и просить его — гарантированный
+    отказ (см. `CLIP_READY_SECONDS`).
     """
+    now = time.time() if now is None else now
     selected = []
     # Новые вперёд. Восходящий канал узла — 1.8–3.6 Мбит/с (замерено
     # 14 августа), и суточный хвост едет часами; всё это время в облаке должны
@@ -106,6 +154,9 @@ def eligible_events(
         if not event_id or event_id in uploaded:
             continue
         if not event.get("end_time"):
+            continue
+        if now - float(event["end_time"]) < CLIP_READY_SECONDS:
+            # Клип ещё собирается. Без пометки: возьмём следующим кругом.
             continue
         if not event.get("has_clip", True):
             # Записи нет — заливать нечего; помечаем, чтобы не спрашивать вечно.
@@ -126,6 +177,21 @@ def eligible_events(
 # Сколько весит секунда видео, пока своих замеров нет: 5 Мбит/с основного
 # потока. Первые же залитые клипы заменят это число фактом.
 FALLBACK_BYTES_PER_SECOND = 640_000
+
+
+# Сколько событий в час считать потолком при запросе к Frigate. Замер
+# 14 августа: 465 событий за сутки, то есть двадцать в час; двухсот хватает с
+# десятикратным запасом. Число нужно потому, что предел выборки был жёстким
+# (500) при настраиваемом окне: стоило поставить оглядку в неделю, и Frigate,
+# отдающий новые первыми, возвращал бы только свежие пятьсот — остальное окно
+# не заливалось бы никогда, а панель показывала бы «очередь пуста».
+EVENTS_PER_HOUR_CAP = 200
+EVENTS_LIMIT_CEILING = 20_000
+
+
+def events_limit(lookback_hours: int) -> int:
+    """Предел выборки, растущий вместе с окном оглядки."""
+    return min(EVENTS_LIMIT_CEILING, max(500, int(lookback_hours) * EVENTS_PER_HOUR_CAP))
 
 
 def video_seconds(events: list[dict[str, Any]]) -> float:
@@ -236,9 +302,15 @@ class EventTrigger:
         if isinstance(payload, dict) and payload.get("type") == "end":
             self._wake.set()
 
-    def wait(self, timeout: float) -> None:
-        self._wake.wait(timeout)
+    def wait(self, timeout: float) -> bool:
+        """Дождаться повода для круга. `True` — разбудил брокер, а не таймер.
+
+        Разница важна: после сообщения брокера клипа у Frigate ещё нет, и цикл
+        обязан выждать (`CLIP_READY_SECONDS`), иначе спросит заведомо рано.
+        """
+        woken = self._wake.wait(timeout)
         self._wake.clear()
+        return woken
 
     def stop(self) -> None:
         client = self._client
@@ -379,12 +451,22 @@ def run(settings: Settings, *, once: bool = False) -> None:
                 )
                 client_key = wanted
             after = time.time() - config.lookback_hours * 3600
+            limit = events_limit(config.lookback_hours)
             events = _fetch_json(
                 f"{settings.gate_api_url.rstrip('/')}/api/events?"
-                f"after={after:.0f}&limit=500"
+                f"after={after:.0f}&limit={limit}"
             )
             if not isinstance(events, list):
                 raise RuntimeError("Frigate вернул не список событий")  # noqa: TRY004 — это отказ API, не тип
+            if len(events) >= limit:
+                # Frigate отдаёт новые первыми, поэтому упёршийся предел
+                # означает молча отрезанный хвост окна: «очередь пуста» тогда
+                # врало бы про самые старые события, ради которых окно и
+                # расширяли. Молчать об урезанном охвате нельзя.
+                logger.warning(
+                    "Frigate вернул ровно предел (%d): хвост окна в %d ч не виден",
+                    limit, config.lookback_hours,
+                )
             # Журнал — список, а не множество: обрезка по REMEMBER_IDS должна
             # выбрасывать самые старые отметки, а обход set() отдаёт их в
             # произвольном порядке и жертвует случайными (находка ревью 14.08).
@@ -426,16 +508,17 @@ def run(settings: Settings, *, once: bool = False) -> None:
                     # Клип длиннее потолка: берём только снимок и идём дальше,
                     # иначе одно такое событие держит очередь мёртвой хваткой.
                     try:
-                        snapshot = _fetch_bytes(
-                            f"{settings.gate_api_url.rstrip('/')}"
-                            f"/api/events/{event_id}/snapshot.jpg"
-                        )
-                        client.put_object(
-                            Bucket=config.bucket,
-                            Key=_object_key(config, event, "jpg"),
-                            Body=snapshot,
-                            ContentType="image/jpeg",
-                        )
+                        with _heartbeat(notifier):
+                            snapshot = _fetch_bytes(
+                                f"{settings.gate_api_url.rstrip('/')}"
+                                f"/api/events/{event_id}/snapshot.jpg"
+                            )
+                            client.put_object(
+                                Bucket=config.bucket,
+                                Key=_object_key(config, event, "jpg"),
+                                Body=snapshot,
+                                ContentType="image/jpeg",
+                            )
                         sent_bytes += len(snapshot)
                         _remember(uploaded, uploaded_order, event_id)
                         state["last_success_at"] = time.time()
@@ -454,15 +537,20 @@ def run(settings: Settings, *, once: bool = False) -> None:
                 # 14 августа такой клип оборвал догоняющую выгрузку, а
                 # застрявший сторож перезапустил службу целиком.
                 try:
-                    clip = _fetch_bytes(
-                        f"{settings.gate_api_url.rstrip('/')}/api/events/{event_id}/clip.mp4"
-                    )
-                    client.put_object(
-                        Bucket=config.bucket,
-                        Key=_object_key(config, event, "mp4"),
-                        Body=clip,
-                        ContentType="video/mp4",
-                    )
+                    # Сторож кормится изнутри: клип у потолка длительности
+                    # уезжает восемь минут и дольше, а между событиями пинга
+                    # он бы не дождался — 14 августа именно так systemd убил
+                    # выгрузчик посреди работающей заливки.
+                    with _heartbeat(notifier):
+                        clip = _fetch_bytes(
+                            f"{settings.gate_api_url.rstrip('/')}/api/events/{event_id}/clip.mp4"
+                        )
+                        client.put_object(
+                            Bucket=config.bucket,
+                            Key=_object_key(config, event, "mp4"),
+                            Body=clip,
+                            ContentType="video/mp4",
+                        )
                 except Exception as exc:  # noqa: BLE001 — пропуск, не крушение
                     attempts[event_id] = attempts.get(event_id, 0) + 1
                     failed += 1
@@ -506,24 +594,18 @@ def run(settings: Settings, *, once: bool = False) -> None:
                         f"залито {human_size(sent_bytes)}, "
                         f"осталось ~{human_size(remaining)}"
                     )
-                    # Журнал залитого — в каждое промежуточное сохранение.
-                    # Оба первых догоняющих цикла умерли до конца, и час
-                    # выгрузки не оставил ни одной отметки: 460 клипов поехали
-                    # по второму разу, а при версионировании с блокировкой
-                    # каждая перезаливка — лишняя запертая версия и деньги.
-                    state["uploaded"] = uploaded_order[-REMEMBER_IDS:]
-                    state["attempts"] = attempts
-                    _save_state(state_path, state)
                 try:
-                    snapshot = _fetch_bytes(
-                        f"{settings.gate_api_url.rstrip('/')}/api/events/{event_id}/snapshot.jpg"
-                    )
-                    client.put_object(
-                        Bucket=config.bucket,
-                        Key=_object_key(config, event, "jpg"),
-                        Body=snapshot,
-                        ContentType="image/jpeg",
-                    )
+                    with _heartbeat(notifier):
+                        snapshot = _fetch_bytes(
+                            f"{settings.gate_api_url.rstrip('/')}"
+                            f"/api/events/{event_id}/snapshot.jpg"
+                        )
+                        client.put_object(
+                            Bucket=config.bucket,
+                            Key=_object_key(config, event, "jpg"),
+                            Body=snapshot,
+                            ContentType="image/jpeg",
+                        )
                     sent_bytes += len(snapshot)
                 except Exception:  # noqa: BLE001 — снимок второстепенен
                     # Ловить надо всё: ошибки botocore не наследуют OSError, и
@@ -540,6 +622,16 @@ def run(settings: Settings, *, once: bool = False) -> None:
                 state["last_success_at"] = time.time()
                 state.pop("last_error", None)
                 sent_events += 1
+                # Отметка о заливке пишется на диск сразу же, а не раз в
+                # двадцать клипов. Цикл убивают: 14 августа сторож трижды
+                # прислал SIGABRT посреди догона, и каждая смерть стоила до
+                # двадцати перезалитых клипов — при версионировании с
+                # блокировкой это оплаченные запертые версии. Одна durable
+                # запись на событие при четырёх сотнях событий в сутки не
+                # стоит ничего.
+                state["uploaded"] = uploaded_order[-REMEMBER_IDS:]
+                state["attempts"] = attempts
+                _save_state(state_path, state)
                 notifier.watchdog()
             if sent_events:
                 # Канал жив — значит, застрявшие клипы застряли сами по себе.
@@ -571,11 +663,24 @@ def run(settings: Settings, *, once: bool = False) -> None:
                 )
             else:
                 state["status"] = "ok"
-                tail = f", отложено {failed}" if failed else ""
-                state["message"] = (
-                    f"За сутки: {state['day_events']} событий, "
-                    f"{state['day_bytes'] / 1e6:.0f} МБ{tail}"
+                state["pending"] = failed
+                day_line = (
+                    f"за сутки {state['day_events']} событий, "
+                    f"{state['day_bytes'] / 1e6:.0f} МБ"
                 )
+                if sent_events:
+                    tail = f", отложено {failed}" if failed else ""
+                    state["message"] = (
+                        f"За сутки: {state['day_events']} событий, "
+                        f"{state['day_bytes'] / 1e6:.0f} МБ{tail}"
+                    )
+                else:
+                    # Заливать было нечего — и это надо сказать прямо. Прежняя
+                    # строка «За сутки: N событий, X МБ» одинаково выглядела и
+                    # при пустой очереди, и при вставшей: 14 августа ровно из-за
+                    # этого ноль на графике бакета прочитался как поломка, хотя
+                    # догон просто закончился.
+                    state["message"] = f"Очередь пуста: всё залито, {day_line}"
                 state["last_success_at"] = time.time()
                 state.pop("last_error", None)
             if sent_events:
@@ -591,7 +696,11 @@ def run(settings: Settings, *, once: bool = False) -> None:
         _save_state(state_path, state)
         if once:
             return
-        trigger.wait(POLL_SECONDS)
+        if trigger.wait(POLL_SECONDS):
+            # Разбудил брокер: событие закончилось только что, и клипа у
+            # Frigate ещё нет. Выждать дешевле, чем спросить рано — ранний
+            # вопрос стоил гарантированного отказа на каждом событии.
+            time.sleep(CLIP_READY_SECONDS)
 
 
 def main() -> None:

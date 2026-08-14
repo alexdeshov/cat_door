@@ -289,15 +289,17 @@ def test_only_delivered_events_enter_the_journal_when_the_link_dies_mid_queue(
     assert state["day_events"] == 3
 
 
-def test_an_interrupted_catch_up_keeps_the_first_twenty_deliveries(
+def test_an_interrupted_catch_up_forgets_at_most_one_delivery(
     runtime_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Догоняющий цикл убит на середине — журнал промежуточных сохранений цел.
+    """Догоняющий цикл убит на середине — на диске всё, что успело доехать.
 
-    Такое уже было: два первых догоняющих цикла умерли до конца, час выгрузки
-    не оставил ни одной отметки, и 460 клипов поехали по второму разу. Здесь
-    цикл обрывается на 22-м событии так, как его обрывает systemd, — и первая
-    двадцатка обязана остаться на диске.
+    Такое уже было дважды: сперва два первых догона умерли до конца и 460
+    клипов поехали по второму разу, потом 14 августа сторож трижды прислал
+    SIGABRT посреди работающей заливки. Отметка раз в двадцать клипов стоила
+    двадцати перезаливок за смерть — при версионировании с блокировкой это
+    оплаченные запертые версии. Теперь журнал пишется на каждом событии, и
+    цена смерти — не больше одного клипа.
     """
     now = time.time()
     events = [_event(f"e{index:02d}", now - 3600 + index * 60) for index in range(30)]
@@ -315,9 +317,12 @@ def test_an_interrupted_catch_up_keeps_the_first_twenty_deliveries(
         run(settings, once=True)
 
     state = _state(runtime_path)
-    assert len(state["uploaded"]) == 20
+    delivered = {key.rsplit("/", 1)[-1].removesuffix(".mp4") for key in _uploaded_clips(s3)}
+    forgotten = delivered - set(state["uploaded"])
+    assert len(forgotten) <= 1  # цена смерти — не больше одного клипа
+    assert len(state["uploaded"]) >= 21  # не двадцатками, как было
     # Помнится именно то, что доехало, — сверху очереди, новые вперёд.
-    assert set(state["uploaded"]) == {f"e{index:02d}" for index in range(10, 30)}
+    assert set(state["uploaded"]) <= {f"e{index:02d}" for index in range(9, 30)}
     assert state["progress"]["total"] == 30
 
 
@@ -359,6 +364,8 @@ def test_the_lookback_window_is_the_only_memory_of_a_pending_event(
     держит обе цифры на виду, потому что от них зависит длина переживаемого
     простоя.
     """
+    from src.cloud_backup.uploader import events_limit
+
     now = time.time()
     frigate = _Frigate([_event("свежее", now - 300)])
     settings = _install(monkeypatch, runtime_path, frigate, _FakeS3())
@@ -368,10 +375,13 @@ def test_the_lookback_window_is_the_only_memory_of_a_pending_event(
     query = next(url for url in frigate.urls if "/api/events?" in url)
     after = float(query.split("after=")[1].split("&")[0])
     assert abs(after - (now - 24 * 3600)) < 5  # сутки по умолчанию
-    assert "limit=500" in query
-    # Незалитого в состоянии не остаётся ни строкой — только журнал залитого.
+    # Предел растёт вместе с окном: жёсткие 500 резали бы окно шире суток молча.
+    assert f"limit={events_limit(24)}" in query
+    # Незалитого в состоянии не остаётся списком: только счётчик отложенных и
+    # журнал залитого — догонять служба будет по выборке Frigate, не по памяти.
     state = _state(runtime_path)
-    assert set(state) & {"pending", "queue", "failed"} == set()
+    assert set(state) & {"queue", "debts", "failed"} == set()
+    assert state["pending"] == 0
 
 
 def test_five_offline_cycles_do_not_write_the_event_off(
@@ -656,5 +666,105 @@ def test_without_a_broker_the_cycle_falls_back_to_the_timer() -> None:
     from src.cloud_backup.uploader import EventTrigger
 
     assert EventTrigger("").start() is False
-    # Ожидание без брокера просто выдерживает таймаут.
-    EventTrigger("").wait(0.01)
+    # Ожидание без брокера просто выдерживает таймаут — и говорит, что разбудил
+    # именно он: после будильника брокера цикл обязан выждать сборку клипа.
+    assert EventTrigger("").wait(0.01) is False
+
+
+def test_a_just_finished_event_waits_for_frigate_to_build_the_clip() -> None:
+    """Будильник брокера приходит в ту же секунду, в которую событие кончилось.
+
+    Замер 14 августа: у шести событий подряд время отказа `HTTP 400` совпало с
+    их `end_time` до секунды — клипа в этот момент у Frigate ещё нет. Ранний
+    вопрос ничего не ускорял (событие всё равно уезжало следующим кругом), зато
+    копил попытки, а пять попыток при живом канале списывают событие как
+    «залитое», не залив его.
+    """
+    from src.cloud_backup.uploader import CLIP_READY_SECONDS, eligible_events
+
+    now = 10_000.0
+    events = [
+        {"id": "только что", "camera": "gate", "start_time": now - 8, "end_time": now},
+        {"id": "созрело", "camera": "gate", "start_time": now - 60,
+         "end_time": now - CLIP_READY_SECONDS},
+    ]
+
+    selected = eligible_events(events, CloudBackupConfig(), set(), now=now)
+
+    assert [event["id"] for event in selected] == ["созрело"]
+    # Пропуск без пометки — как у незавершённого события: следующий круг обязан
+    # увидеть его снова, иначе клип не уедет никогда.
+    later = eligible_events(
+        events, CloudBackupConfig(), set(), now=now + CLIP_READY_SECONDS
+    )
+    assert [event["id"] for event in later] == ["только что", "созрело"]
+
+
+def test_an_empty_queue_says_so_instead_of_looking_broken(
+    runtime_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ноль на графике бакета — это либо «всё залито», либо «всё встало».
+
+    14 августа догон закончился в 21:16, график лёг в ноль, и строка «За сутки:
+    134 событий, 1660 МБ» прочиталась как поломка. Пустая очередь обязана
+    говорить о себе прямо, а свежее событие — не попадать в журнал залитого.
+    """
+    now = time.time()
+    frigate = _Frigate([_event("свежее", now - 5, 5.0)])  # закончилось только что
+    s3 = _FakeS3()
+    settings = _install(monkeypatch, runtime_path, frigate, s3)
+
+    run(settings, once=True)
+
+    state = _state(runtime_path)
+    assert s3.attempted == []  # клип ещё собирается — не дёргаем
+    assert state["uploaded"] == [] and state["attempts"] == {}
+    assert state["status"] == "ok" and state["pending"] == 0
+    assert "Очередь пуста" in state["message"]
+
+    # А непустая очередь отчитывается по-прежнему — суточным итогом.
+    frigate.events = [_event("вчерашнее", now - 3600)]
+    run(settings, once=True)
+
+    assert "За сутки" in _state(runtime_path)["message"]
+
+
+def test_the_watchdog_is_fed_while_a_clip_is_uploading() -> None:
+    """Пинги между событиями не спасают: один клип уезжает восемь минут.
+
+    14 августа сторож (на узле всё ещё 300 с) трижды убил выгрузчик посреди
+    работающей заливки — SIGABRT, потерянные отметки, повторно залитое окно.
+    Кормить его надо изнутри передачи.
+    """
+    from src.cloud_backup.uploader import _heartbeat
+
+    pings: list[int] = []
+    notifier = SimpleNamespace(
+        watchdog_interval_seconds=0.01, watchdog=lambda: pings.append(1)
+    )
+
+    with _heartbeat(notifier):  # type: ignore[arg-type]  # хватает утиной совместимости
+        time.sleep(0.05)
+
+    assert len(pings) >= 2
+    stopped = len(pings)
+    time.sleep(0.03)
+    assert len(pings) == stopped  # нить не переживает выход из передачи
+
+    # Без сторожа (служба запущена из оболочки) нить не заводится вовсе.
+    with _heartbeat(SimpleNamespace(watchdog_interval_seconds=None)):  # type: ignore[arg-type]
+        pass
+
+
+def test_the_events_limit_grows_with_the_lookback_window() -> None:
+    """Жёсткий предел в 500 событий тихо резал окно шире суток.
+
+    Frigate отдаёт новые первыми: с оглядкой в неделю служба видела бы только
+    свежие пятьсот, а остальное окно не залилось бы никогда — и панель
+    показывала бы «очередь пуста». Замер 14 августа: 465 событий в сутки.
+    """
+    from src.cloud_backup.uploader import EVENTS_LIMIT_CEILING, events_limit
+
+    assert events_limit(1) == 500  # пол не ниже прежнего предела
+    assert events_limit(24) == 4800  # десятикратный запас к замеренным 465
+    assert events_limit(168) == EVENTS_LIMIT_CEILING  # неделя упирается в потолок
