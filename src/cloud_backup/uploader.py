@@ -57,6 +57,16 @@ ALERT_AFTER_SECONDS = 3600.0
 # Как часто напоминать, пока не починено. Тревога раз в минуту превратилась бы
 # в шум, который перестают читать, — и настоящую беду в нём не заметят.
 ALERT_REPEAT_SECONDS = 6 * 3600.0
+# Потолок длительности клипа. Frigate склеивает событие в один mp4, и трёхчасовая
+# машина у калитки даёт около гигабайта: узел собирает такой клип дольше любого
+# разумного таймаута, а канал на 300 КБ/с отдавал бы его час. 14 августа одно
+# такое событие встало первым в очереди и остановило выгрузку целиком — при
+# живом канале и работоспособной службе.
+#
+# Такие события не пропадают молча: снимок уходит всегда, а сам ролик остаётся
+# на узле и в ночной локальной копии. Для страховки от выноса важен факт и
+# кадр, а не три часа записи стоящей машины.
+MAX_CLIP_SECONDS = 600.0
 
 
 def _fetch_json(url: str, timeout: float = 15.0) -> Any:
@@ -100,6 +110,11 @@ def eligible_events(
         camera = str(event.get("camera") or "")
         if config.cameras and camera not in config.cameras:
             continue
+        duration = float(event.get("end_time") or 0) - float(event.get("start_time") or 0)
+        if duration > MAX_CLIP_SECONDS:
+            # Ролик неподъёмный — но снимок этого события всё равно нужен.
+            selected.append({**event, "_snapshot_only": True})
+            continue
         selected.append(event)
     return selected
 
@@ -110,9 +125,16 @@ FALLBACK_BYTES_PER_SECOND = 640_000
 
 
 def video_seconds(events: list[dict[str, Any]]) -> float:
-    """Длительность очереди в секундах видео — из неё считается вес."""
+    """Длительность очереди в секундах видео — из неё считается вес.
+
+    События, от которых уедет только снимок, в вес не входят: иначе оценка
+    «осталось 11.7 ГБ» состояла бы в основном из ролика, который никто не
+    собирается заливать.
+    """
     total = 0.0
     for event in events:
+        if event.get("_snapshot_only"):
+            continue
         start = float(event.get("start_time") or 0)
         end = float(event.get("end_time") or start)
         total += max(0.0, end - start)
@@ -332,6 +354,33 @@ def run(settings: Settings, *, once: bool = False) -> None:
                 if event.get("_skip"):
                     _remember(uploaded, uploaded_order, event_id)
                     continue
+                if event.get("_snapshot_only"):
+                    # Клип длиннее потолка: берём только снимок и идём дальше,
+                    # иначе одно такое событие держит очередь мёртвой хваткой.
+                    try:
+                        snapshot = _fetch_bytes(
+                            f"{settings.gate_api_url.rstrip('/')}"
+                            f"/api/events/{event_id}/snapshot.jpg"
+                        )
+                        client.put_object(
+                            Bucket=config.bucket,
+                            Key=_object_key(config, event, "jpg"),
+                            Body=snapshot,
+                            ContentType="image/jpeg",
+                        )
+                        sent_bytes += len(snapshot)
+                        _remember(uploaded, uploaded_order, event_id)
+                        state["last_success_at"] = time.time()
+                        logger.info(
+                            "Событие %s длиннее %.0f мин: залит только снимок",
+                            event_id, MAX_CLIP_SECONDS / 60,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        attempts[event_id] = attempts.get(event_id, 0) + 1
+                        failed += 1
+                        logger.info("Снимок %s не ушёл: %s", event_id, str(exc)[:120])
+                    notifier.watchdog()
+                    continue
                 # Одно ядовитое событие не должно ронять цикл: Frigate может
                 # собирать клип часового события дольше любого таймаута.
                 # 14 августа такой клип оборвал догоняющую выгрузку, а
@@ -415,6 +464,13 @@ def run(settings: Settings, *, once: bool = False) -> None:
                     # стояла (находка ревью 14.08).
                     logger.info("Событие %s: снимок не ушёл", event_id)
                 _remember(uploaded, uploaded_order, event_id)
+                # Отметка успеха ставится на каждый залитый объект, а не в
+                # конце цикла. Догоняющий цикл идёт часами и может не дожить до
+                # конца — перезапуск службы, ядовитый клип, обрыв, — и тогда
+                # «последнего успеха» не появлялось вовсе: тревога о молчании
+                # ударила бы через час по работающей во всю силу выгрузке.
+                state["last_success_at"] = time.time()
+                state.pop("last_error", None)
                 sent_events += 1
                 notifier.watchdog()
             if sent_events:
