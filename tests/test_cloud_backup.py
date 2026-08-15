@@ -577,11 +577,81 @@ def test_trimming_the_journal_keeps_the_freshest_marks(
     assert set(fresh) <= kept
 
 
+def test_orphaned_attempts_do_not_mute_the_health_stamps(
+    runtime_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Сирота: событие числится и залитым, и ждущим попытки — одновременно.
+
+    Такие записи оставлял код до #267 (ветка `_skip` метила событие залитым,
+    не убирая из попыток). Отбор залитое не видит, повтора не будет никогда —
+    а вечно «непустая» очередь глушила отметку здоровья, и первая же тихая
+    ночь будила человека ложной тревогой (15.08). Сирота обязана вычищаться
+    первым же кругом.
+    """
+    now = time.time()
+    frigate = _Frigate([_event("orphan", now - 600)])
+    s3 = _FakeS3()
+    settings = _install(monkeypatch, runtime_path, frigate, s3)
+    cloud_backup_state_path(runtime_path).write_text(
+        json.dumps({"uploaded": ["orphan"], "attempts": {"orphan": 3}}),
+        encoding="utf-8",
+    )
+
+    run(settings, once=True)
+
+    state = _state(runtime_path)
+    assert state["attempts"] == {}
+    assert "oldest_pending_at" not in state
+    # Очередь честно пуста, круг прошёл — обе отметки здоровья на месте.
+    assert "last_cycle_ok_at" in state
+    assert "last_success_at" in state
+
+
+def test_a_stuck_event_is_visible_as_oldest_pending(
+    runtime_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Незалитое событие видно тревоге возрастом, а не отсутствием успеха.
+
+    `oldest_pending_at` — конец старейшего ждущего события: по нему тревога
+    отличает «ночью нечего заливать» от «клип час не может уехать».
+    """
+    now = time.time()
+    event = _event("stuck", now - 600)
+    frigate = _Frigate([event])
+    s3 = _FakeS3(fail=lambda key: True)
+    settings = _install(monkeypatch, runtime_path, frigate, s3)
+
+    run(settings, once=True)
+
+    state = _state(runtime_path)
+    assert state["attempts"]["stuck"]["count"] == 1
+    assert state["oldest_pending_at"] == pytest.approx(event["end_time"])
+    # Круг при этом завершился: тревога придёт про застрявшее событие, а не
+    # про «циклы не проходят».
+    assert "last_cycle_ok_at" in state
+
+
 # ── Тревога о простое копии ────────────────────────────────────────
 
 
-def test_an_hour_of_silence_raises_the_alarm() -> None:
-    """Копия ломается молча: бакет пуст, а на узле всё «работает».
+def test_a_quiet_night_is_not_an_alarm() -> None:
+    """Ночь без событий — не беда, сколько бы часов ни шло без заливок.
+
+    Прежний критерий «нет успеха час» не отличал «нечего заливать» от «не
+    может залить»: первая же тихая ночь после выката будила человека ложным
+    «копия не выгружает 7 ч» (15.08). Пока циклы проходят и очередь пуста —
+    тишина.
+    """
+    from src.cloud_backup.uploader import alert_decision
+
+    now = 100_000.0
+    state = {"last_cycle_ok_at": now - 10.0, "last_success_at": now - 9 * 3600}
+
+    assert alert_decision(state, now=now) is None
+
+
+def test_an_hour_of_failing_cycles_raises_the_alarm() -> None:
+    """Круг не завершается час — Frigate лежит или фильтр камер не совпал.
 
     Час выбран как примерно два десятка событий обычного дня: достаточно,
     чтобы переждать перезагрузку роутера, и мало, чтобы узнать о беде вечером.
@@ -589,11 +659,27 @@ def test_an_hour_of_silence_raises_the_alarm() -> None:
     from src.cloud_backup.uploader import alert_decision
 
     now = 100_000.0
-    fresh = {"last_success_at": now - 600}
-    stale = {"last_success_at": now - 3700}
+    fresh = {"last_cycle_ok_at": now - 600}
+    stale = {"last_cycle_ok_at": now - 3700}
 
     assert alert_decision(fresh, now=now) is None
-    assert alert_decision(stale, now=now) == "alarm"
+    assert alert_decision(stale, now=now) == "alarm:cycles"
+
+
+def test_a_stuck_event_raises_the_alarm() -> None:
+    """Циклы идут, но событие час не заливается: канал мёртв или оно ядовито.
+
+    «Молчания» тут нет — беду доказывает конкретный клип, которого нет в
+    облаке дольше часа.
+    """
+    from src.cloud_backup.uploader import alert_decision
+
+    now = 100_000.0
+    waiting = {"last_cycle_ok_at": now - 10.0, "oldest_pending_at": now - 600}
+    stuck = {"last_cycle_ok_at": now - 10.0, "oldest_pending_at": now - 3700}
+
+    assert alert_decision(waiting, now=now) is None
+    assert alert_decision(stuck, now=now) == "alarm:stuck"
 
 
 def test_a_backup_that_never_worked_alarms_too() -> None:
@@ -605,10 +691,29 @@ def test_a_backup_that_never_worked_alarms_too() -> None:
 
     now = 100_000.0
 
-    assert alert_decision({"watching_since": now - 3700}, now=now) == "alarm"
+    assert alert_decision({"watching_since": now - 3700}, now=now) == "alarm:cycles"
     assert alert_decision({"watching_since": now - 60}, now=now) is None
     # Копия ещё не включалась — тревожить не о чем.
     assert alert_decision({}, now=now) is None
+
+
+def test_clock_jumps_do_not_confuse_the_alarm() -> None:
+    """Отметка из «будущего» (часы прыгнули назад) читается как «только что».
+
+    Иначе обрыв питания то глушил бы тревогу на часы вперёд, то взводил её
+    отрицательным возрастом.
+    """
+    from src.cloud_backup.uploader import alert_decision
+
+    now = 100_000.0
+
+    assert alert_decision({"last_cycle_ok_at": now + 9999}, now=now) is None
+    assert (
+        alert_decision(
+            {"last_cycle_ok_at": now - 10.0, "oldest_pending_at": now + 9999}, now=now
+        )
+        is None
+    )
 
 
 def test_the_alarm_does_not_repeat_every_minute() -> None:
@@ -616,45 +721,57 @@ def test_the_alarm_does_not_repeat_every_minute() -> None:
     from src.cloud_backup.uploader import alert_decision
 
     now = 100_000.0
-    state = {"last_success_at": now - 7200, "alerted_at": now - 600}
+    state = {"last_cycle_ok_at": now - 7200, "alerted_at": now - 600}
 
     assert alert_decision(state, now=now) is None
     # Через шесть часов напомнить стоит: беда не рассосалась.
-    assert alert_decision(state, now=now + 6 * 3600) == "alarm"
+    assert alert_decision(state, now=now + 6 * 3600) == "alarm:cycles"
 
 
 def test_recovery_is_announced_once() -> None:
     """О возвращении надо сказать — иначе человек ждёт вторую тревогу зря."""
-    from src.cloud_backup.uploader import _notify_about_silence, alert_decision
+    from src.cloud_backup.uploader import _notify_about_trouble, alert_decision
 
     now = 100_000.0
-    state = {"last_success_at": now - 60, "alerted_at": now - 7200}
+    state = {"last_cycle_ok_at": now - 60, "alerted_at": now - 7200}
     sent: list[str] = []
 
     assert alert_decision(state, now=now) == "recovered"
-    _notify_about_silence(state, sent.append, now=now)
+    _notify_about_trouble(state, sent.append, now=now)
 
     assert "снова работает" in sent[0]
     assert "alerted_at" not in state  # второй раз о том же не скажет
     assert alert_decision(state, now=now) is None
 
 
-def test_the_alarm_text_carries_the_reason(runtime_path: Path) -> None:
+def test_the_alarm_text_carries_the_reason() -> None:
     """Сообщение обязано отвечать «почему», иначе человек идёт искать вслепую."""
-    from src.cloud_backup.uploader import _notify_about_silence
+    from src.cloud_backup.uploader import _notify_about_trouble
 
     now = 100_000.0
-    state = {
-        "last_success_at": now - 7200,
+    cycles = {
+        "last_cycle_ok_at": now - 7200,
         "last_error": "AccessDenied при PutObject",
+    }
+    stuck = {
+        "last_cycle_ok_at": now - 10.0,
+        "oldest_pending_at": now - 7200,
+        "pending": 3,
+        "last_error": "Could not connect to the endpoint URL",
     }
     sent: list[str] = []
 
-    _notify_about_silence(state, sent.append, now=now)
+    _notify_about_trouble(cycles, sent.append, now=now)
+    _notify_about_trouble(stuck, sent.append, now=now)
 
-    assert "2 ч" in sent[0]
+    assert "ни одного круга 2 ч" in sent[0]
     assert "AccessDenied" in sent[0]
-    assert state["alerted_at"] == now
+    assert cycles["alerted_at"] == now
+    # Застрявшие — не «копия молчит»: сказано, сколько их и как давно ждут.
+    assert "3 событий" in sent[1]
+    assert "2 ч" in sent[1]
+    assert "endpoint" in sent[1]
+    assert stuck["alerted_at"] == now
 
 
 def test_a_three_hour_event_does_not_stall_the_queue() -> None:

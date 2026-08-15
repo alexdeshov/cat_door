@@ -114,6 +114,14 @@ def _attempt_entry(raw: Any) -> dict[str, float]:
         return {"count": 0, "last_at": 0.0}
 
 
+def _as_optional_float(value: Any) -> float | None:
+    """Число из чужого JSON; `None` — там не число."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def deferred_ids(attempts: dict[str, Any], now: float) -> set[str]:
     """Кому ещё рано на повтор. `last_at` в будущем (часы прыгнули назад)
     не откладывает попытку — иначе перевод часов заморозил бы очередь."""
@@ -314,14 +322,27 @@ def alert_decision(
     after: float = ALERT_AFTER_SECONDS,
     repeat: float = ALERT_REPEAT_SECONDS,
 ) -> str | None:
-    """О чём сказать человеку: `alarm`, `recovered` или молчание.
+    """О чём сказать человеку: `alarm:циклы`, `alarm:застряли`, `recovered`
+    или молчание.
 
     Чистая функция: решение о тревоге проверяется таблицей случаев, а не
-    ожиданием у телефона. Отсчёт идёт от последней удачной выгрузки, а если её
-    не было ни разу — от момента, когда копию включили: «ни разу не заработало»
-    — такая же беда, как «перестало». Нечисловой мусор в состоянии (ручная
-    правка, кривой restore) читается как ноль, а не роняет службу в вечный
-    crash-loop до `_save_state`.
+    ожиданием у телефона. Тревога — по доказательствам беды, а не по отсутствию
+    успеха: прежний отсчёт «нет успеха час» не отличал «нечего заливать» от
+    «не может залить», и первая же тихая ночь после выката будила человека
+    ложным «копия не выгружает 7 ч» (15.08). Беду доказывают два признака,
+    каждый достаточен:
+
+    - **циклы не проходят**: `last_cycle_ok_at` ставится в конце каждого
+      успешного круга, даже пустого; если её нет дольше `after` — Frigate
+      лежит, фильтр камер не совпал или состояние не читается. Пока копия ни
+      разу не прошла круг, опора — `watching_since`: «ни разу не заработало» —
+      такая же беда, как «перестало»;
+    - **события застряли**: `oldest_pending_at` — конец старейшего события,
+      всё ещё ждущего заливки; старше `after` — канал мёртв или событие
+      ядовито.
+
+    Нечисловой мусор в состоянии (ручная правка, кривой restore) читается как
+    ноль, а не роняет службу в вечный crash-loop до `_save_state`.
     """
     def _stamp(key: str) -> float:
         try:
@@ -329,20 +350,25 @@ def alert_decision(
         except (TypeError, ValueError):
             return 0.0
 
-    reference = _stamp("last_success_at") or _stamp("watching_since")
-    if not reference:
+    cycle_reference = _stamp("last_cycle_ok_at") or _stamp("watching_since")
+    if not cycle_reference:
         return None
     # Часы прыгнули назад (обрыв питания): отметка из «будущего» не должна
     # ни глушить тревогу на часы вперёд, ни давать ложное «recovered».
-    reference = min(reference, now)
-    silent_for = now - reference
+    cycle_reference = min(cycle_reference, now)
     alerted_at = min(_stamp("alerted_at"), now)
-    if silent_for < after:
+    oldest_pending = _stamp("oldest_pending_at")
+    reason: str | None = None
+    if now - cycle_reference >= after:
+        reason = "cycles"
+    elif oldest_pending and now - min(oldest_pending, now) >= after:
+        reason = "stuck"
+    if reason is None:
         # Всё в порядке. Если перед этим тревожили — сказать, что отпустило.
         return "recovered" if alerted_at else None
     if alerted_at and now - alerted_at < repeat:
         return None
-    return "alarm"
+    return f"alarm:{reason}"
 
 
 class EventTrigger:
@@ -485,7 +511,7 @@ def _alert_sender(settings: Settings) -> Callable[[str], None] | None:
     return send
 
 
-def _notify_about_silence(
+def _notify_about_trouble(
     state: dict[str, Any], send: Callable[[str], None] | None, *, now: float
 ) -> None:
     decision = alert_decision(state, now=now)
@@ -497,17 +523,31 @@ def _notify_about_silence(
         if send is not None:
             send("Облачная копия снова работает — очередь пошла")
         return
-    reference = float(state.get("last_success_at") or state.get("watching_since") or now)
-    hours = max(0.0, (now - reference) / 3600)
+    cause = str(state.get("last_error") or state.get("message") or "—")
+    if decision == "alarm:cycles":
+        reference = float(state.get("last_cycle_ok_at") or state.get("watching_since") or now)
+        hours = max(0.0, (now - reference) / 3600)
+        headline = f"Облачная копия не может завершить ни одного круга {hours:.0f} ч."
+        logger.warning("Циклы выгрузки не проходят %.0f ч", hours)
+    else:
+        # Циклы идут, но конкретные события не заливаются: канал мёртв или
+        # событие ядовито. Говорить «копия молчит» здесь было бы враньём в
+        # обе стороны — и преувеличением (остальное едет), и преуменьшением
+        # (эти клипы реально не в облаке).
+        hours = max(0.0, (now - float(state.get("oldest_pending_at") or now)) / 3600)
+        pending = int(state.get("pending") or 0)
+        headline = (
+            f"Не заливаются {pending} событий, старейшее ждёт {hours:.0f} ч."
+        )
+        logger.warning("Застряли %d событий, старейшее ждёт %.0f ч", pending, hours)
     state["alerted_at"] = now
-    logger.warning("Копия молчит %.0f ч", hours)
     if send is not None:
         # Про телеграм сказано честно: при мёртвом канале это сообщение само
         # не уйдёт и придёт с возвратом связи — тревога не заменяет проверки
         # страницы «Состояние», а дополняет её.
         send(
-            f"Облачная копия не выгружает {hours:.0f} ч.\n"
-            f"Последняя причина: {state.get('last_error') or state.get('message') or '—'}\n"
+            f"{headline}\n"
+            f"Последняя причина: {cause}\n"
             "Подробности — страница «Состояние» узла."
         )
 
@@ -867,9 +907,30 @@ def run(settings: Settings, *, once: bool = False) -> None:
                 notifier.watchdog()
             # Память о попытках живёт вместе с окном оглядки: событие, ушедшее
             # из окна, Frigate больше не отдаст — его запись только копила бы
-            # файл состояния навсегда (находка ревью 15.08).
+            # файл состояния навсегда (находка ревью 15.08). Залитое в попытках
+            # не место: код до #267 оставлял такие сироты (ветка `_skip` метила
+            # событие залитым, не убирая из попыток), отбор их больше не видел,
+            # и вечно «непустая» очередь глушила отметку здоровья — первая же
+            # тихая ночь будила человека ложной тревогой (15.08).
             window_ids = {str(e.get("id") or "") for e in events}
-            attempts = {key: value for key, value in attempts.items() if key in window_ids}
+            attempts = {
+                key: value
+                for key, value in attempts.items()
+                if key in window_ids and key not in uploaded
+            }
+            # Конец старейшего события, всё ещё ждущего заливки, — опора для
+            # тревоги «события застряли». Считается по окну, а не копится в
+            # состоянии: ушедшее из окна событие уже не тревога, а потеря.
+            pending_ends = [
+                end
+                for event in events
+                if str(event.get("id") or "") in attempts
+                and (end := _as_optional_float(event.get("end_time"))) is not None
+            ]
+            if pending_ends:
+                state["oldest_pending_at"] = min(pending_ends)
+            else:
+                state.pop("oldest_pending_at", None)
             state["uploaded"] = uploaded_order[-remember_cap:]
             state["attempts"] = attempts
             today = datetime.now(UTC).strftime("%Y-%m-%d")
@@ -930,12 +991,16 @@ def run(settings: Settings, *, once: bool = False) -> None:
                     "Залито %d событий, %.1f МБ", sent_events, sent_bytes / 1e6
                 )
             _measure_cloud_usage(client, config, state)
+            # Круг дошёл до конца — Frigate ответил, отбор прошёл, попытки
+            # сделаны. Отметка ставится и на пустом круге: тихая ночь — не
+            # беда, и тревога «циклы не проходят» от неё не взводится.
+            state["last_cycle_ok_at"] = time.time()
         except Exception as exc:  # noqa: BLE001 — облако и Frigate падают, служба нет
             state["status"] = "error"
             state["last_error"] = str(exc)[:300]
             state["message"] = f"Ошибка выгрузки: {str(exc)[:120]}"
             logger.warning("Цикл выгрузки не удался: %s", exc)
-        _notify_about_silence(state, alert, now=time.time())
+        _notify_about_trouble(state, alert, now=time.time())
         _save_state_quietly(state_path, state)
         if once:
             return
