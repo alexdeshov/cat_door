@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from src.common.metrics import DEFAULT_IDENTITY_QUORUM
 from src.common.telegram import TELEGRAM_API
 
 
@@ -142,6 +143,10 @@ class Settings(BaseSettings):
     identity_side_model_path: Path | None = None
     identity_pretrained_weights_path: Path | None = None
     identity_confidence_threshold: float = Field(default=0.80, ge=0.0, le=1.0)
+    # Какая доля кадров прохода должна сойтись на одном имени. Прежнее правило
+    # «хватит одного кадра» пускало чужих котов в журнал и в уведомление —
+    # см. `aggregate_frame_predictions` и разбор 17 августа.
+    identity_quorum: float = Field(default=DEFAULT_IDENTITY_QUORUM, ge=0.0, le=1.0)
     detector_face_sample_fps: float = Field(default=8.0, gt=0.0, le=20.0)
     detector_sample_fps: float = Field(default=3.0, gt=0.0, le=20.0)
     ring_segment_seconds: int = Field(default=2, ge=1, le=10)

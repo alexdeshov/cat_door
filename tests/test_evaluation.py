@@ -55,23 +55,27 @@ def test_evaluate_view_frames_uses_shared_crop_and_event_aggregation() -> None:
         confirmation_frames=2,
         window_frames=5,
     )
+    # Кадров четыре, а не два: решение по проходу принимает кворум, и на паре
+    # кадров его не собрать никаким согласием — см. `MIN_QUORUM_FRAMES`.
     frames = [
-        np.full((360, 640, 3), 40, dtype=np.uint8),
-        np.full((360, 640, 3), 80, dtype=np.uint8),
+        np.full((360, 640, 3), value, dtype=np.uint8) for value in (40, 80, 60, 70)
     ]
 
     result = evaluate_view_frames(
         frames,
-        FakeDetector([0.70, 0.75]),
-        FakeIdentity([("Барсик", 0.91), ("Барсик", 0.86)]),
+        FakeDetector([0.70, 0.75, 0.72, 0.71]),
+        FakeIdentity(
+            [("Барсик", 0.91), ("Барсик", 0.86), ("Барсик", 0.88), ("Барсик", 0.90)]
+        ),
         config,
         0.80,
     )
 
     assert result.aggregate.decision == "known:Барсик"
-    assert result.aggregate.frames_used == 2
+    assert result.aggregate.frames_used == 4
+    assert result.aggregate.votes == 4
     assert result.max_detector_confidence == 0.75
-    assert len(result.raw_scores) == 2
+    assert len(result.raw_scores) == 4
 
 
 def test_evaluation_report_separates_clean_and_training_seen_events() -> None:

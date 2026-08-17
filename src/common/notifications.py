@@ -72,13 +72,27 @@ def pass_caption(
     when: datetime,
     timezone: str,
     role: str | None,
-    confidence: float | None,
+    detector_confidence: float | None,
     identity: str | None,
+    identity_confidence: float | None = None,
+    votes: int | None = None,
+    frames_used: int | None = None,
 ) -> str:
     """Подпись к снимку прохода.
 
     Имя кота идёт первым, если оно есть: остальное — подробности, а вопрос у
     человека с телефоном в руках ровно один.
+
+    **Рядом с именем стоит уверенность опознания, а не детектора.** Раньше
+    стояла детекторная — «в кадре точно кот», — и читалась как «это точно
+    Яся». 17 августа чужой рыжий кот приехал в телеграм как «Яся · уверенность
+    0.94», где 0.94 значило всего лишь, что перед камерой кот. Безымянный
+    проход детекторную уверенность сохраняет, но теперь она подписана словом
+    «кот»: это единственное, о чём она и говорит.
+
+    Кворум печатается вместе с именем: «56 из 154 кадров» отличает уверенное
+    опознание от собранного по нескольким удачным кадрам, и отличает его до
+    того, как человек полезет смотреть запись.
 
     Метка без зоны считается UTC — так её записал recorder, и так же её читает
     админка. Принять её за местное время значило бы прислать проход на три
@@ -88,6 +102,11 @@ def pass_caption(
     camera = {"face": "дверца", "side": "подход"}.get(role or "", role or "камера")
     head = f"{identity}: проход" if identity else "Проход"
     parts = [f"{head} в {moment.astimezone(ZoneInfo(timezone)).strftime('%H:%M')}", camera]
-    if confidence is not None:
-        parts.append(f"уверенность {confidence:.2f}")
+    if identity is not None:
+        if identity_confidence is not None:
+            parts.append(f"опознание {identity_confidence:.2f}")
+        if votes is not None and frames_used:
+            parts.append(f"{votes} из {frames_used} кадров")
+    elif detector_confidence is not None:
+        parts.append(f"кот {detector_confidence:.2f}")
     return " · ".join(parts)

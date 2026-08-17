@@ -35,6 +35,9 @@ DECISION_UNKNOWN_CAT = "denied_unknown_cat"
 DECISION_NOT_ALLOWED = "denied_not_allowed"
 DECISION_LOW_CONFIDENCE = "denied_low_confidence"
 DECISION_COOLDOWN = "denied_cooldown"
+# Кот подходит по всем условиям, но серия кадров ещё не набрана. Не отказ и не
+# открытие: исполнитель копит подтверждения — см. `CatDoorAutomation`.
+DECISION_CONFIRMING = "confirming"
 DECISION_DRY_RUN = "dry_run"
 DECISION_OPEN = "open"
 

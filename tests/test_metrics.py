@@ -12,14 +12,57 @@ def test_aggregate_frame_predictions_uses_majority_then_confidence() -> None:
             ScoredPrediction("Барсик", 0.91),
             ScoredPrediction("Мурка", 0.95),
             ScoredPrediction("Барсик", 0.84),
+            ScoredPrediction("Барсик", 0.88),
+            ScoredPrediction("Барсик", 0.90),
         ],
         0.80,
     )
 
     assert result.decision == "known:Барсик"
     assert result.predicted_name == "Барсик"
-    assert result.confidence == 0.91
-    assert result.frames_used == 3
+    # Медиана Барсика, а не его лучший кадр: максимум — это самый удачный кроп
+    # из всех, и именно он выдавал чужих котов за своих.
+    assert result.confidence == 0.89
+    assert result.frames_used == 5
+    assert result.votes == 4
+
+
+def test_aggregate_frame_predictions_needs_a_quorum_not_one_lucky_frame() -> None:
+    """Разбор 17 августа: чужой кот получил имя по 56 кадрам из 154.
+
+    Прежнее правило называло кота, если порог перешагнул хоть один кроп. При
+    сотне кропов за проход это делало редкую ошибку почти неизбежной.
+    """
+    scores = [ScoredPrediction("Яся", 0.95)] * 4 + [ScoredPrediction("Яся", 0.10)] * 8
+
+    result = aggregate_frame_predictions(scores, 0.80)
+
+    assert result.decision == "uncertain"
+    assert result.votes == 4
+    assert result.frames_used == 12
+    # Показываем самый сильный кадр: «не уверена (0.95)» объясняет отказ.
+    assert result.confidence == 0.95
+
+
+def test_aggregate_frame_predictions_keeps_a_floor_under_the_quorum() -> None:
+    """Половина от двух кадров — это один кадр, то есть прежнее правило."""
+    result = aggregate_frame_predictions(
+        [ScoredPrediction("Яся", 0.95), ScoredPrediction("Яся", 0.10)],
+        0.80,
+    )
+
+    assert result.decision == "uncertain"
+
+
+def test_aggregate_frame_predictions_does_not_hand_names_to_reject_labels() -> None:
+    """«Чужой» — это отказ, а не кот, которого можно назвать."""
+    result = aggregate_frame_predictions(
+        [ScoredPrediction("__foreign__", 0.95)] * 5,
+        0.80,
+    )
+
+    assert result.decision == "uncertain"
+    assert result.votes == 0
 
 
 def test_aggregate_frame_predictions_distinguishes_uncertain_and_missing() -> None:

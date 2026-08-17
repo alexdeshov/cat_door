@@ -108,6 +108,9 @@ class EventPrediction(Base):
     predicted_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
     confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     frames_used: Mapped[int] = mapped_column(Integer, default=0)
+    # Сколько из них назвали имя, попавшее в решение. `NULL` — строка написана
+    # до кворума, когда хватало одного удачного кадра.
+    votes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     max_detector_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     mean_inference_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
     raw_scores_json: Mapped[str | None] = mapped_column(Text, nullable=True)

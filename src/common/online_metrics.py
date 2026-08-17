@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Collection
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from statistics import mean
@@ -12,22 +13,31 @@ from src.common.database import Event, EventPrediction
 from src.common.metrics import (
     FOREIGN_LABEL,
     NO_PREDICTION,
+    REJECT_LABELS,
     UNCERTAIN,
+    as_expected_label,
     calculate_metrics,
     decision_name,
 )
 
 
 def combine_event_decisions(predictions: list[EventPrediction]) -> str:
-    known_names = {
+    named = {
         name
         for prediction in predictions
         if (name := decision_name(prediction.decision)) is not None
+        and name not in REJECT_LABELS
     }
-    if len(known_names) == 1:
-        return f"known:{next(iter(known_names))}"
-    if len(known_names) > 1:
+    if len(named) == 1:
+        return f"known:{next(iter(named))}"
+    if len(named) > 1:
         return UNCERTAIN
+    # Явный отказ «это не наш кот» — не молчание: камера посмотрела и ответила.
+    if any(
+        decision_name(prediction.decision) in REJECT_LABELS
+        for prediction in predictions
+    ):
+        return f"known:{FOREIGN_LABEL}"
     if any(prediction.decision == UNCERTAIN for prediction in predictions):
         return UNCERTAIN
     return NO_PREDICTION
@@ -48,6 +58,7 @@ def _latest_online_model_versions(session: Session) -> dict[str, int]:
 def _window_report(
     events: list[Event],
     predictions: list[EventPrediction],
+    known_names: Collection[str] | None = None,
 ) -> dict[str, Any]:
     predictions_by_event: dict[int, list[EventPrediction]] = {}
     for prediction in predictions:
@@ -63,9 +74,12 @@ def _window_report(
     labelled_events = 0
     for event in labelled:
         expected_name = (
-            event.cat_name if event.label == "known_cat" else FOREIGN_LABEL
+            as_expected_label(event.cat_name, known_names)
+            if event.label == "known_cat"
+            else FOREIGN_LABEL
         )
-        if expected_name is None:
+        if event.label == "known_cat" and not event.cat_name:
+            # Метка «свой» без имени: разметка не закончена, судить не о чем.
             continue
         event_predictions = predictions_by_event.get(event.id, [])
         labelled_events += 1
@@ -123,7 +137,13 @@ def build_online_metrics(
     session: Session,
     *,
     now: datetime | None = None,
+    known_names: Collection[str] | None = None,
 ) -> dict[str, Any]:
+    """Как установленная модель ведёт себя на размеченных проходах узла.
+
+    `known_names` — коты, которых модель обучалась узнавать (метки из её
+    метаданных). Все прочие считаются чужими: см. `as_expected_label`.
+    """
     current_time = now or datetime.now(UTC)
     active_versions = _latest_online_model_versions(session)
     events = session.scalars(select(Event).order_by(Event.created_at)).all()
@@ -158,10 +178,17 @@ def build_online_metrics(
             for prediction in predictions
             if prediction.event_id in selected_ids
         ]
-        reports[name] = _window_report(selected_events, selected_predictions)
+        reports[name] = _window_report(
+            selected_events,
+            selected_predictions,
+            known_names,
+        )
     return {
         "generated_at": current_time.isoformat(),
         "active_model_versions": active_versions,
+        # Пусто — метаданные моделей не прочитались; тогда доли считаются
+        # по-старому, и это видно снаружи, а не только в коде.
+        "known_names": sorted(known_names) if known_names is not None else None,
         "windows": reports,
     }
 
