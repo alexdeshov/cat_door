@@ -593,6 +593,7 @@ def _build_online_predictions(
     identity_timings: dict[str, list[float]],
     detector_confidences: dict[str, float],
     threshold: float,
+    quorum: float,
 ) -> tuple[AutomaticEventPrediction, ...]:
     predictions: list[AutomaticEventPrediction] = []
     for role in ("face", "side"):
@@ -600,7 +601,7 @@ def _build_online_predictions(
         if model_version_id is None:
             continue
         scores = identity_scores[role]
-        aggregate = aggregate_frame_predictions(scores, threshold)
+        aggregate = aggregate_frame_predictions(scores, threshold, quorum=quorum)
         predictions.append(
             AutomaticEventPrediction(
                 model_version_id=model_version_id,
@@ -609,6 +610,7 @@ def _build_online_predictions(
                 predicted_name=aggregate.predicted_name,
                 confidence=aggregate.confidence,
                 frames_used=aggregate.frames_used,
+                votes=aggregate.votes,
                 max_detector_confidence=detector_confidences[role],
                 mean_inference_ms=mean_or_none(identity_timings[role]),
                 raw_scores=tuple(
@@ -1226,6 +1228,7 @@ def monitor_automatic(
                     active_identity_timings,
                     active_confidences,
                     settings.identity_confidence_threshold,
+                    settings.identity_quorum,
                 )
                 request = AutomaticEventRequest(
                     started_at=active_started_at,
@@ -1429,9 +1432,9 @@ def _notify_about_pass(
     # с последним не пропускало имя в сообщение никогда. Классы отказа
     # (`__foreign__`, `__nocat__`) именем не являются: для человека это
     # «просто кот», и подпись остаётся безымянной.
-    identity = next(
+    named = next(
         (
-            prediction.predicted_name
+            prediction
             for prediction in request.predictions
             if prediction.decision.startswith("known:")
             and prediction.predicted_name
@@ -1445,8 +1448,14 @@ def _notify_about_pass(
         # Подпись согласована с гейтом: сообщение уходит потому, что кот дошёл
         # до дверцы, — это и пишем, с какой бы камеры проход ни начался.
         role=effective_role,
-        confidence=confidence,
-        identity=identity,
+        detector_confidence=confidence,
+        identity=named.predicted_name if named is not None else None,
+        # Числа опознания берутся из того же решения, что дало имя: показывать
+        # имя от одной камеры с уверенностью от другой — ровно тот подлог, из-за
+        # которого разбирали 17 августа.
+        identity_confidence=named.confidence if named is not None else None,
+        votes=named.votes if named is not None else None,
+        frames_used=named.frames_used if named is not None else None,
     )
     snapshot = notification_snapshot_path(settings.data_dir, f"pass-{event.id}")
     media = event.media_path or event.side_media_path

@@ -26,10 +26,13 @@ from uuid import uuid4
 
 from src.common.cat_door_config import CatDoorConfig
 from src.common.cat_door_decision import (
+    DECISION_CONFIRMING,
     DECISION_COOLDOWN,
     DECISION_DRY_RUN,
     DECISION_MODE_OFF,
+    DECISION_OPEN,
     DECISION_WRONG_CAMERA,
+    DOOR_ROLE,
     CatDoorDecision,
     decide,
 )
@@ -45,7 +48,14 @@ logger = logging.getLogger("catdoor.cat-door")
 
 # Об этих отказах молчим: они случаются на каждом втором кадре и залили бы лог,
 # ничего не сообщив. Остальные — редкие и объясняют человеку, почему не открылось.
-QUIET_DECISIONS = frozenset({DECISION_MODE_OFF, DECISION_WRONG_CAMERA, DECISION_COOLDOWN})
+QUIET_DECISIONS = frozenset(
+    {DECISION_MODE_OFF, DECISION_WRONG_CAMERA, DECISION_COOLDOWN, DECISION_CONFIRMING}
+)
+
+# Разрыв, после которого серия считается прерванной. Кадры с опознанием идут
+# только пока кот в кадре: без этой проверки кот, ушедший и вернувшийся через
+# минуту, продолжил бы копить ту же серию.
+STREAK_GAP_SECONDS = 3.0
 
 
 class CatDoorAutomation:
@@ -54,6 +64,12 @@ class CatDoorAutomation:
     Второе назначение поверх первого означало бы, что кот, попавший в кадр
     десять раз подряд, получит десять импульсов подряд, — а держится защёлка
     пять секунд, и очередь таких удержаний греет катушку.
+
+    **Открывает серия, а не кадр.** Решение по одному кадру принимает чистая
+    `decide`, но защёлка ждёт, пока подряд идущие кадры камеры дверцы назовут
+    одного и того же кота `confirm_frames` раз. Один кадр — это самый удачный
+    кроп из сотни: в разборе 17 августа чужой кот набрал 12 таких кадров и
+    получил бы дверцу.
     """
 
     def __init__(
@@ -68,6 +84,9 @@ class CatDoorAutomation:
         self._pending_name: str | None = None
         self._last_opened_at: float | None = None
         self._last_reason: str | None = None
+        self._streak = 0
+        self._streak_name: str | None = None
+        self._streak_at: float | None = None
 
     @property
     def pending(self) -> bool:
@@ -91,23 +110,64 @@ class CatDoorAutomation:
             now=now,
             last_opened_at=self._last_opened_at,
         )
+        # Серию копят только кадры камеры дверцы: кадры террасы идут в том же
+        # потоке вперемешку, и обнулять счётчик о них значило бы, что серия не
+        # наберётся никогда.
+        confirmed = (
+            self._count(decision, name, now, config) if role == DOOR_ROLE else False
+        )
+        if decision.code in {DECISION_OPEN, DECISION_DRY_RUN} and not confirmed:
+            # Кот подходит по всем условиям, но серия ещё копится. Это не
+            # отказ: сухой режим обязан отчитываться тем же решением, что и
+            # рабочий, иначе «открыл бы» в журнале означает не то, что будет.
+            decision = CatDoorDecision(
+                DECISION_CONFIRMING,
+                f"{name}: {self._streak} кадр(ов) из {config.confirm_frames}",
+            )
         if decision.code not in QUIET_DECISIONS and decision.reason != self._last_reason:
             # Одна и та же причина подряд — это тот же кот в тех же кадрах.
             # Печатаем смену причины, а не каждый кадр.
             logger.info("Дверца: %s", decision.reason)
             self._last_reason = decision.reason
-        if decision.code == DECISION_DRY_RUN:
-            return decision
         if not decision.opens or self.pending:
             return decision
         self._open_at = now + config.open_delay_seconds
         self._pending_name = name
         logger.info(
-            "Дверца: открою через %.0f с — %s",
+            "Дверца: открою через %.0f с — %s (%d кадра подряд)",
             config.open_delay_seconds,
             name,
+            config.confirm_frames,
         )
         return decision
+
+    def _count(
+        self,
+        decision: CatDoorDecision,
+        name: str | None,
+        now: float,
+        config: CatDoorConfig,
+    ) -> bool:
+        """Продлить серию этим кадром. `True` — серия набрана.
+
+        Разрыв во времени рвёт серию: опознание запускается только на кадрах с
+        котом, поэтому пять кадров «подряд» могли бы растянуться на кота,
+        ушедшего и вернувшегося через минуту.
+        """
+        would_open = decision.code in {DECISION_OPEN, DECISION_DRY_RUN}
+        stale = (
+            self._streak_at is not None
+            and not 0 <= now - self._streak_at <= STREAK_GAP_SECONDS
+        )
+        if not would_open or name != self._streak_name or stale:
+            self._streak = 0
+            self._streak_name = name if would_open else None
+        if not would_open:
+            self._streak_at = None
+            return False
+        self._streak += 1
+        self._streak_at = now
+        return self._streak >= config.confirm_frames
 
     def tick(self, config: CatDoorConfig) -> bool:
         """Подать назначенное открытие, если время пришло. `True` — подали.
@@ -150,3 +210,8 @@ class CatDoorAutomation:
     def _forget(self) -> None:
         self._open_at = None
         self._pending_name = None
+        # Следующее открытие набирает серию заново: иначе кот, стоящий у
+        # дверцы, получал бы импульс каждый кадр после паузы.
+        self._streak = 0
+        self._streak_name = None
+        self._streak_at = None

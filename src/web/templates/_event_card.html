@@ -79,9 +79,17 @@
               {% elif prediction.decision.startswith("known:") %}
                 <strong>{{ prediction.predicted_name }}</strong>
                 <span class="data">{{ "%.2f"|format(prediction.confidence) }}</span>
+                {# Кворум рядом с числом: «56 из 154» и «56 из 56» — разные
+                   ответы, а уверенность у них одна. #}
+                {% if prediction.votes is not none and prediction.frames_used %}
+                  <span class="data faint">{{ prediction.votes }} из {{ prediction.frames_used }} кадров</span>
+                {% endif %}
               {% elif prediction.decision == "uncertain" %}
                 не уверена{% if prediction.confidence is not none %}
                   <span class="data">({{ "%.2f"|format(prediction.confidence) }})</span>{% endif %}
+                {% if prediction.votes and prediction.frames_used %}
+                  <span class="data faint">кворум не собрался: {{ prediction.votes }} из {{ prediction.frames_used }}</span>
+                {% endif %}
               {% else %}
                 не запускалась
               {% endif %}{{ "; " if not loop.last }}

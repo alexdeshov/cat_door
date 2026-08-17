@@ -34,10 +34,21 @@ def _config(**overrides: object) -> CatDoorConfig:
     return CatDoorConfig.model_validate(values)
 
 
-def _seen(automation: CatDoorAutomation, config: CatDoorConfig, **overrides: object) -> None:
+def _seen(
+    automation: CatDoorAutomation,
+    config: CatDoorConfig,
+    *,
+    times: int | None = None,
+    **overrides: object,
+) -> None:
+    """Кот перед камерой. По умолчанию — целой серией, как того требует правило.
+
+    Один кадр защёлку больше не отпускает: см. `confirm_frames`.
+    """
     values: dict[str, object] = {"name": "Черныш", "confidence": 0.95, "role": "face"}
     values.update(overrides)
-    automation.observe(config=config, **values)  # type: ignore[arg-type]
+    for _ in range(config.confirm_frames if times is None else times):
+        automation.observe(config=config, **values)  # type: ignore[arg-type]
 
 
 def test_the_latch_waits_for_the_cat_to_walk_up(tmp_path: Path) -> None:
@@ -149,5 +160,66 @@ def test_the_terrace_camera_schedules_nothing(tmp_path: Path) -> None:
     automation = CatDoorAutomation(tmp_path, clock=_Clock())
 
     _seen(automation, _config(), role="side")
+
+    assert not automation.pending
+
+
+def test_one_lucky_frame_does_not_open_the_latch(tmp_path: Path) -> None:
+    """Разбор 17 августа: чужой кот дал 12 кадров с близостью ≥ 0.90.
+
+    По правилу «хватит одного кадра» дверца открылась бы ему. Серия требует,
+    чтобы кот выглядел своим не мгновение, а несколько кадров подряд.
+    """
+    automation = CatDoorAutomation(tmp_path, clock=_Clock())
+    config = _config(confirm_frames=5)
+
+    _seen(automation, config, times=4)
+    short = automation.pending
+    _seen(automation, config, times=1)
+
+    assert not short
+    assert automation.pending
+
+
+def test_a_gap_breaks_the_series(tmp_path: Path) -> None:
+    """Опознание идёт только на кадрах с котом.
+
+    Без проверки разрыва «пять кадров подряд» растянулись бы на кота, ушедшего
+    и вернувшегося через минуту, — то есть на пять разных появлений.
+    """
+    clock = _Clock()
+    automation = CatDoorAutomation(tmp_path, clock=clock)
+    config = _config(confirm_frames=5)
+
+    _seen(automation, config, times=4)
+    clock.now += 60
+    _seen(automation, config, times=1)
+
+    assert not automation.pending
+
+
+def test_the_terrace_frames_do_not_break_the_series(tmp_path: Path) -> None:
+    """Кадры обеих камер идут вперемешку в одном потоке.
+
+    Если бы кадр террасы обнулял счётчик, серия у дверцы не набралась бы
+    никогда: камеры разбираются по очереди.
+    """
+    automation = CatDoorAutomation(tmp_path, clock=_Clock())
+    config = _config(confirm_frames=3)
+
+    for _ in range(3):
+        _seen(automation, config, times=1)
+        _seen(automation, config, times=1, role="side")
+
+    assert automation.pending
+
+
+def test_another_cat_starts_the_series_over(tmp_path: Path) -> None:
+    """Серия — про одного кота, а не про то, что кто-то стоял у дверцы."""
+    automation = CatDoorAutomation(tmp_path, clock=_Clock())
+    config = _config(confirm_frames=3, allowed_cats=["Черныш", "Яся"])
+
+    _seen(automation, config, times=2)
+    _seen(automation, config, times=2, name="Яся")
 
     assert not automation.pending

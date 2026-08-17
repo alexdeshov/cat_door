@@ -3437,3 +3437,53 @@ def test_the_health_dashboard_counts_todays_work(runtime_path: Path, monkeypatch
     assert "открывалась:" in page.text and "Алиса" in page.text
     assert "не в списке ×1" in page.text
     assert "Служба калитки" in page.text
+
+
+def test_pass_card_shows_the_quorum_next_to_the_confidence(
+    runtime_path: Path,
+    monkeypatch,
+) -> None:
+    """«56 из 154» и «56 из 56» — разные ответы, а уверенность у них одна.
+
+    Разбор 17 августа: чужой кот получил «Яся 0.93», и по строке журнала это
+    было не отличить от прохода, где модель согласна сама с собой.
+    """
+    from src.common.database import EventPrediction, ModelVersion
+
+    client = make_client(runtime_path, monkeypatch)
+    factory = create_session_factory(runtime_path / "test.sqlite3")
+    with factory() as session:
+        version = ModelVersion(
+            kind="identity_face",
+            file_name="face.onnx",
+            sha256="d" * 64,
+            metadata_json="{}",
+        )
+        event = Event(
+            created_at=datetime.now(UTC),
+            duration_seconds=45,
+            status="ready",
+            label="pending",
+            media_path="events/00000001/face.mp4",
+        )
+        session.add_all([version, event])
+        session.flush()
+        session.add(
+            EventPrediction(
+                event_id=event.id,
+                model_version_id=version.id,
+                view="face",
+                origin="online",
+                decision="known:Яся",
+                predicted_name="Яся",
+                confidence=0.93,
+                frames_used=154,
+                votes=56,
+            )
+        )
+        session.commit()
+
+    page = client.get("/")
+
+    assert page.status_code == 200
+    assert "56 из 154 кадров" in page.text

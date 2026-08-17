@@ -35,6 +35,8 @@ from src.common.evaluation import (
     evaluate_detector_frames,
     evaluate_view_frames,
 )
+from src.common.metrics import DEFAULT_IDENTITY_QUORUM
+from src.common.model_registry import identity_labels
 from src.common.settings import Settings
 from src.inference.cat_detector import OpenVinoCatDetector
 from src.inference.cat_identity import OpenVinoCatIdentity
@@ -199,6 +201,7 @@ def run_evaluation(
     identity_models: dict[str, Path],
     *,
     identity_threshold: float,
+    quorum: float = DEFAULT_IDENTITY_QUORUM,
     status_path: Path,
     expected_run_kind: str | None = None,
     vaapi_device: Path | None = None,
@@ -337,6 +340,7 @@ def run_evaluation(
                                 model,
                                 getattr(runtime_config, role),
                                 identity_threshold,
+                                quorum,
                             )
                         identity_views[role] = identity_result
                         model_version_id = model_version_ids[role]
@@ -391,6 +395,11 @@ def run_evaluation(
                     for role in evaluated_views
                 },
                 identity_threshold=identity_threshold,
+                quorum=quorum,
+                # Отложенная оценка судит модель по тем же правилам, по которым
+                # она работает на живых кадрах: иначе приёмка описывает не то,
+                # что стоит на узле.
+                known_names=identity_labels(identity_models.values()),
             )
         # `mean_detector_inference_ms` хранится и сравнивается между запусками.
         # Как только оно может приехать с двух разных устройств, строка обязана
@@ -444,6 +453,7 @@ def main() -> None:
     parser.add_argument("--face-model", type=Path)
     parser.add_argument("--side-model", type=Path)
     parser.add_argument("--identity-threshold", type=float, default=0.8)
+    parser.add_argument("--quorum", type=float, default=DEFAULT_IDENTITY_QUORUM)
     parser.add_argument("--run-kind", choices=("identity", "detector"), default="identity")
     # Декодирование записей — главный расход оценки: 20 секунд процессорного
     # времени на камеру против полутора на инференс по её кадрам.
@@ -474,6 +484,7 @@ def main() -> None:
         args.detector_model,
         identities,
         identity_threshold=args.identity_threshold,
+        quorum=args.quorum,
         status_path=args.status_path,
         expected_run_kind=args.run_kind,
         vaapi_device=args.vaapi_device,

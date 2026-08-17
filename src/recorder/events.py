@@ -34,6 +34,7 @@ class AutomaticEventPrediction:
     predicted_name: str | None
     confidence: float | None
     frames_used: int
+    votes: int
     max_detector_confidence: float
     mean_inference_ms: float | None
     raw_scores: tuple[tuple[str, float], ...]
@@ -162,6 +163,7 @@ def persist_automatic_event(
                     predicted_name=prediction.predicted_name,
                     confidence=prediction.confidence,
                     frames_used=prediction.frames_used,
+                    votes=prediction.votes,
                     max_detector_confidence=prediction.max_detector_confidence,
                     mean_inference_ms=prediction.mean_inference_ms,
                     raw_scores_json=json.dumps(

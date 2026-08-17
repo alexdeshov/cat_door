@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Collection
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from statistics import mean
@@ -10,11 +11,13 @@ import numpy as np
 
 from src.common.detection_config import CameraDetectionConfig
 from src.common.metrics import (
+    DEFAULT_IDENTITY_QUORUM,
     FOREIGN_LABEL,
     NOCAT_LABEL,
     AggregatedPrediction,
     ScoredPrediction,
     aggregate_frame_predictions,
+    as_expected_label,
     calculate_metrics,
     confusion_matrix,
     threshold_sweep,
@@ -56,10 +59,18 @@ class EvaluatedEvent:
     created_at: datetime
     views: dict[str, ViewEvaluation]
 
-    @property
-    def expected_identity(self) -> str | None:
+    def expected_identity(
+        self,
+        known_names: Collection[str] | None = None,
+    ) -> str | None:
+        """Чего ждать от модели на этом проходе.
+
+        `known_names` — коты, которых модель умеет называть. Кот, размеченный
+        своим, но модели незнакомый, для неё чужой: считать иначе — значит
+        прятать пропущенных чужих в «перепутала своих». См. `as_expected_label`.
+        """
         if self.label == "known_cat":
-            return self.cat_name
+            return as_expected_label(self.cat_name, known_names) if self.cat_name else None
         if self.label == "foreign_cat":
             return FOREIGN_LABEL
         if self.label == "not_visible":
@@ -117,6 +128,7 @@ def evaluate_view_frames(
     identity: IdentityModel,
     camera_config: CameraDetectionConfig,
     identity_threshold: float,
+    quorum: float = DEFAULT_IDENTITY_QUORUM,
 ) -> ViewEvaluation:
     raw_scores: list[ScoredPrediction] = []
     detector_timings: list[float] = []
@@ -170,7 +182,7 @@ def evaluate_view_frames(
                 )
             )
     return ViewEvaluation(
-        aggregate=aggregate_frame_predictions(raw_scores, identity_threshold),
+        aggregate=aggregate_frame_predictions(raw_scores, identity_threshold, quorum=quorum),
         raw_scores=tuple(raw_scores),
         frames_seen=len(frames),
         max_detector_confidence=max_detector_confidence,
@@ -385,6 +397,8 @@ def build_detector_evaluation_report(
 def combine_view_evaluations(
     views: list[ViewEvaluation],
     identity_threshold: float,
+    *,
+    quorum: float = DEFAULT_IDENTITY_QUORUM,
 ) -> ViewEvaluation:
     scores = [score for view in views for score in view.raw_scores]
     detector_timings = [
@@ -398,7 +412,7 @@ def combine_view_evaluations(
         if view.mean_identity_inference_ms is not None
     ]
     return ViewEvaluation(
-        aggregate=aggregate_frame_predictions(scores, identity_threshold),
+        aggregate=aggregate_frame_predictions(scores, identity_threshold, quorum=quorum),
         raw_scores=tuple(scores),
         frames_seen=sum(view.frames_seen for view in views),
         max_detector_confidence=max(
@@ -418,18 +432,19 @@ def _identity_metrics(
     events: list[EvaluatedEvent],
     view: str,
     thresholds: list[float],
+    known_names: Collection[str] | None = None,
 ) -> dict[str, object] | None:
     labelled = [
         event
         for event in events
-        if event.expected_identity is not None and view in event.views
+        if event.expected_identity(known_names) is not None and view in event.views
     ]
     if not labelled:
         return None
     expected = [
-        event.expected_identity
+        expectation
         for event in labelled
-        if event.expected_identity is not None
+        if (expectation := event.expected_identity(known_names)) is not None
     ]
     decisions = [event.views[view].aggregate.decision for event in labelled]
     inference_ms = [
@@ -471,12 +486,18 @@ def build_identity_evaluation_report(
     camera_thresholds: dict[str, float],
     *,
     identity_threshold: float,
+    quorum: float = DEFAULT_IDENTITY_QUORUM,
+    known_names: Collection[str] | None = None,
 ) -> dict[str, object]:
     enriched: list[EvaluatedEvent] = []
     for event in events:
         existing = [event.views[view] for view in evaluated_views if view in event.views]
         views = dict(event.views)
-        views["combined"] = combine_view_evaluations(existing, identity_threshold)
+        views["combined"] = combine_view_evaluations(
+            existing,
+            identity_threshold,
+            quorum=quorum,
+        )
         enriched.append(
             EvaluatedEvent(
                 event_id=event.event_id,
@@ -489,17 +510,17 @@ def build_identity_evaluation_report(
         )
     sweep_thresholds = [round(value / 100, 2) for value in range(50, 96, 5)]
     metrics_by_view = {
-        view: _identity_metrics(enriched, view, sweep_thresholds)
+        view: _identity_metrics(enriched, view, sweep_thresholds, known_names)
         for view in [*evaluated_views, "combined"]
     }
     clean_events = [event for event in enriched if not event.training_contaminated]
     clean_metrics = {
-        view: _identity_metrics(clean_events, view, sweep_thresholds)
+        view: _identity_metrics(clean_events, view, sweep_thresholds, known_names)
         for view in [*evaluated_views, "combined"]
     }
     night_events = [event for event in enriched if event.is_night]
     night_metrics = {
-        view: _identity_metrics(night_events, view, sweep_thresholds)
+        view: _identity_metrics(night_events, view, sweep_thresholds, known_names)
         for view in [*evaluated_views, "combined"]
     }
     detection: dict[str, dict[str, float | int | None]] = {}
@@ -528,7 +549,7 @@ def build_identity_evaluation_report(
         "run_kind": "identity",
         "events_processed": len(enriched),
         "identity_events": sum(
-            event.expected_identity is not None for event in enriched
+            event.expected_identity(known_names) is not None for event in enriched
         ),
         "training_seen_events": sum(
             event.training_contaminated for event in enriched

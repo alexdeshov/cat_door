@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass, replace
-from statistics import mean
+from math import ceil
+from statistics import mean, median
 from typing import TypeAlias
 
 FOREIGN_LABEL = "__foreign__"
@@ -30,12 +31,50 @@ class ScoredPrediction:
     confidence: float
 
 
+# Какая доля кадров с котом должна назвать одно и то же имя, чтобы проход
+# получил его.
+#
+# Прежнее правило — «хватит одного кадра выше порога» — стоило разбора
+# 17 августа: чужой рыжий кот получил имя «Яся 0.93» и уехал в уведомление.
+#
+# Замер на записях 23 проходов (12 своих, 11 чужих для модели), прогнанных
+# установленными детектором и моделью на рабочих 12 к/с:
+#
+#   кворум   свои названы   чужие пропущены
+#     нет        12 / 12          7 / 11
+#     0.30       10 / 12          1 / 11
+#     0.50        9 / 12          1 / 11
+#     0.60        7 / 12          1 / 11
+#
+# Взято 0.50, хотя 0.30 на этой выборке узнаёт на один проход больше: полосу
+# между «свой» и «чужой» держит один-единственный проход (#688 набрал 25%
+# кадров, ближайший свой — 31%), и ставить рабочую точку в пяти пунктах от
+# ошибки, ради которой всё это разбиралось, — значит назначать порог хвостом.
+# Цена несимметрична в нужную сторону: не узнать своего — неудобство, пустить
+# чужого — ошибка. Число правится одним `CATDOOR_IDENTITY_QUORUM`.
+#
+# Единственный чужой, которого не отсекает никакой кворум, — #508: чёрная
+# Ксюша против чёрного Черныша. Это случай не для агрегатора, а для обучения.
+DEFAULT_IDENTITY_QUORUM = 0.5
+# Нижняя граница кворума в кадрах. На коротком проходе половина — это один
+# кадр, то есть ровно прежнее правило под новым именем.
+MIN_QUORUM_FRAMES = 3
+
+
+def required_votes(frames_used: int, quorum: float) -> int:
+    """Сколько кадров должны сойтись на одном имени."""
+    return max(MIN_QUORUM_FRAMES, ceil(quorum * frames_used))
+
+
 @dataclass(frozen=True)
 class AggregatedPrediction:
     decision: str
     predicted_name: str | None
     confidence: float | None
     frames_used: int
+    # Сколько кадров назвали это имя. Отдельно от `frames_used`, потому что
+    # «56 из 154» и «56 из 56» — разные ответы, а уверенность у них одна.
+    votes: int = 0
 
 
 @dataclass(frozen=True)
@@ -64,6 +103,31 @@ class ThresholdPoint:
     metrics: AcceptanceMetrics
 
 
+def as_expected_label(
+    cat_name: str | None,
+    known_names: Collection[str] | None,
+) -> str:
+    """Чего ждать от модели на этом коте: имя или отказ.
+
+    Кот, которого модель не обучалась узнавать, для неё **чужой** — как бы он
+    ни был свой для дома. Пока метрика считала чужими только события с меткой
+    «чужой кот», Кира, Ксюша, Джун и Бася приходили в неё своими, с именами,
+    которых модель физически выдать не может. Их ошибки уходили в
+    `misidentified_known`, доля пропущенных чужих оставалась `null`, и класс
+    ошибок, ради которого метрика заведена, ею не измерялся: разбор 17 августа
+    нашёл четыре таких прохода из 33 названных.
+
+    `known_names=None` — «неизвестно, кого знает модель» (метаданные не
+    прочитались). Тогда считаем по-старому: соврать про доли хуже, чем не
+    посчитать.
+    """
+    if not cat_name:
+        return FOREIGN_LABEL
+    if known_names is None:
+        return cat_name
+    return cat_name if cat_name in known_names else FOREIGN_LABEL
+
+
 def normalize_decision(prediction: PredictionValue) -> str:
     if prediction is None:
         return UNCERTAIN
@@ -79,46 +143,67 @@ def decision_name(decision: str) -> str | None:
 def aggregate_frame_predictions(
     predictions: list[ScoredPrediction],
     threshold: float,
+    *,
+    quorum: float = DEFAULT_IDENTITY_QUORUM,
 ) -> AggregatedPrediction:
+    """Решение по проходу из покадровых оценок.
+
+    Имя получает тот, за кого сошлось не меньше кворума кадров. Уверенностью
+    прохода считается **медиана** его кадров, а не максимум: максимум — это
+    самый удачный кадр из сотни, и именно он выдавал чужих котов за своих с
+    цифрой 0.93. Медиана отвечает на вопрос, который человек и задаёт, глядя
+    на строку журнала: насколько похоже было **обычно**.
+    """
     if not predictions:
         return AggregatedPrediction(
             decision="no_prediction",
             predicted_name=None,
             confidence=None,
             frames_used=0,
+            votes=0,
         )
+    frames_used = len(predictions)
+    # Кадры, где ближайшим оказался класс отказа, в голосовании не участвуют:
+    # «чужой» — не кандидат в имена. Но из знаменателя они не выпадают, иначе
+    # проход, где кота девять раз не узнали и один раз узнали, получил бы
+    # единогласный кворум.
     accepted = [
         prediction
         for prediction in predictions
-        if prediction.confidence >= threshold
+        if prediction.confidence >= threshold and prediction.name not in REJECT_LABELS
     ]
-    if not accepted:
-        strongest = max(predictions, key=lambda item: item.confidence)
-        return AggregatedPrediction(
-            decision="uncertain",
-            predicted_name=strongest.name,
-            confidence=strongest.confidence,
-            frames_used=len(predictions),
-        )
     counts = Counter(prediction.name for prediction in accepted)
-    winner = max(
-        counts,
-        key=lambda name: (
-            counts[name],
-            max(item.confidence for item in accepted if item.name == name),
-            name,
-        ),
-    )
-    winner_scores = [
-        prediction.confidence
-        for prediction in accepted
-        if prediction.name == winner
-    ]
+    if counts:
+        winner = max(
+            counts,
+            key=lambda name: (
+                counts[name],
+                max(item.confidence for item in accepted if item.name == name),
+                name,
+            ),
+        )
+        winner_scores = [
+            prediction.confidence
+            for prediction in accepted
+            if prediction.name == winner
+        ]
+        if len(winner_scores) >= required_votes(frames_used, quorum):
+            return AggregatedPrediction(
+                decision=f"known:{winner}",
+                predicted_name=winner,
+                confidence=median(winner_scores),
+                frames_used=frames_used,
+                votes=len(winner_scores),
+            )
+    # Кворум не собрался. Показываем самый сильный кадр: «не уверена (0.93)»
+    # объясняет отказ, а голое «не уверена» — нет.
+    strongest = max(predictions, key=lambda item: item.confidence)
     return AggregatedPrediction(
-        decision=f"known:{winner}",
-        predicted_name=winner,
-        confidence=max(winner_scores),
-        frames_used=len(predictions),
+        decision="uncertain",
+        predicted_name=strongest.name,
+        confidence=strongest.confidence,
+        frames_used=frames_used,
+        votes=counts.get(strongest.name, 0),
     )
 
 

@@ -291,6 +291,7 @@
     <details class="folded">
       <summary>Точные настройки
         <span class="state-line data">порог {{ cat_door.min_confidence }} ·
+          подряд {{ cat_door.confirm_frames }} кадра ·
           пауза {{ cat_door.cooldown_seconds }} с ·
           задержка {{ cat_door.open_delay_seconds }} с</span>
       </summary>
@@ -309,6 +310,9 @@
       <label for="door-confidence">порог опознания</label>
       <input id="door-confidence" type="number" min="0" max="1" step="0.01"
         value="{{ cat_door.min_confidence }}">
+      <label for="door-confirm">кадров подряд</label>
+      <input id="door-confirm" type="number" min="1" max="30"
+        value="{{ cat_door.confirm_frames }}">
       <label for="door-cooldown">пауза, с</label>
       <input id="door-cooldown" type="number" min="0" max="3600"
         value="{{ cat_door.cooldown_seconds }}">
@@ -319,6 +323,13 @@
     <p class="muted" style="font-size: 13px">
       Защёлка на 12 вольт кратковременного включения: держать её дольше
       нескольких секунд — греть катушку.
+    </p>
+    <p class="muted" style="font-size: 13px">
+      «Кадров подряд» — сколько идущих подряд кадров камеры дверцы должны узнать
+      одного и того же кота, прежде чем защёлка отпустится. Один кадр решением
+      не считается: это самый удачный кроп из сотни, и 17 августа чужой кот
+      набрал двенадцать таких. Больше кадров — надёжнее, но коту придётся
+      постоять у дверцы дольше.
     </p>
     <p class="muted" style="font-size: 13px">
       Дверца открывается, только когда опознанный кот появился <strong>на камере
@@ -735,6 +746,7 @@
           relay: Number(document.querySelector("#door-relay").value),
           hold_ms: Number(document.querySelector("#door-hold").value),
           min_confidence: Number(document.querySelector("#door-confidence").value),
+          confirm_frames: Number(document.querySelector("#door-confirm").value),
           cooldown_seconds: Number(document.querySelector("#door-cooldown").value),
           open_delay_seconds: Number(document.querySelector("#door-delay").value),
           allowed_cats: doorCats

@@ -142,11 +142,14 @@ def test_caption_reads_the_stored_time_as_utc() -> None:
         when=datetime(2026, 8, 8, 11, 32),  # noqa: DTZ001 — так метку отдаёт sqlite
         timezone="Europe/Moscow",
         role="face",
-        confidence=0.98,
+        detector_confidence=0.98,
         identity=None,
     )
 
-    assert caption == "Проход в 14:32 · дверца · уверенность 0.98"
+    # Число у безымянного прохода — детекторное, и подписано тем, чем оно и
+    # является: «в кадре кот». Раньше оно называлось «уверенность» и читалось
+    # как уверенность опознания — разбор прохода #688.
+    assert caption == "Проход в 14:32 · дверца · кот 0.98"
 
 
 def test_caption_puts_the_name_first_when_the_cat_is_recognised() -> None:
@@ -154,11 +157,14 @@ def test_caption_puts_the_name_first_when_the_cat_is_recognised() -> None:
         when=datetime(2026, 8, 8, 11, 32, tzinfo=UTC),
         timezone="Europe/Moscow",
         role="side",
-        confidence=None,
+        detector_confidence=None,
         identity="Черныш",
+        identity_confidence=0.93,
+        votes=56,
+        frames_used=154,
     )
 
-    assert caption == "Черныш: проход в 14:32 · подход"
+    assert caption == "Черныш: проход в 14:32 · подход · опознание 0.93 · 56 из 154 кадров"
 
 
 def test_recorder_sends_a_photo_after_publishing_a_pass(runtime_path: Path, monkeypatch) -> None:
@@ -212,7 +218,7 @@ def test_recorder_sends_a_photo_after_publishing_a_pass(runtime_path: Path, monk
     recorder_app._notify_about_pass(settings, request, event, journal)  # type: ignore[arg-type]
     journal.close()
 
-    assert sent == [("photo", "Проход в 14:32 · дверца · уверенность 0.98")]
+    assert sent == [("photo", "Проход в 14:32 · дверца · кот 0.98")]
     written = (runtime_path / "runtime" / "detection.jsonl").read_text(encoding="utf-8")
     assert "notification_sent" in written
     assert '"reason":"cooldown"' in written
@@ -421,7 +427,8 @@ def test_caption_takes_the_name_from_aggregated_decision(
             decision=decision,
             predicted_name=name,
             confidence=0.9,
-            frames_used=3,
+            frames_used=8,
+            votes=6,
             max_detector_confidence=0.9,
             mean_inference_ms=1.0,
             raw_scores=(),

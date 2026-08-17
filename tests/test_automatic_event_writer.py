@@ -133,7 +133,8 @@ def test_persists_aggregated_online_prediction(
                     decision="known:Барсик",
                     predicted_name="Барсик",
                     confidence=0.91,
-                    frames_used=2,
+                    frames_used=4,
+                    votes=3,
                     max_detector_confidence=0.9,
                     mean_inference_ms=8.5,
                     raw_scores=(("Барсик", 0.86), ("Барсик", 0.91)),
@@ -149,7 +150,10 @@ def test_persists_aggregated_online_prediction(
         assert prediction is not None
         assert prediction.origin == "online"
         assert prediction.decision == "known:Барсик"
-        assert prediction.frames_used == 2
+        assert prediction.frames_used == 4
+        # Кворум лежит рядом с уверенностью: «3 из 4» объясняет проход, а
+        # голое «0.91» — нет.
+        assert prediction.votes == 3
 
 
 def test_event_remembers_the_second_where_the_cat_was_seen(

@@ -200,3 +200,81 @@ def test_old_events_without_active_version_predictions_are_not_false_rejects(
     }
     assert window["metrics"]["samples"] == 1
     assert window["metrics"]["false_rejects"] == 1
+
+
+def test_a_cat_the_model_never_learned_counts_as_a_stranger(
+    runtime_path: Path,
+) -> None:
+    """Разбор 17 августа: четыре прохода Киры, Ксюши и Джуна получили имена своих.
+
+    Метрика их не показывала: чужими она считала только метку «чужой кот», а
+    эти коты размечены своими, с именами, которых модель выдать не умеет. Их
+    ошибки уходили в «перепутала своих», а доля пропущенных чужих оставалась
+    `null` — ровно тот класс ошибок, ради которого метрика и заведена.
+    """
+    now = datetime(2026, 8, 17, 21, tzinfo=UTC)
+    factory = create_session_factory(runtime_path / "catdoor.sqlite3")
+    with factory() as session:
+        face = ModelVersion(
+            kind="identity_face",
+            file_name="face.onnx",
+            sha256="c" * 64,
+            metadata_json="{}",
+        )
+        session.add(face)
+        session.flush()
+        stranger = Event(
+            created_at=now - timedelta(hours=2),
+            duration_seconds=5,
+            status="ready",
+            label="known_cat",
+            # Свой кот для дома, чужой для модели: её обучали на двух других.
+            cat_name="Ксюша",
+        )
+        session.add(stranger)
+        session.flush()
+        session.add(
+            _prediction(
+                event_id=stranger.id,
+                version_id=face.id,
+                view="face",
+                decision="known:Яся",
+            )
+        )
+        session.commit()
+
+        blind = build_online_metrics(session, now=now)
+        seeing = build_online_metrics(
+            session,
+            now=now,
+            known_names={"Яся", "Черныш"},
+        )
+
+    assert blind["windows"]["7_days"]["metrics"]["false_accept_rate"] is None
+    assert blind["windows"]["7_days"]["metrics"]["misidentified_known"] == 1
+    assert seeing["windows"]["7_days"]["metrics"]["false_accept_rate"] == 1.0
+    assert seeing["windows"]["7_days"]["metrics"]["false_accepts"] == 1
+    assert seeing["known_names"] == ["Черныш", "Яся"]
+
+
+def test_an_explicit_refusal_is_an_answer_not_silence() -> None:
+    """«Не наш кот» — это решение камеры, а не молчание модели."""
+    assert (
+        combine_event_decisions(
+            [
+                _prediction(
+                    event_id=1,
+                    version_id=1,
+                    view="face",
+                    decision="known:__foreign__",
+                ),
+                _prediction(
+                    event_id=1,
+                    version_id=2,
+                    view="side",
+                    decision="uncertain",
+                ),
+            ]
+        )
+        == "known:__foreign__"
+    )

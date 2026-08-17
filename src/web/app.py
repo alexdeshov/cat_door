@@ -139,7 +139,7 @@ from src.common.gate_service import (
     gate_status,
 )
 from src.common.health import build_health, gpu_occupancy_percent, overall_status
-from src.common.model_registry import register_model_version
+from src.common.model_registry import identity_labels, register_model_version
 from src.common.node_metrics import read_node_metrics
 from src.common.online_metrics import build_online_metrics
 from src.common.process import spawn_detached
@@ -497,6 +497,7 @@ class CatDoorPayload(BaseModel):
     hold_ms: int = 5000
     allowed_cats: list[str] = Field(default_factory=list)
     min_confidence: float = 0.9
+    confirm_frames: int = 5
     cooldown_seconds: int = 30
     open_delay_seconds: float = 5.0
 
@@ -2933,6 +2934,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             str(status_path.resolve()),
             "--identity-threshold",
             str(settings.identity_confidence_threshold),
+            "--quorum",
+            str(settings.identity_quorum),
             "--run-kind",
             payload.run_kind,
             "--detector-device",
@@ -2986,11 +2989,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except (OSError, json.JSONDecodeError) as exc:
             raise HTTPException(500, "Не удалось прочитать статус оценки") from exc
 
+    def installed_cat_names() -> set[str] | None:
+        return identity_labels(
+            (settings.identity_face_model_path, settings.identity_side_model_path)
+        )
+
     @app.get("/api/metrics/online")
     def online_metrics(
         session: Annotated[Session, Depends(get_session)],
     ) -> dict[str, object]:
-        return build_online_metrics(session)
+        return build_online_metrics(session, known_names=installed_cat_names())
 
     @app.get("/metrics", response_class=HTMLResponse)
     def metrics_page(
@@ -3007,7 +3015,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             request=request,
             name="metrics.html",
             context={
-                "online": build_online_metrics(session),
+                "online": build_online_metrics(
+                    session,
+                    known_names=installed_cat_names(),
+                ),
                 # Статистика считается по покадровым наблюдениям, а они с
                 # недавних пор живут отдельным файлом.
                 "detection": read_detection_stats(
