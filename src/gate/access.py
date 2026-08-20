@@ -450,6 +450,22 @@ def execute_openings(
             if waited is None or not 0 <= waited or waited < ERROR_RETRY_SECONDS:
                 executed.append(replace(record, decision=prior.decision))
                 continue
+            if (
+                gate_closed_at is not None
+                and prior.last_pulse_at is not None
+                and gate_closed_at > prior.last_pulse_at
+            ):
+                # Створка закрылась после неудачной попытки — значит, в момент
+                # попытки она стояла открытой и человек прошёл сам. Повтор тут
+                # не помогает опоздавшему, а щёлкает замком по закрытой калитке,
+                # за которой никого нет: замок выталкивает створку, и она
+                # остаётся нараспашку. 2026-08-20, 21:40: владелец вошёл,
+                # закрыл за собой — и через три секунды повтор открыл калитку
+                # ему вслед. Человеку, который правда остался перед закрытой
+                # створкой, отказ платы ничего не меняет: створка при попытке
+                # была закрыта и закрытой осталась, повтор ему сохраняется.
+                executed.append(replace(record, decision=prior.decision))
+                continue
             # Пауза выдержана — событию положена новая попытка.
         elif prior is not None and prior.decision in TERMINAL_DECISIONS:
             if not second_chance_allowed(

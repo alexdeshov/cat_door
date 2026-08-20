@@ -1545,6 +1545,69 @@ def test_a_board_error_earns_a_retry_after_a_pause() -> None:
     assert opener.calls == [(2, 500)]
 
 
+def test_a_retry_never_chases_someone_who_got_in() -> None:
+    """Створка закрылась после неудачной попытки — повтора не будет.
+
+    2026-08-20, 21:40: владелец вошёл в открытую створку, попытка импульса в
+    этот момент сорвалась на эхе платы, створка закрылась за ним — и через
+    десять секунд повтор щёлкнул замком по закрытой калитке, за которой никого
+    не было. Замок вытолкнул створку, и она осталась бы открытой на ночь.
+    Закрытие створки после попытки означает, что попытка пришлась в открытую
+    створку и человек прошёл сам, — повтор такому событию не полагается.
+    """
+    from src.gate.access import ERROR_RETRY_SECONDS
+
+    config = _config(mode="on")
+    opener = _FakeOpener(PulseResult(True, "ок", 500))
+    records, _ = _passes(
+        [_event(sub_label="Алексей", name_score=0.96)],
+        config=config,
+        now=datetime.fromtimestamp(NOON, UTC),
+    )
+    prior = PriorPass("error", 0, NOON)
+
+    executed, pulsed = execute_openings(
+        records, config=config, opener=opener,
+        already={records[0].frigate_event_id: prior},
+        gate_closed_at=NOON + 7,  # створка закрылась после попытки NOON
+        now=NOON + ERROR_RETRY_SECONDS + 1,
+    )
+
+    assert executed[0].decision == "error"
+    assert pulsed is None
+    assert opener.calls == []  # плату не трогали: человек уже внутри
+
+
+def test_a_retry_survives_an_old_closing_of_the_gate() -> None:
+    """Створка, закрывшаяся ещё до попытки, повтора не отменяет.
+
+    Это честный случай отказа платы: человек стоит перед закрытой калиткой,
+    попытка сорвалась, створка как была закрыта, так и осталась — отметка её
+    закрытия старше попытки. Повтор ему сохраняется, иначе вернулись бы те
+    самые четырнадцать секунд ожидания из 17:04.
+    """
+    from src.gate.access import ERROR_RETRY_SECONDS
+
+    config = _config(mode="on")
+    opener = _FakeOpener(PulseResult(True, "ок", 500))
+    records, _ = _passes(
+        [_event(sub_label="Алексей", name_score=0.96)],
+        config=config,
+        now=datetime.fromtimestamp(NOON, UTC),
+    )
+    prior = PriorPass("error", 0, NOON)
+
+    executed, _ = execute_openings(
+        records, config=config, opener=opener,
+        already={records[0].frigate_event_id: prior},
+        gate_closed_at=NOON - 60,  # закрылась задолго до попытки
+        now=NOON + ERROR_RETRY_SECONDS + 1,
+    )
+
+    assert executed[0].decision == "opened"
+    assert opener.calls == [(2, 500)]
+
+
 def test_ongoing_events_are_fetched_without_an_age_filter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
