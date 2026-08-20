@@ -2211,8 +2211,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 return None
             try:
                 parsed = datetime.fromisoformat(raw)
-            except ValueError:
-                return None
+            except ValueError as exc:
+                # Молча проигнорированный фильтр — это весь журнал вместо окна:
+                # первый же прогон аудита поймал «+00:00», ставшее пробелом в
+                # URL, и завалил отчёт находками недельной давности.
+                raise HTTPException(
+                    422, f"Время не разобрано: {raw!r} — нужен ISO, например 2026-08-20T09:00:00"
+                ) from exc
             return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
         criteria: list[ColumnElement[bool]] = []

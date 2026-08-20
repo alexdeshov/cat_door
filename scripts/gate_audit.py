@@ -28,6 +28,7 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 NODE = "alex@192.168.2.137"
@@ -102,8 +103,10 @@ def ssh(node: str, command: str) -> str:
 
 def collect(node: str, since: float, until: float) -> Audit:
     audit = Audit(since=since, until=until)
-    since_iso = datetime.fromtimestamp(since, UTC).isoformat()
-    until_iso = datetime.fromtimestamp(until, UTC).isoformat()
+    # `+00:00` в незакодированном URL превращается в пробел, и сервер (теперь
+    # громко) отвергает фильтр. Первый прогон поймал это на живых данных.
+    since_iso = quote(datetime.fromtimestamp(since, UTC).isoformat())
+    until_iso = quote(datetime.fromtimestamp(until, UTC).isoformat())
     audit.passes = json.loads(
         ssh(
             node,
@@ -154,6 +157,32 @@ def leaf_between(audit: Audit, start: float, end: float, state: str) -> bool:
     return any(start < at <= end and value == state for at, value in audit.leaf)
 
 
+def event_started(row: dict) -> float | None:
+    """Начало события из его идентификатора Frigate.
+
+    У ручных открытий идентификатор `manual-<uuid>` — начала события у них
+    нет, и это не ошибка данных.
+    """
+    head = str(row.get("frigate_event_id", "")).split("-")[0]
+    try:
+        return float(head)
+    except ValueError:
+        return None
+
+
+def row_moment(row: dict, audit: Audit) -> float:
+    """Лучшее известное время строки — для отметки находки в отчёте."""
+    started = event_started(row)
+    if started is not None:
+        return started
+    if row.get("last_pulse_at"):
+        return float(row["last_pulse_at"])
+    try:
+        return datetime.fromisoformat(row["created_at"]).timestamp()
+    except (KeyError, ValueError):
+        return audit.since
+
+
 def check_pulses(audit: Audit) -> list[Finding]:
     """Каждый импульс обязан объясняться: створка после него открылась."""
     findings = []
@@ -189,9 +218,7 @@ def check_pulses(audit: Audit) -> list[Finding]:
                     row.get("id"),
                 )
             )
-        started = float(row["frigate_event_id"].split("-")[0]) if "-" in row.get(
-            "frigate_event_id", ""
-        ) else None
+        started = event_started(row)
         if started and leaf_between(audit, started, pulse_at, "closed"):
             findings.append(
                 Finding(
@@ -291,9 +318,7 @@ def check_denied_own(audit: Audit) -> list[Finding]:
             Finding(
                 "low",
                 "own-denied",
-                float(row["frigate_event_id"].split("-")[0])
-                if "-" in row.get("frigate_event_id", "")
-                else audit.since,
+                row_moment(row, audit),
                 f"{name}: {row.get('decision')}",
                 (row.get("reason") or "")[:160],
                 row.get("frigate_event_id"),
@@ -312,8 +337,7 @@ def check_health(audit: Audit) -> list[Finding]:
                 Finding(
                     "medium",
                     "board-error",
-                    row.get("last_pulse_at")
-                    or float(row["frigate_event_id"].split("-")[0]),
+                    row_moment(row, audit),
                     f"Отказ платы ({row.get('person_name')})",
                     (row.get("reason") or "")[:160],
                     row.get("frigate_event_id"),
