@@ -2191,6 +2191,83 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             },
         )
 
+    @app.get("/api/gate/passes")
+    def get_gate_passes(
+        session: Annotated[Session, Depends(get_session)],
+        since: str | None = None,
+        until: str | None = None,
+        limit: int = 1000,
+    ) -> dict[str, object]:
+        """Журнал проходов машинно-читаемо — для аудита логики калитки.
+
+        Страница `/gate` отдаёт то же самое человеку; аудитору нужны голые
+        поля: решения, факторы, импульсы и состояние створки сверяются
+        скриптом с журналом службы и лентой Frigate, а не глазами. Времена
+        `since`/`until` — ISO с зоной или UTC без неё.
+        """
+
+        def moment(raw: str | None) -> datetime | None:
+            if not raw:
+                return None
+            try:
+                parsed = datetime.fromisoformat(raw)
+            except ValueError:
+                return None
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+        criteria: list[ColumnElement[bool]] = []
+        low, high = moment(since), moment(until)
+        if low is not None:
+            criteria.append(GatePass.created_at >= low)
+        if high is not None:
+            criteria.append(GatePass.created_at < high)
+        rows = session.scalars(
+            select(GatePass)
+            .where(*criteria)
+            .order_by(GatePass.created_at.asc(), GatePass.id.asc())
+            .limit(min(max(limit, 1), 5000))
+        ).all()
+
+        def as_dict(row: GatePass) -> dict[str, object]:
+            created = row.created_at
+            if created.tzinfo is None:
+                # sqlite отдаёт метки без зоны, а записаны они в UTC.
+                created = created.replace(tzinfo=UTC)
+            factors: object = None
+            if row.factors_json:
+                try:
+                    factors = json.loads(row.factors_json)
+                except ValueError:
+                    factors = None
+            return {
+                "id": row.id,
+                "frigate_event_id": row.frigate_event_id,
+                "created_at": created.isoformat(),
+                "camera": row.camera,
+                "label": row.label,
+                "person_name": row.person_name,
+                "plate": row.plate,
+                "score": row.score,
+                "zone": row.zone,
+                "decision": row.decision,
+                "reason": row.reason,
+                "factors": factors,
+                "pulses": row.pulses,
+                "last_pulse_at": row.last_pulse_at,
+                "pulse_gate_state": row.pulse_gate_state,
+                "pulse_ms": row.pulse_ms,
+                "modbus_ok": row.modbus_ok,
+                "gate_state_before": row.gate_state_before,
+                "gate_state_after": row.gate_state_after,
+                "approach": row.approach,
+                "first_box_bottom": row.first_box_bottom,
+                "movement": row.movement,
+                "area_ratio": row.area_ratio,
+                "has_snapshot": bool(row.snapshot_path),
+            }
+
+        return {"passes": [as_dict(row) for row in rows], "count": len(rows)}
+
     @app.get("/api/gate/access-settings")
     def get_gate_access_settings() -> dict[str, object]:
         return _gate_access_view(current_gate_access())
