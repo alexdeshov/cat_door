@@ -3487,3 +3487,56 @@ def test_pass_card_shows_the_quorum_next_to_the_confidence(
 
     assert page.status_code == 200
     assert "56 из 154 кадров" in page.text
+
+
+def test_gate_passes_api_serves_the_journal_for_audit(
+    runtime_path: Path, monkeypatch
+) -> None:
+    """Аудитор читает журнал калитки машинно, с фильтром по времени.
+
+    Страница `/gate` отдаёт то же самое человеку; скрипту аудита нужны голые
+    поля — решения, факторы, импульсы — и честные времена в UTC.
+    """
+    from src.common.database import GatePass
+
+    client = make_client(runtime_path, monkeypatch)
+    factory = create_session_factory(runtime_path / "test.sqlite3")
+    with factory() as session:
+        session.add(
+            GatePass(
+                frigate_event_id="100.5-old",
+                created_at=datetime(2026, 8, 18, 9, 0, tzinfo=UTC),
+                camera="test_cam",
+                label="person",
+                decision="denied_not_allowed",
+            )
+        )
+        session.add(
+            GatePass(
+                frigate_event_id="200.5-new",
+                created_at=datetime(2026, 8, 20, 9, 0, tzinfo=UTC),
+                camera="test_cam",
+                label="person",
+                person_name="Леша",
+                decision="opened",
+                factors_json='[{"name": "face", "verdict": "for", "detail": "Леша"}]',
+                pulses=1,
+                last_pulse_at=1787200000.0,
+                pulse_gate_state="closed",
+                modbus_ok=True,
+            )
+        )
+        session.commit()
+
+    everything = client.get("/api/gate/passes").json()
+    fresh = client.get("/api/gate/passes", params={"since": "2026-08-19T00:00:00"}).json()
+
+    assert everything["count"] == 2
+    assert fresh["count"] == 1
+    row = fresh["passes"][0]
+    assert row["frigate_event_id"] == "200.5-new"
+    assert row["decision"] == "opened"
+    assert row["factors"] == [{"name": "face", "verdict": "for", "detail": "Леша"}]
+    assert row["pulses"] == 1
+    assert row["pulse_gate_state"] == "closed"
+    assert row["created_at"].startswith("2026-08-20T09:00:00")
