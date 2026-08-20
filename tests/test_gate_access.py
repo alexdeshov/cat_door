@@ -1125,31 +1125,37 @@ def _chance(**overrides: object) -> GateAccessConfig:
     return _config(mode="on", second_chance=rules)
 
 
-def test_the_gate_opens_again_when_it_closed_and_the_person_is_still_there() -> None:
-    """Ради этого случая ветка и заведена.
+def test_the_second_chance_never_outruns_the_leaf_rule() -> None:
+    """Повтор второго шанса не доходит до платы: правило стороны выше него.
 
-    12 августа событие Лёши шло 55 секунд: импульс ушёл на третьей, когда
-    створка была ещё открыта от прошедшего перед ним человека, и пропал зря.
-    Через две секунды створка закрылась, а Лёша остался перед ней — и второго
-    импульса ему не полагалось.
+    Ветка была заведена под Лёшу 12 августа (импульс пропал в открытой
+    створке, створка закрылась, Лёша остался перед ней). Но 20 августа то же
+    самое условие — «створка закрылась после импульса, человек ещё в кадре» —
+    дважды описало вошедшего, которому калитка пикнула вслед. Кадр эти случаи
+    не различает, и владелец выбрал сторону: створка, ходившая во время
+    события, отнимает право на импульс у любого повтора. Оставшийся снаружи
+    получает вход новым треком — см. сценарий exit_and_return в
+    test_gate_scenarios.py.
     """
     opener = _FakeOpener(PulseResult(True, "Импульс 500 мс на канал 2", 500))
-    records, _ = _passes([_event(sub_label="Алексей", name_score=0.96)], config=_chance())
+    started = NOON - 55
+    records, _ = _passes(
+        [_event(sub_label="Алексей", name_score=0.96, started_at=started)],
+        config=_chance(),
+        now=datetime.fromtimestamp(NOON, UTC),
+    )
 
     executed, _ = execute_openings(
         records,
         config=_chance(),
         opener=opener,
-        already={records[0].frigate_event_id: _prior()},
-        gate_closed_at=1005.0,
-        now=1010.0,
+        already={records[0].frigate_event_id: _prior(last_pulse_at=started + 3)},
+        gate_closed_at=started + 5,
+        now=NOON,
     )
 
-    assert opener.calls == [(2, 500)]
-    assert executed[0].decision == "opened"
-    assert executed[0].pulses == 2
-    assert executed[0].last_pulse_at == 1010.0
-    assert "ещё раз" in (executed[0].reason or "")
+    assert opener.calls == []
+    assert executed[0].decision == "denied_leaf_open"
 
 
 @pytest.mark.parametrize(
@@ -1268,7 +1274,13 @@ def test_the_gate_does_not_beep_after_someone_who_got_in() -> None:
 
 
 def test_the_state_of_the_gate_at_the_pulse_is_remembered() -> None:
-    """Без этого второй шанс не отличит пропавший импульс от сработавшего."""
+    """Состояние створки в момент импульса едет в журнал.
+
+    Раньше здесь проверялось «open» — с правилом стороны импульс в открытую
+    створку не уходит вовсе, и у новых строк это поле может быть только
+    «closed» или «unknown». Память осталась: по ней разбираются старые строки
+    и видно, при какой створке щёлкнуло реле.
+    """
     opener = _FakeOpener(PulseResult(True, "ок", 500))
     records, _ = _passes([_event(sub_label="Алексей", name_score=0.96)], config=_chance())
 
@@ -1277,11 +1289,11 @@ def test_the_state_of_the_gate_at_the_pulse_is_remembered() -> None:
         config=_chance(),
         opener=opener,
         already={},
-        gate_state="open",
+        gate_state="closed",
         now=1000.0,
     )
 
-    assert executed[0].pulse_gate_state == "open"
+    assert executed[0].pulse_gate_state == "closed"
 
 
 def test_a_clock_behind_the_event_never_opens_the_gate() -> None:
@@ -1591,7 +1603,8 @@ def test_a_retry_survives_an_old_closing_of_the_gate() -> None:
     config = _config(mode="on")
     opener = _FakeOpener(PulseResult(True, "ок", 500))
     records, _ = _passes(
-        [_event(sub_label="Алексей", name_score=0.96)],
+        # Событие началось после закрытия створки: правило стороны не в счёт.
+        [_event(sub_label="Алексей", name_score=0.96, started_at=NOON - 30)],
         config=config,
         now=datetime.fromtimestamp(NOON, UTC),
     )
@@ -1676,21 +1689,42 @@ def test_failed_attempts_throttle_through_the_journal(runtime_path: Path) -> Non
 
 
 def test_a_failed_second_chance_does_not_demote_opened(runtime_path: Path) -> None:
-    """Неудачный второй шанс не разжалует «opened» и не открывает обход лимитов.
+    """Перехваченный повтор не разжалует «opened» в журнале.
 
-    Находка ревью: запись «error» поверх успешного открытия и врала журналу, и
-    пускала следующий импульс через секунду мимо gap_seconds и max_pulses.
+    Тест пережил два поколения логики. Сначала он ловил находку ревью: запись
+    «error» поверх успешного открытия врала журналу и пускала следующий
+    импульс мимо gap_seconds и max_pulses. С правилом стороны повтор второго
+    шанса вовсе не доходит до платы — створка, ходившая во время события,
+    отнимает право на импульс раньше. Неизменным обязано остаться одно: в
+    журнале успешное открытие не разжалуется, чем бы ни кончился повтор.
     """
     factory = _session(runtime_path)
     config = _chance()
     opener = _FakeOpener(PulseResult(False, "Плата не ответила", 500))
+    started = NOON - 10
     records, _ = _passes(
-        [_event(sub_label="Алексей", name_score=0.96)],
+        [_event(sub_label="Алексей", name_score=0.96, started_at=started)],
         config=config,
         now=datetime.fromtimestamp(NOON + 20, UTC),
     )
     prior = _prior(last_pulse_at=NOON)
 
+    with factory() as session:
+        # В базе уже лежит успешное открытие этого события.
+        record_passes(
+            session,
+            [
+                replace(
+                    records[0],
+                    decision="opened",
+                    person_name="Алексей",
+                    pulses=1,
+                    last_pulse_at=NOON,
+                    modbus_ok=True,
+                )
+            ],
+        )
+        session.commit()
     executed, _ = execute_openings(
         records,
         config=config,
@@ -1700,23 +1734,14 @@ def test_a_failed_second_chance_does_not_demote_opened(runtime_path: Path) -> No
         now=NOON + 20,
     )
     with factory() as session:
-        record_passes(
-            session,
-            [
-                replace(
-                    executed[0],
-                    person_name="Алексей",
-                )
-            ],
-        )
+        record_passes(session, [replace(executed[0], person_name="Алексей")])
         session.commit()
     with factory() as session:
         row = session.query(GatePass).one()
 
-    assert executed[0].decision == "opened"  # исход не разжалован
-    assert row.decision == "opened"
-    # Время попытки записано: следующая ждёт нового закрытия створки.
-    assert row.last_pulse_at == pytest.approx(NOON + 20)
+    assert opener.calls == []  # правило стороны перехватило повтор до платы
+    assert executed[0].decision == "denied_leaf_open"
+    assert row.decision == "opened"  # исход в журнале не разжалован
 
 
 def test_one_poll_batch_gets_one_pulse(runtime_path: Path) -> None:
