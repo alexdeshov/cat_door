@@ -259,6 +259,21 @@ def gate_checks(stats: dict[str, Any] | None, configured_device: str | None) -> 
             )
         )
     for camera, values in (stats.get("cameras") or {}).items():
+        fps = values.get("camera_fps")
+        checks.append(
+            Check(
+                f"gate_alive_{camera}",
+                f"Кадры идут, {camera}",
+                "да",
+                _text(fps, " к/с"),
+                # Ноль кадров — камера мертва, и это провал, а не «медленно».
+                # 2026-08-21 обрыв питания убил test_cam, а проверка пропуска
+                # кадров честно показывала «0 пропущено — ok»: пропускать
+                # нечего, когда кадров нет вовсе.
+                "unknown" if fps is None else ("ok" if fps >= 1.0 else "fail"),
+                "Ноль — камера не отдаёт поток: питание, сеть или сама камера.",
+            )
+        )
         skipped = values.get("skipped_fps")
         checks.append(
             Check(
@@ -271,6 +286,60 @@ def gate_checks(stats: dict[str, Any] | None, configured_device: str | None) -> 
             )
         )
     return HealthGroup("Контур калитки", checks)
+
+
+# Свежесть файла здоровья службы калитки: опрос идёт раз в секунду-две, и
+# полминуты тишины означают, что служба стоит или зациклилась.
+GATE_HEALTH_FRESH_SECONDS = 30.0
+
+
+def gate_service_checks(
+    payload: dict[str, Any] | None, *, now: float | None = None
+) -> HealthGroup:
+    """Служба калитки изнутри: слушается ли створка.
+
+    Появилось после 2026-08-21: обрыв питания перезагрузил узел, служба
+    поднялась раньше брокера и три часа жила без створки — правило стороны
+    стояло разоружённым, и снаружи это не было видно ничем.
+    """
+    moment = time.time() if now is None else now
+    if payload is None:
+        return HealthGroup(
+            "Служба калитки",
+            [
+                Check(
+                    "gate_service_health",
+                    "Файл здоровья службы",
+                    "есть",
+                    "нет",
+                    "unknown",
+                    "Служба ещё не писала здоровье — стоит или старой версии.",
+                )
+            ],
+        )
+    updated = payload.get("updated_at")
+    age = moment - updated if isinstance(updated, (int, float)) else None
+    checks = [
+        Check(
+            "gate_service_fresh",
+            "Служба на связи",
+            f"обновлялось < {GATE_HEALTH_FRESH_SECONDS:.0f} с назад",
+            _text(age, " с") if age is not None else "нет отметки",
+            "unknown"
+            if age is None
+            else ("ok" if 0 <= age <= GATE_HEALTH_FRESH_SECONDS else "fail"),
+            "Старый файл — служба калитки стоит, решения не принимаются.",
+        ),
+        Check(
+            "gate_broker",
+            "Створка слушается (брокер)",
+            "подключено",
+            "подключено" if payload.get("broker_connected") else "нет",
+            "ok" if payload.get("broker_connected") else "fail",
+            "Без брокера правило стороны разоружено: слепые импульсы возможны.",
+        ),
+    ]
+    return HealthGroup("Служба калитки", checks)
 
 
 def hardware_checks(metrics: Any, gpu_name: str | None) -> HealthGroup:
@@ -510,11 +579,13 @@ def build_health(
     metrics: Any,
     gpu_name: str | None,
     backup_status: dict[str, Any] | None = None,
+    gate_service: dict[str, Any] | None = None,
     now: float | None = None,
 ) -> list[HealthGroup]:
     return [
         detector_checks(recorder_status, detection_config),
         gate_checks(frigate_stats, gate_detector_device),
+        gate_service_checks(gate_service, now=now),
         hardware_checks(metrics, gpu_name),
         backup_checks(backup_status, now=now),
     ]

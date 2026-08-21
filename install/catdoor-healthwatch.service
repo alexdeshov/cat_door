@@ -1,0 +1,38 @@
+[Unit]
+Description=CatDoor — сторож здоровья узла
+Documentation=https://github.com/alexdeshov/cat_door/blob/main/docs/session-history.md
+# Сторож обязан переживать любой порядок старта: он и существует ради утра
+# 2026-08-21, когда обрыв питания перезагрузил узел и половина не поднялась.
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+RequiresMountsFor=/var/lib/catdoor
+
+[Service]
+Type=notify
+NotifyAccess=main
+# Цикл раз в минуту; пять минут тишины — сторож умер, и systemd его поднимет.
+WatchdogSec=300
+
+User=catdoor
+Group=catdoor
+WorkingDirectory=/opt/catdoor
+EnvironmentFile=/etc/catdoor/catdoor.env
+ExecStart=/opt/catdoor/.venv/bin/python -m src.monitor.healthwatch
+
+Restart=always
+RestartSec=5
+RestartSteps=5
+RestartMaxDelaySec=1800
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+ReadWritePaths=/var/lib/catdoor
+
+[Install]
+WantedBy=multi-user.target

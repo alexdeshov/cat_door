@@ -152,6 +152,7 @@ from src.common.system_stats import (
     read_memory_mb,
 )
 from src.common.telegram import TelegramClient, TelegramError, hint_for
+from src.gate.access import gate_health_path
 from src.recorder.detection_journal import frame_journal_path
 from src.recorder.ffmpeg import (
     RecorderError,
@@ -1683,6 +1684,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             metrics=metrics,
             gpu_name=str(status.get("detector_device_name") or "") or None,
             backup_status=_read_status(backup_status_path(settings.data_dir)),
+            gate_service=_read_status(gate_health_path(settings.data_dir)),
         )
         return {
             "status": overall_status(groups),

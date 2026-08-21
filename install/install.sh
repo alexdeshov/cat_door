@@ -63,6 +63,7 @@ for unit in catdoor-recorder.service catdoor-web.service \
         catdoor-gate-sync.service catdoor-gate-sync.path catdoor-gate-sync.timer \
         catdoor-gate-notify.service catdoor-gate-access.service \
         catdoor-cloud-backup.service \
+        catdoor-healthwatch.service \
         catdoor-cpu-thermal.service \
         catdoor-backup.service catdoor-backup.timer; do
     install -m 644 "$REPO_DIR/install/$unit" "$UNIT_DIR/$unit"
@@ -92,6 +93,10 @@ systemctl enable catdoor-gate-access.service >/dev/null
 # админке, а забытый `enable` означал бы, что после перезагрузки страховка от
 # выноса оборудования молча не поднялась.
 systemctl enable catdoor-cloud-backup.service >/dev/null
+# Сторож здоровья включается безусловно: без токена бота он работает молча в
+# журнал, а забытый enable означал бы, что после перезагрузки за узлом снова
+# никто не смотрит — ровно та слепота 2026-08-21, ради которой он написан.
+systemctl enable --now catdoor-healthwatch.service >/dev/null
 
 # Уведомления о калитке включаются только там, где настроен бот: без токена
 # служба падала бы каждые пять секунд и засыпала журнал одной и той же жалобой.

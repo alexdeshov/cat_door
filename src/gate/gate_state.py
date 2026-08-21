@@ -100,6 +100,7 @@ class GateStateWatcher:
         self._client_id = client_id
         self._lock = threading.Lock()
         self._state = GateState(UNKNOWN)
+        self._connected = False
         self._client: object | None = None
 
     def start(self) -> bool:
@@ -142,6 +143,8 @@ class GateStateWatcher:
     def _on_connect(self, client: object, *_: object) -> None:
         client.subscribe(self.topic)  # type: ignore[attr-defined]
         client.subscribe(self.availability_topic)  # type: ignore[attr-defined]
+        with self._lock:
+            self._connected = True
         logger.info("Слушаю состояние створки: %s", self.topic)
 
     def _on_disconnect(self, *_: object) -> None:
@@ -149,6 +152,7 @@ class GateStateWatcher:
         # закрытии тоже уходит: за время без связи створку могли открыть.
         with self._lock:
             self._state = GateState(UNKNOWN)
+            self._connected = False
         logger.warning("Связь с брокером потеряна: состояние створки неизвестно")
 
     def _on_message(self, _client: object, _userdata: object, message: object) -> None:
@@ -172,6 +176,14 @@ class GateStateWatcher:
             closed_at = now if value == CLOSED else self._state.closed_at
             self._state = GateState(value, now, closed_at)
         logger.info("Створка: %s", text)
+
+    @property
+    def connected(self) -> bool:
+        """Жива ли подписка на брокер. Для файла здоровья службы:
+        2026-08-21 служба три часа прожила без створки, и снаружи это не было
+        видно ничем — правило стороны стояло разоружённым."""
+        with self._lock:
+            return self._connected
 
     def snapshot(self) -> GateState:
         """Текущее знание о створке.
