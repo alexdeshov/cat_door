@@ -45,7 +45,7 @@ REFERENCE_CONFIG = {
 
 REFERENCE_STATS = {
     "detectors": {"openvino": {"inference_speed": 4.78}},
-    "cameras": {"test_cam": {"skipped_fps": 0.0}},
+    "cameras": {"test_cam": {"skipped_fps": 0.0, "camera_fps": 5.0}},
     "detection_fps": 96.0,
 }
 
@@ -63,6 +63,9 @@ def build(**overrides: object) -> list[health.HealthGroup]:
         # нечем, она сделана руками.
         "backup_status": {"finished_at": 1000.0, "ok": True, "detail": "копия прошла",
                           "free_gb": 79.0},
+        # Служба калитки на связи и слышит брокер: слепота по створке с
+        # 2026-08-21 — провал приёмки, а не невидимая деталь.
+        "gate_service": {"updated_at": 1000.0 + 3600 - 1, "broker_connected": True},
         "now": 1000.0 + 3600,
     }
     values.update(overrides)

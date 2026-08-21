@@ -1130,6 +1130,34 @@ def _snapshot_writer(
     return store
 
 
+def gate_health_path(data_dir: Path) -> Path:
+    return data_dir / "runtime" / "gate-health.json"
+
+
+def write_gate_health(path: Path, watcher: GateStateWatcher, *, now: float | None = None) -> None:
+    """Здоровье службы наружу: слушается ли створка.
+
+    2026-08-21 обрыв питания перезагрузил узел, служба поднялась раньше
+    брокера и три часа прожила без створки — правило стороны стояло
+    разоружённым, и снаружи это не было видно ничем. Файл читают админка
+    (`/api/health`) и сторож здоровья; свежесть файла — сам по себе пульс.
+    """
+    state = watcher.snapshot()
+    payload = {
+        "updated_at": time.time() if now is None else now,
+        "boot_id": boot_id(),
+        "broker_connected": watcher.connected,
+        "leaf": {"value": state.value, "at": state.at, "closed_at": state.closed_at},
+    }
+    try:
+        scratch = path.with_suffix(".tmp")
+        scratch.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        scratch.replace(path)
+    except OSError as exc:
+        # Здоровье — не повод уронить решения: журнал важнее пульса.
+        logger.warning("Файл здоровья не записан: %s", exc)
+
+
 def run(*, once: bool = False) -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
     settings = Settings()
@@ -1201,6 +1229,7 @@ def run(*, once: bool = False) -> None:
             # Пустой журнал из-за нечитаемого инвентаря выглядит точно так же,
             # как «к калитке никто не подходил», а это разные вещи.
             logger.warning("Ни одной камеры контура калитки — журнал пуст не потому, что тихо")
+        write_gate_health(gate_health_path(settings.data_dir), gate_watcher)
         state = gate_watcher.snapshot()
         records, opening = passes_from_events(
             events,
