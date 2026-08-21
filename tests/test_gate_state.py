@@ -135,3 +135,46 @@ def test_losing_the_broker_forgets_the_closing_too() -> None:
     watcher._on_disconnect()
 
     assert watcher.snapshot().closed_within(30, now=now[0]) is False
+
+
+def test_a_broker_that_is_not_up_yet_is_awaited_not_abandoned(monkeypatch) -> None:
+    """Служба стартует раньше брокера — подключение добивается фоном.
+
+    2026-08-21, 05:40: обновление ядра перезагрузило узел, служба поднялась
+    раньше mosquitto, синхронный connect упал одним «Connection refused» — и
+    три часа, до ручного перезапуска, створка не слушалась вовсе: правило
+    стороны стояло разоружённым. Поэтому подключение асинхронное: первая
+    неудача — не приговор, paho добивается соединения сам.
+    """
+    import sys
+    from types import SimpleNamespace
+
+    calls: list[str] = []
+
+    class FakeClient:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            self.on_connect = None
+            self.on_message = None
+            self.on_disconnect = None
+
+        def connect_async(self, *args: object) -> None:
+            # Настоящий connect_async не ходит в сеть и не падает от того,
+            # что брокер ещё не поднялся.
+            calls.append("connect_async")
+
+        def connect(self, *args: object) -> None:
+            raise AssertionError("синхронный connect вернул бы вечную слепоту")
+
+        def loop_start(self) -> None:
+            calls.append("loop_start")
+
+    fake = SimpleNamespace(
+        Client=FakeClient,
+        CallbackAPIVersion=SimpleNamespace(VERSION2=2),
+    )
+    monkeypatch.setitem(sys.modules, "paho", SimpleNamespace(mqtt=SimpleNamespace(client=fake)))
+    monkeypatch.setitem(sys.modules, "paho.mqtt", SimpleNamespace(client=fake))
+    monkeypatch.setitem(sys.modules, "paho.mqtt.client", fake)
+
+    assert GateStateWatcher("127.0.0.1").start() is True
+    assert calls == ["connect_async", "loop_start"]
