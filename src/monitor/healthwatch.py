@@ -320,15 +320,18 @@ def boot_message(state: dict[str, Any], *, timezone: ZoneInfo) -> tuple[str | No
     fresh = dict(state)
     fresh["boot_id"] = current
     if stored is None or stored == current:
-        return None, fresh
+        # Недоставленная заметка о прошлой перезагрузке остаётся в состоянии
+        # и уходит со следующим циклом: учебный ребут 2026-08-21 показал, что
+        # сторож просыпается раньше Wi-Fi и DNS, и «🔄» первой попытки терялся
+        # навсегда — при настоящем обрыве света владелец снова остался бы без
+        # главного сообщения.
+        return fresh.get("boot_note"), fresh
     started = datetime.fromtimestamp(time.time() - uptime_seconds(), timezone)
-    return (
-        (
-            f"🔄 Узел перезагружался: загрузка в {started.strftime('%H:%M:%S')}. "
-            "Обычные причины — свет или обновление ядра; камеры и брокер проверяю следом."
-        ),
-        fresh,
+    fresh["boot_note"] = (
+        f"🔄 Узел перезагружался: загрузка в {started.strftime('%H:%M:%S')}. "
+        "Обычные причины — свет или обновление ядра; камеры и брокер проверяю следом."
     )
+    return fresh["boot_note"], fresh
 
 
 def run(*, once: bool = False) -> None:
@@ -365,16 +368,22 @@ def run(*, once: bool = False) -> None:
                 observed, state, now=time.time(), timezone=timezone
             )
             lines.extend(spoken)
-        save_state(path, state)
         for line in lines:
             logger.info("%s", line)
-        if lines:
+        delivered = True
+        if lines and telegram.configured:
             try:
                 telegram.send_message("Здоровье узла\n" + "\n".join(lines))
             except Exception as exc:  # noqa: BLE001
-                # Телеграм недоступен — беда не отменяется; напоминание
-                # повторит её, когда связь вернётся.
+                # Телеграм недоступен — беда не отменяется: напоминание
+                # повторит её, а заметка о перезагрузке останется в состоянии
+                # и уйдёт следующим циклом, когда сеть поднимется.
+                delivered = False
                 logger.warning("Сообщение не ушло: %s", exc)
+        if delivered:
+            # Без бота заметка тоже снимается: вечный повтор в журнал — шум.
+            state.pop("boot_note", None)
+        save_state(path, state)
         notifier.watchdog()
         if once:
             return

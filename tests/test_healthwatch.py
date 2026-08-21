@@ -112,7 +112,11 @@ def test_a_silent_admin_is_a_trouble_itself() -> None:
 
 
 def test_the_boot_message_fires_once_per_reboot(monkeypatch) -> None:
-    """Первая запись — установка сторожа, а не падение узла: молчим."""
+    """Первая запись — установка сторожа, а не падение узла: молчим.
+
+    «Один раз» означает «один раз доставленное»: заметка снимается циклом
+    после удачной отправки, и только тогда наступает тишина.
+    """
     monkeypatch.setattr("src.monitor.healthwatch.boot_id", lambda: "boot-1")
     monkeypatch.setattr("src.monitor.healthwatch.uptime_seconds", lambda: 90.0)
 
@@ -120,6 +124,7 @@ def test_the_boot_message_fires_once_per_reboot(monkeypatch) -> None:
     again, state = boot_message(state, timezone=MOSCOW)
     monkeypatch.setattr("src.monitor.healthwatch.boot_id", lambda: "boot-2")
     rebooted, state = boot_message(state, timezone=MOSCOW)
+    state.pop("boot_note", None)  # цикл доставил сообщение
     calm, state = boot_message(state, timezone=MOSCOW)
 
     assert first is None and again is None
@@ -201,3 +206,27 @@ def test_latent_bombs_are_found_before_the_reboot(monkeypatch) -> None:
     assert "не переживёт перезагрузку" in troubles[0].title
     assert "duplicate dhcp-host" in troubles[0].title
     assert "не в автозагрузке" in troubles[1].title
+
+
+def test_an_undelivered_boot_note_is_retried_next_cycle(monkeypatch) -> None:
+    """«🔄» не имеет права теряться: сторож просыпается раньше сети.
+
+    Учебный ребут 2026-08-21: DNS ещё не поднялся, первая отправка упала — и
+    сообщение о перезагрузке пропало бы навсегда. Заметка живёт в состоянии,
+    пока цикл не доставит её; доставка снимает заметку.
+    """
+    monkeypatch.setattr("src.monitor.healthwatch.boot_id", lambda: "boot-1")
+    monkeypatch.setattr("src.monitor.healthwatch.uptime_seconds", lambda: 60.0)
+
+    _, state = boot_message({}, timezone=MOSCOW)
+    monkeypatch.setattr("src.monitor.healthwatch.boot_id", lambda: "boot-2")
+    first, state = boot_message(state, timezone=MOSCOW)
+    # Отправка не удалась — заметка осталась; следующий цикл говорит её снова.
+    retried, state = boot_message(state, timezone=MOSCOW)
+    # Отправка удалась — цикл снимает заметку, дальше тишина.
+    state.pop("boot_note", None)
+    calm, state = boot_message(state, timezone=MOSCOW)
+
+    assert first is not None and first.startswith("🔄")
+    assert retried == first
+    assert calm is None
