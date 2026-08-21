@@ -190,6 +190,13 @@ def check_pulses(audit: Audit) -> list[Finding]:
         pulse_at = row.get("last_pulse_at")
         if not row.get("pulses") or pulse_at is None or row.get("modbus_ok") is False:
             continue
+        if row.get("pulse_gate_state") == "open":
+            # Импульс в уже открытую створку: «не открылась после» — потому
+            # что открыта была до. Разбор 2026-08-21 показал: три из пяти
+            # находок первого прогона были ровно этим (семья шла друг за
+            # другом). Под правилом стороны такие импульсы больше не уходят,
+            # а исторические — объяснены и не тревога.
+            continue
         if not leaf_between(audit, pulse_at, pulse_at + OPEN_AFTER_PULSE_SECONDS, "open"):
             findings.append(
                 Finding(
@@ -344,9 +351,24 @@ def check_health(audit: Audit) -> list[Finding]:
                     row.get("id"),
                 )
             )
+    # Одинаковые предупреждения сворачиваются в одну строку со счётчиком:
+    # загрузка узла даёт десятки «Frigate не ответил» подряд, и по одному они
+    # хоронят в отчёте всё важное. Ключ — текст после уровня и логгера.
+    grouped: dict[str, list[float]] = {}
     for at, message in audit.warnings:
+        key = message.split(":", 2)[-1][:120]
+        grouped.setdefault(key, []).append(at)
+    for key, moments in grouped.items():
+        count = len(moments)
+        span = f" ×{count}, до {stamp(max(moments))}" if count > 1 else ""
         findings.append(
-            Finding("low", "service-warning", at, "Предупреждение службы", message[:200])
+            Finding(
+                "low",
+                "service-warning",
+                min(moments),
+                f"Предупреждение службы{span}",
+                key,
+            )
         )
     for event in audit.ongoing:
         age = audit.until - event.get("start_time", audit.until)

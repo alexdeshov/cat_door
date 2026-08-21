@@ -117,9 +117,16 @@ class GateStateWatcher:
         client.on_message = self._on_message
         client.on_disconnect = self._on_disconnect
         try:
-            client.connect(self.host, self.port, 60)
-        except OSError as exc:
-            logger.warning("Брокер %s:%s недоступен: %s", self.host, self.port, exc)
+            # Асинхронно, а не `connect()`: после перезагрузки узла служба
+            # поднимается раньше брокера, и синхронная попытка падала одним
+            # «Connection refused» — навсегда. 2026-08-21 в 05:40 узел
+            # перезагрузило обновление ядра, и до ручного перезапуска в 08:56
+            # служба прожила три часа без створки: правило стороны разоружено,
+            # второй шанс слеп. Фоновому циклу paho первая неудача не приговор —
+            # он добивается соединения сам, с нарастающей паузой.
+            client.connect_async(self.host, self.port, 60)
+        except (OSError, ValueError) as exc:
+            logger.warning("Брокер %s:%s не принят: %s", self.host, self.port, exc)
             return False
         client.loop_start()
         self._client = client
