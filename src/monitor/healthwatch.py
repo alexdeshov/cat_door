@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import subprocess
 import time
 import urllib.request
@@ -50,6 +51,14 @@ CONFIRM_CYCLES = 2
 REMIND_SECONDS = 6 * 3600.0
 BOOT_GRACE_SECONDS = 180.0
 HEALTH_TIMEOUT_SECONDS = 15.0
+
+# Дочерним процессам сокет systemd не полагается: systemctl, унаследовав
+# NOTIFY_SOCKET службы, шлёт в него свои уведомления, и журнал засоряется
+# «Got notification message from PID …, but reception only permitted for main
+# PID» на каждый цикл (найдено при первом же запуске 2026-08-21).
+def _clean_env() -> dict[str, str]:
+    return {key: value for key, value in os.environ.items() if key != "NOTIFY_SOCKET"}
+
 
 WATCHED_UNITS = (
     "catdoor-recorder",
@@ -199,6 +208,7 @@ def unit_troubles(units: tuple[str, ...] = WATCHED_UNITS) -> list[Trouble]:
             text=True,
             timeout=10,
             check=False,
+            env=_clean_env(),
         )
         status = done.stdout.strip() or "unknown"
         if status != "active":
@@ -216,6 +226,7 @@ def clock_trouble() -> list[Trouble]:
         text=True,
         timeout=10,
         check=False,
+        env=_clean_env(),
     )
     if done.returncode != 0:
         return []
