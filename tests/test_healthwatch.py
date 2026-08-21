@@ -169,3 +169,35 @@ def test_the_reference_reads_the_gate_service_pulse() -> None:
     assert deaf.status == "fail"  # брокер потерян — правило стороны разоружено
     assert fine.status == "ok"
     assert absent.status == "unknown"
+
+
+def test_latent_bombs_are_found_before_the_reboot(monkeypatch) -> None:
+    """Мину, стреляющую только при ребуте, надо находить, пока узел жив.
+
+    2026-08-21: .bak в /etc/dnsmasq.d и disabled-юнит frigate — обе беды
+    молчали до перезагрузки. `dnsmasq --test` и `is-enabled` находят их сразу.
+    """
+    import subprocess as sp
+    from types import SimpleNamespace
+
+    from src.monitor.healthwatch import latent_troubles
+
+    def fake_run(args, **kwargs):  # type: ignore[no-untyped-def]
+        if args[0].endswith("dnsmasq"):
+            return SimpleNamespace(
+                returncode=1, stdout="",
+                stderr="dnsmasq: duplicate dhcp-host IP address 192.168.1.170\n",
+            )
+        unit = args[-1]
+        status = "disabled" if unit == "frigate.service" else "enabled"
+        return SimpleNamespace(returncode=0, stdout=status + "\n", stderr="")
+
+    monkeypatch.setattr(sp, "run", fake_run)
+
+    troubles = latent_troubles(("catdoor-web", "frigate"))
+
+    ids = [item.id for item in troubles]
+    assert ids == ["latent:dnsmasq-config", "latent:enable-frigate"]
+    assert "не переживёт перезагрузку" in troubles[0].title
+    assert "duplicate dhcp-host" in troubles[0].title
+    assert "не в автозагрузке" in troubles[1].title
