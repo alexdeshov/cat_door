@@ -13,6 +13,8 @@
 - сами службы узла: `systemctl is-active` по каждой из `WATCHED_UNITS`;
 - недоступность самой админки — тоже беда, а не молчание;
 - синхронизация часов (после обрыва питания они врут);
+- мины, стреляющие только при перезагрузке: негодная конфигурация dnsmasq
+  (`dnsmasq --test`) и наблюдаемые службы вне автозагрузки (`is-enabled`);
 - перезагрузка узла — отдельное разовое сообщение.
 
 Как уведомляется. Беда должна продержаться `CONFIRM_CYCLES` циклов подряд —
@@ -224,6 +226,55 @@ def unit_troubles(units: tuple[str, ...] = WATCHED_UNITS) -> list[Trouble]:
     return troubles
 
 
+def latent_troubles(units: tuple[str, ...] = WATCHED_UNITS) -> list[Trouble]:
+    """Мины, взведённые сейчас, но стреляющие только при перезагрузке.
+
+    Обе — с натуры 2026-08-21. Забытый `.bak` в `/etc/dnsmasq.d` дублировал
+    dhcp-host: работающему dnsmasq он был безразличен, а первый же ребут после
+    обрыва питания уронил старт — и камеры остались без адресов. Юнит frigate
+    оказался disabled: сегодня его подняли зависимости, а полагаться на это
+    нельзя. Ждать следующего ребута, чтобы узнать, — поздно; проверять надо,
+    пока узел жив.
+    """
+    troubles = []
+    done = subprocess.run(
+        ["/usr/sbin/dnsmasq", "--test"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+        env=_clean_env(),
+    )
+    if done.returncode != 0:
+        reason = (done.stderr or done.stdout).strip().splitlines()
+        troubles.append(
+            Trouble(
+                "latent:dnsmasq-config",
+                "Конфигурация dnsmasq не переживёт перезагрузку: "
+                + (reason[-1][:140] if reason else "dnsmasq --test провалился"),
+            )
+        )
+    for unit in units:
+        done = subprocess.run(
+            ["systemctl", "is-enabled", f"{unit}.service"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+            env=_clean_env(),
+        )
+        status = done.stdout.strip()
+        if status and status not in ("enabled", "static", "alias", "indirect"):
+            troubles.append(
+                Trouble(
+                    f"latent:enable-{unit}",
+                    f"Служба {unit} не в автозагрузке ({status}) — "
+                    "после перезагрузки не поднимется",
+                )
+            )
+    return troubles
+
+
 def clock_trouble() -> list[Trouble]:
     """Часы после обрыва питания идут назад — и тогда решения по времени врут."""
     done = subprocess.run(
@@ -307,6 +358,7 @@ def run(*, once: bool = False) -> None:
             observed = (
                 health_troubles(fetch_health(health_url))
                 + unit_troubles()
+                + latent_troubles()
                 + clock_trouble()
             )
             spoken, state = reconcile(
