@@ -271,10 +271,10 @@ def test_detect_resolution_is_left_to_frigate() -> None:
 
     assert detect == {
         "enabled": True,
-        "fps": 5,
+        "fps": 10,
         # Разрешение по-прежнему не задаём — Frigate возьмёт его из потока.
         # Единственная добавка: замершая машина не держит событие вечно.
-        "stationary": {"max_frames": {"objects": {"car": 300}}},
+        "stationary": {"max_frames": {"objects": {"car": 600}}},
     }
 
 
@@ -393,7 +393,7 @@ def test_rebuilt_config_carries_the_mask_into_the_camera() -> None:
     assert built["motion"]["mask"] == ["0.7,0,1,0,1,1,0.7,1"]
     assert built["zones"]["gate"]["coordinates"] == "0,0,0.5,0,0.5,1,0,1"
     # Наше при этом на месте и не потеряно.
-    assert built["detect"]["fps"] == 5
+    assert built["detect"]["fps"] == 10
     assert "ffmpeg" in built
 
 
@@ -478,5 +478,44 @@ def test_a_parked_car_stops_holding_the_event_open() -> None:
     parsed = yaml.safe_load(build_config(registry, NodeCircuits(cats=False, gate=True)))
 
     stationary = parsed["cameras"]["gate_1"]["detect"]["stationary"]
-    assert stationary["max_frames"]["objects"] == {"car": 300}
+    # Минута считается в кадрах этой камеры: у калитки их десять в секунду.
+    assert stationary["max_frames"]["objects"] == {"car": 600}
     assert "person" not in stationary["max_frames"]["objects"]
+
+
+def test_the_gate_looks_twice_as_often_as_the_recorder() -> None:
+    """Калитка разбирает десять кадров в секунду, регистратор — пять.
+
+    Кадры у калитки тратятся не на «заметить человека», а на «успеть узнать
+    лицо»: имя Frigate даёт по кворуму из двух совпадений, и ждать приходится
+    второго. Проход 2026-08-25 21:12 в темноте дал шесть попыток за тринадцать
+    секунд, совпадения — на 3.3 и 12.9 секунде; человек к этому времени открыл
+    калитку кодом. Регистратору удваивать частоту незачем: он никого не узнаёт,
+    а лишние кадры — лишняя работа детектора.
+    """
+    inventory = registry(camera("gate-1", "gate"), camera("yard", "nvr"))
+
+    parsed = yaml.safe_load(build_config(inventory, NodeCircuits(gate=True, nvr=True)))
+
+    assert parsed["cameras"]["gate_1"]["detect"]["fps"] == 10
+    assert parsed["cameras"]["yard"]["detect"]["fps"] == 5
+
+
+def test_a_parked_car_is_measured_in_seconds_not_frames() -> None:
+    """Минута стоянки остаётся минутой на любой частоте.
+
+    Кадровые умолчания Frigate выводит из частоты сам — разрыв трека впятеро,
+    замирание вдесятеро, — а наш предел для машины был константой в 300 кадров.
+    Переход калитки на 10 к/с молча превратил бы минуту в тридцать секунд, и
+    подъезд резался бы пополам без единого слова в журнале.
+    """
+    inventory = registry(camera("gate-1", "gate"), camera("yard", "nvr"))
+
+    parsed = yaml.safe_load(build_config(inventory, NodeCircuits(gate=True, nvr=True)))
+
+    def parked(name: str) -> int:
+        detect = parsed["cameras"][name]["detect"]
+        return int(detect["stationary"]["max_frames"]["objects"]["car"])
+
+    assert parked("gate_1") == 600, "десять кадров в секунду — минута это 600"
+    assert parked("yard") == 300, "пять кадров в секунду — минута это 300"
