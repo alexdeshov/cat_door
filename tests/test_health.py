@@ -122,6 +122,56 @@ def test_skipped_frames_on_the_gate_are_visible() -> None:
     assert find(build(frigate_stats=stats), "gate_skipped_test_cam").status != "ok"
 
 
+def test_the_same_loss_means_different_things_at_different_rates() -> None:
+    """Пропуск меряется долей кадров, а не их числом.
+
+    Историческая беда — 0.3 к/с на камере в 5 к/с: каждый шестнадцатый кадр мимо
+    детектора, и это тревога. Ровно те же 0.3 на камере в 10 к/с — вдвое меньшая
+    доля, и будить телефон незачем.
+    """
+    slow = {**REFERENCE_STATS, "cameras": {"test_cam": {"camera_fps": 5.0, "skipped_fps": 0.3}}}
+    fast = {**REFERENCE_STATS, "cameras": {"test_cam": {"camera_fps": 10.0, "skipped_fps": 0.3}}}
+
+    assert find(build(frigate_stats=slow), "gate_skipped_test_cam").status == "warn"
+    assert find(build(frigate_stats=fast), "gate_skipped_test_cam").status == "ok"
+
+
+def test_a_single_lost_frame_does_not_wake_the_phone() -> None:
+    """2026-08-26: калитка поехала на 10 к/с, и абсолютный порог начал ловить
+    единичный кадр.
+
+    Frigate округляет частоты до одного знака, поэтому 0.1 — наименьшее
+    ненулевое показание вообще: порог «0.1 к/с» означал «не потеряно ни кадра».
+    Дважды за день короткая заминка стоила одного-двух кадров из десяти, и
+    сторож слал беду, хотя камера отдавала детектору вдвое больше кадров, чем
+    накануне.
+    """
+    stats = {**REFERENCE_STATS, "cameras": {"test_cam": {"camera_fps": 10.1, "skipped_fps": 0.2}}}
+
+    assert find(build(frigate_stats=stats), "gate_skipped_test_cam").status == "ok"
+
+
+def test_losing_a_fifth_of_the_frames_is_a_failure() -> None:
+    """Потеря пятой части кадров — это уже не заминка, а неуспевающий контур."""
+    stats = {**REFERENCE_STATS, "cameras": {"test_cam": {"camera_fps": 10.0, "skipped_fps": 2.5}}}
+
+    assert find(build(frigate_stats=stats), "gate_skipped_test_cam").status == "fail"
+
+
+def test_a_dead_camera_does_not_divide_by_its_own_zero() -> None:
+    """У мёртвой камеры частота нулевая, и доля от неё — вечная авария.
+
+    2026-08-21 обрыв питания уже показывал, что «0 пропущено» у камеры без
+    кадров выглядит здоровьем; отвечает за это отдельная проверка «Кадры идут»,
+    а здесь ноль не должен превращаться в ложную беду.
+    """
+    stats = {**REFERENCE_STATS, "cameras": {"test_cam": {"camera_fps": 0.0, "skipped_fps": 0.0}}}
+    groups = build(frigate_stats=stats)
+
+    assert find(groups, "gate_alive_test_cam").status == "fail"
+    assert find(groups, "gate_skipped_test_cam").status == "ok"
+
+
 def test_unreachable_frigate_is_not_the_same_as_broken() -> None:
     groups = build(frigate_stats=None)
 
