@@ -82,6 +82,9 @@ class Audit:
     warnings: list[tuple[float, str]] = field(default_factory=list)
     events: list[dict] = field(default_factory=list)
     ongoing: list[dict] = field(default_factory=list)
+    # Люди на **всех** камерах узла, а не только у калитки: выход со двора
+    # объясняется человеком, которого камера калитки не видит.
+    nearby: list[dict] = field(default_factory=list)
 
 
 def stamp(epoch: float) -> str:
@@ -148,6 +151,16 @@ def collect(node: str, since: float, until: float) -> Audit:
             node,
             f"curl -sf '{FRIGATE}/api/events?cameras={cameras}"
             f"&in_progress=1&limit=100&include_thumbnails=0'",
+        )
+    )
+    # Те же события, но со всех камер узла. Нужны ровно одной проверке —
+    # объяснению открытой створки: человек выходит со двора, и камера калитки
+    # видит его уже за створкой или не видит вовсе.
+    audit.nearby = json.loads(
+        ssh(
+            node,
+            f"curl -sf '{FRIGATE}/api/events?after={since}&before={until}"
+            f"&limit=2000&include_thumbnails=0'",
         )
     )
     return audit
@@ -268,11 +281,16 @@ def check_openings(audit: Audit) -> list[Finding]:
         if state != "open":
             continue
         explained = any(0 <= at - pulse <= OPEN_AFTER_PULSE_SECONDS for pulse in pulse_times)
+        # Человек считается на любой камере узла. До 2026-08-26 проверка
+        # смотрела только камеру калитки, и обычный выход со двора — люди на
+        # `camera` и `nvr_2` за секунды до открытия — попадал в находки как
+        # необъяснённое открытие. Двое из трёх находок того окна были именно
+        # такими.
         person_near = any(
             event.get("label") == "person"
             and event.get("start_time", 0) - EXPLAIN_OPEN_SECONDS <= at
             and (event.get("end_time") or audit.until) + EXPLAIN_OPEN_SECONDS >= at
-            for event in audit.events + audit.ongoing
+            for event in audit.events + audit.ongoing + audit.nearby
         )
         if not explained and not person_near:
             findings.append(
@@ -280,9 +298,10 @@ def check_openings(audit: Audit) -> list[Finding]:
                     "medium",
                     "unexplained-open",
                     at,
-                    "Створка открылась без импульса и без человека в кадре",
-                    "Ключ, рука изнутри, фантом реле или проспавшая детекция — "
-                    "по журналу не различить, смотреть запись nvr_2.",
+                    "Створка открылась без импульса и без человека ни на одной камере",
+                    "Ключ, фантом реле, проспавшая детекция — или мигание "
+                    "классификатора: 2026-08-21 22:11 ложное «открыта» на три "
+                    "секунды дала переключение камеры в ИК. Смотреть запись nvr_2.",
                 )
             )
     return findings
