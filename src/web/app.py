@@ -1812,50 +1812,46 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # умеет удалять по построению. Команду настройки печатаем готовой —
         # владелец выполняет один раз со своей машины со своим админским
         # профилем (тот же приём, что с активацией моделей).
-        if config.bucket and config.retention_days:
-            rules = {
-                "Rules": [
-                    {
-                        "ID": "catdoor-events-retention",
-                        "Status": "Enabled",
-                        "Filter": {"Prefix": f"{config.prefix}/"},
-                        "Expiration": {"Days": config.retention_days},
-                        "NoncurrentVersionExpiration": {
-                            "NoncurrentDays": config.retention_days
-                        },
-                        "AbortIncompleteMultipartUpload": {"DaysAfterInitiation": 1},
-                    }
-                ]
+        #
+        # `put-bucket-lifecycle-configuration` **заменяет** конфигурацию бакета
+        # целиком, а не добавляет правило. Поэтому две команды на один бакет —
+        # это мина: запустив вторую, владелец молча снёс бы правило из первой и
+        # остановил уборку. Отсюда устройство ниже: пока бакеты общие, правила
+        # печатаются **одной** командой, и отдельная кошачья не показывается
+        # вовсе.
+        def _rule(name: str, prefix: str, days: int) -> dict[str, object]:
+            return {
+                "ID": name,
+                "Status": "Enabled",
+                "Filter": {"Prefix": f"{prefix}/"},
+                "Expiration": {"Days": days},
+                "NoncurrentVersionExpiration": {"NoncurrentDays": days},
+                "AbortIncompleteMultipartUpload": {"DaysAfterInitiation": 1},
             }
-            values["lifecycle_command"] = (
+
+        def _command(bucket: str, rules: list[dict[str, object]]) -> str:
+            payload = json.dumps({"Rules": rules}, separators=(",", ":"))
+            return (
                 f"aws --endpoint-url {config.endpoint} "
                 f"s3api put-bucket-lifecycle-configuration "
-                f"--bucket {config.bucket} "
-                f"--lifecycle-configuration '{json.dumps(rules, separators=(',', ':'))}'"
+                f"--bucket {bucket} "
+                f"--lifecycle-configuration '{payload}'"
             )
-        # Кошачьи проходы убирает свой lifecycle: у них отдельный бакет и срок
-        # длиннее (проходы легче калиточных событий), поэтому и команда своя.
-        if config.cats_target_bucket and config.cats_retention_days:
-            cats_rules = {
-                "Rules": [
-                    {
-                        "ID": "catdoor-cats-retention",
-                        "Status": "Enabled",
-                        "Filter": {"Prefix": f"{config.cats_prefix}/"},
-                        "Expiration": {"Days": config.cats_retention_days},
-                        "NoncurrentVersionExpiration": {
-                            "NoncurrentDays": config.cats_retention_days
-                        },
-                        "AbortIncompleteMultipartUpload": {"DaysAfterInitiation": 1},
-                    }
-                ]
-            }
-            values["cats_lifecycle_command"] = (
-                f"aws --endpoint-url {config.endpoint} "
-                f"s3api put-bucket-lifecycle-configuration "
-                f"--bucket {config.cats_target_bucket} "
-                f"--lifecycle-configuration "
-                f"'{json.dumps(cats_rules, separators=(',', ':'))}'"
+
+        cats_rule = (
+            _rule("catdoor-cats-retention", config.cats_prefix, config.cats_retention_days)
+            if config.cats_target_bucket and config.cats_retention_days
+            else None
+        )
+        shares_bucket = config.cats_target_bucket == config.bucket
+        if config.bucket and config.retention_days:
+            rules = [_rule("catdoor-events-retention", config.prefix, config.retention_days)]
+            if cats_rule is not None and shares_bucket:
+                rules.append(cats_rule)
+            values["lifecycle_command"] = _command(config.bucket, rules)
+        if cats_rule is not None and not shares_bucket:
+            values["cats_lifecycle_command"] = _command(
+                config.cats_target_bucket, [cats_rule]
             )
         # Длина — безопасная диагностика: у секретов Яндекса она всегда 40, и
         # «37» или «41» мгновенно выдаёт обрезанную или слипшуюся вставку,
