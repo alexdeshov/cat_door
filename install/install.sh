@@ -62,7 +62,7 @@ chmod 640 "$CONFIG_FILE"
 for unit in catdoor-recorder.service catdoor-web.service \
         catdoor-gate-sync.service catdoor-gate-sync.path catdoor-gate-sync.timer \
         catdoor-gate-notify.service catdoor-gate-access.service \
-        catdoor-cloud-backup.service \
+        catdoor-cloud-backup.service catdoor-cloud-backup-cats.service \
         catdoor-healthwatch.service \
         catdoor-cpu-thermal.service \
         catdoor-backup.service catdoor-backup.timer; do
@@ -93,6 +93,9 @@ systemctl enable catdoor-gate-access.service >/dev/null
 # админке, а забытый `enable` означал бы, что после перезагрузки страховка от
 # выноса оборудования молча не поднялась.
 systemctl enable catdoor-cloud-backup.service >/dev/null
+# Кошачья копия — тем же порядком и по той же причине: она страхует
+# единственную видеозапись проходов, которая до сих пор жила только в доме.
+systemctl enable catdoor-cloud-backup-cats.service >/dev/null
 # Сторож здоровья включается безусловно: без токена бота он работает молча в
 # журнал, а забытый enable означал бы, что после перезагрузки за узлом снова
 # никто не смотрит — ровно та слепота 2026-08-21, ради которой он написан.

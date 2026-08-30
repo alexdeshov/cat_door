@@ -34,6 +34,16 @@ def cloud_backup_state_path(data_dir: Path) -> Path:
     return data_dir / "runtime" / "cloud-backup-state.json"
 
 
+def cats_cloud_backup_state_path(data_dir: Path) -> Path:
+    """Состояние кошачьей копии: своя служба — свой журнал залитого.
+
+    Общий файл на две службы означал бы гонку за перезапись: догон кошачьих
+    проходов идёт часами и пишет отметки по ходу, а калиточный цикл
+    перезаписывает состояние каждые полминуты.
+    """
+    return data_dir / "runtime" / "cats-cloud-backup-state.json"
+
+
 class CloudBackupConfig(BaseModel):
     enabled: bool = False
     bucket: str = ""
@@ -55,10 +65,31 @@ class CloudBackupConfig(BaseModel):
     # здесь — для этой команды и для сторожа: выгрузчик меряет бакет и говорит
     # вслух, если старейший объект пережил срок — значит, lifecycle не работает.
     retention_days: int = Field(default=30, ge=0, le=3650)
+    # Кошачьи проходы. Бакет свой (изоляция квоты: разросшаяся кошачья заливка
+    # не должна упереться в лимит и заблокировать калиточную — она страховка от
+    # кражи и приоритетом выше), а endpoint, регион и ключи те же: секрет
+    # ротируется в одном месте, а не в двух.
+    cats_enabled: bool = False
+    # Пусто — значит тот же бакет, что у калитки, и разделение только префиксом.
+    cats_bucket: str = ""
+    cats_prefix: str = "cat-events"
+    # Свой срок: кошачьи проходы легче калиточных (около 2 ГБ в сутки против
+    # 5.5), поэтому история может быть длиннее при той же цене. Как и у
+    # калитки, число здесь — для команды lifecycle и для сторожа, а не для
+    # службы: её ключ удалять не умеет.
+    cats_retention_days: int = Field(default=90, ge=0, le=3650)
 
     @property
     def ready(self) -> bool:
         return bool(self.bucket and self.access_key_id and self.secret_key)
+
+    @property
+    def cats_target_bucket(self) -> str:
+        return self.cats_bucket or self.bucket
+
+    @property
+    def cats_ready(self) -> bool:
+        return bool(self.cats_target_bucket and self.access_key_id and self.secret_key)
 
 
 def load_cloud_backup_config(path: Path, defaults: CloudBackupConfig) -> CloudBackupConfig:
