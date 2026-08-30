@@ -1,0 +1,42 @@
+# Облачная копия кошачьих проходов.
+#
+# Отдельная служба от `catdoor-cloud-backup.service` намеренно: заливка калитки
+# — страховка от кражи и самый ответственный путь в проекте, и ошибка в
+# кошачьем коде не должна её ронять. Разные процессы — разные аварии.
+#
+# WatchdogSec держим таким же, как у калиточной: один клип прохода весит
+# десятки мегабайт, восходящий канал узла отдаёт около 300 КБ/с, и передача
+# идёт минутами. Сторожа служба кормит нитью прямо во время заливки — иначе
+# systemd убивает её посреди работы (так было 14 августа с калиткой).
+[Unit]
+Description=CatDoor — облачная копия кошачьих проходов
+Documentation=https://github.com/alexdeshov/cat_door/blob/main/docs/cloud-backup.md
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+RequiresMountsFor=/var/lib/catdoor
+
+[Service]
+Type=notify
+NotifyAccess=main
+WatchdogSec=900
+User=catdoor
+Group=catdoor
+WorkingDirectory=/opt/catdoor
+EnvironmentFile=/etc/catdoor/catdoor.env
+ExecStart=/opt/catdoor/.venv/bin/python -m src.cloud_backup.cats
+Restart=always
+RestartSec=5
+RestartSteps=5
+RestartMaxDelaySec=1800
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+ReadWritePaths=/var/lib/catdoor
+
+[Install]
+WantedBy=multi-user.target

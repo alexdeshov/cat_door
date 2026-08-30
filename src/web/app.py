@@ -558,6 +558,11 @@ class CloudBackupPayload(BaseModel):
     lookback_hours: int = 24
     cameras: list[str] = Field(default_factory=list)
     retention_days: int = 30
+    # Кошачьи проходы — свой бакет, префикс и срок, но те же ключи.
+    cats_enabled: bool = False
+    cats_bucket: str = ""
+    cats_prefix: str = "cat-events"
+    cats_retention_days: int = 90
     # Пусто — «оставить прежний»: секрет наружу не выходит и вернуться не может.
     access_key_id: str = ""
     secret_key: str = ""
@@ -1827,6 +1832,30 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 f"s3api put-bucket-lifecycle-configuration "
                 f"--bucket {config.bucket} "
                 f"--lifecycle-configuration '{json.dumps(rules, separators=(',', ':'))}'"
+            )
+        # Кошачьи проходы убирает свой lifecycle: у них отдельный бакет и срок
+        # длиннее (проходы легче калиточных событий), поэтому и команда своя.
+        if config.cats_target_bucket and config.cats_retention_days:
+            cats_rules = {
+                "Rules": [
+                    {
+                        "ID": "catdoor-cats-retention",
+                        "Status": "Enabled",
+                        "Filter": {"Prefix": f"{config.cats_prefix}/"},
+                        "Expiration": {"Days": config.cats_retention_days},
+                        "NoncurrentVersionExpiration": {
+                            "NoncurrentDays": config.cats_retention_days
+                        },
+                        "AbortIncompleteMultipartUpload": {"DaysAfterInitiation": 1},
+                    }
+                ]
+            }
+            values["cats_lifecycle_command"] = (
+                f"aws --endpoint-url {config.endpoint} "
+                f"s3api put-bucket-lifecycle-configuration "
+                f"--bucket {config.cats_target_bucket} "
+                f"--lifecycle-configuration "
+                f"'{json.dumps(cats_rules, separators=(',', ':'))}'"
             )
         # Длина — безопасная диагностика: у секретов Яндекса она всегда 40, и
         # «37» или «41» мгновенно выдаёт обрезанную или слипшуюся вставку,
