@@ -1193,3 +1193,53 @@ def test_the_panel_prints_the_lifecycle_command_for_the_owner(
     assert "put-bucket-lifecycle-configuration" in command
     assert '"Days":30' in command and "--bucket b1" in command
     assert "verysecret" not in command  # команда — без секретов
+
+
+def test_shared_bucket_gets_one_command_with_both_rules(
+    runtime_path: Path, monkeypatch
+) -> None:
+    """`put-bucket-lifecycle-configuration` заменяет конфигурацию целиком.
+
+    Две команды на один бакет — мина: вторая молча снесла бы правило первой и
+    остановила уборку. Пока бакет общий, правила печатаются одной командой, а
+    отдельной кошачьей не существует.
+    """
+    from tests.test_admin import make_client
+
+    client = make_client(runtime_path, monkeypatch)
+
+    saved = client.put(
+        "/api/cloud-backup/settings",
+        json={"enabled": True, "bucket": "b1", "retention_days": 30,
+              "cats_enabled": True, "cats_retention_days": 90,
+              "access_key_id": "AKIDXYZW", "secret_key": "verysecret"},
+    ).json()
+
+    assert "cats_lifecycle_command" not in saved
+    command = saved["lifecycle_command"]
+    assert command.count("--bucket") == 1 and "--bucket b1" in command
+    assert "catdoor-events-retention" in command
+    assert "catdoor-cats-retention" in command
+    assert '"Days":30' in command and '"Days":90' in command
+
+
+def test_own_cats_bucket_gets_its_own_command(runtime_path: Path, monkeypatch) -> None:
+    """Разные бакеты — разные конфигурации, затирать друг друга нечем."""
+    from tests.test_admin import make_client
+
+    client = make_client(runtime_path, monkeypatch)
+
+    saved = client.put(
+        "/api/cloud-backup/settings",
+        json={"enabled": True, "bucket": "b1", "retention_days": 30,
+              "cats_enabled": True, "cats_bucket": "b1-cats",
+              "cats_retention_days": 90,
+              "access_key_id": "AKIDXYZW", "secret_key": "verysecret"},
+    ).json()
+
+    gate = saved["lifecycle_command"]
+    cats = saved["cats_lifecycle_command"]
+    assert "--bucket b1 " in gate and "catdoor-cats-retention" not in gate
+    assert "--bucket b1-cats " in cats and "catdoor-events-retention" not in cats
+    assert '"Prefix":"cat-events/"' in cats
+    assert "verysecret" not in gate and "verysecret" not in cats

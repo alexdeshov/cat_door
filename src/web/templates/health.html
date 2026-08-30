@@ -69,6 +69,10 @@
           prefix: document.querySelector("#cloud-prefix").value.trim() || "events",
           lookback_hours: Number(document.querySelector("#cloud-lookback").value),
           retention_days: Number(document.querySelector("#cloud-retention").value),
+          cats_enabled: document.querySelector("#cats-enabled").checked,
+          cats_bucket: document.querySelector("#cats-bucket").value.trim(),
+          cats_prefix: document.querySelector("#cats-prefix").value.trim() || "cat-events",
+          cats_retention_days: Number(document.querySelector("#cats-retention").value),
           endpoint: document.querySelector("#cloud-endpoint").value.trim(),
           region: document.querySelector("#cloud-region").value.trim(),
           access_key_id: document.querySelector("#cloud-key-id").value.trim(),
@@ -264,6 +268,22 @@
         value="{{ cloud_backup.retention_days }}">
     </div>
     <div class="controls">
+      <label class="controls" style="font-size: 13px">
+        <input id="cats-enabled" type="checkbox" {{ "checked" if cloud_backup.cats_enabled }}>
+        выгружать клипы кошачьих проходов
+      </label>
+    </div>
+    <div class="controls">
+      <label for="cats-bucket">бакет котов</label>
+      <input id="cats-bucket" type="text" value="{{ cloud_backup.cats_bucket }}"
+        placeholder="{{ cloud_backup.bucket or 'общий' }}" style="width: 14em">
+      <label for="cats-prefix">префикс</label>
+      <input id="cats-prefix" type="text" value="{{ cloud_backup.cats_prefix }}" style="width: 8em">
+      <label for="cats-retention">хранить, дн</label>
+      <input id="cats-retention" type="number" min="0" max="3650"
+        value="{{ cloud_backup.cats_retention_days }}">
+    </div>
+    <div class="controls">
       <label for="cloud-endpoint">endpoint</label>
       <input id="cloud-endpoint" type="text" value="{{ cloud_backup.endpoint }}" style="width: 18em">
       <label for="cloud-region">регион</label>
@@ -317,6 +337,13 @@
       ({{ cloud_backup.retention_days }} дн):
     </p>
     <pre class="data" style="font-size: 11px; overflow-x: auto; user-select: all">{{ cloud_backup.lifecycle_command }}</pre>
+    {% endif %}
+    {% if cloud_backup.cats_lifecycle_command %}
+    <p class="muted" style="font-size: 13px">
+      Кошачьи проходы лежат в своём бакете, и у них свой срок
+      ({{ cloud_backup.cats_retention_days }} дн) — отдельная команда:
+    </p>
+    <pre class="data" style="font-size: 11px; overflow-x: auto; user-select: all">{{ cloud_backup.cats_lifecycle_command }}</pre>
     {% endif %}
     <div id="cloud-progress-row" hidden style="margin-top: 8px">
       <progress id="cloud-progress" max="100" value="0" style="width: 100%"></progress>
