@@ -46,7 +46,6 @@ from src.common.cat_door_config import (
 from src.common.database import GatePass, create_session_factory
 from src.common.gate_access_config import (
     GateAccessConfig,
-    SecondChanceRules,
     gate_access_config_path,
     load_gate_access_config,
 )
@@ -225,58 +224,6 @@ class PriorPass:
     pulses: int = 0
     last_pulse_at: float | None = None
     pulse_gate_state: str | None = None
-
-
-def second_chance_allowed(
-    prior: PriorPass,
-    *,
-    rules: SecondChanceRules,
-    gate_closed_at: float | None,
-    now: float,
-) -> bool:
-    """Заслужил ли этот проход ещё один импульс.
-
-    Правило произносится словами так: **наш импульс пропал зря, створка с тех
-    пор закрылась, а человек всё ещё здесь.**
-
-    Первая часть добавлена 12 августа вечером и оказалась главной. Без неё
-    правило звучало «створка закрылась после импульса» — а это описывает и
-    неудачу, и удачу. Владелец прошёл в калитку, она закрылась за ним, и через
-    полминуты пикнула ему вслед:
-
-        17:46:31  импульс — створка была закрыта
-        17:46:36  створка открыта   ← человек прошёл
-        17:46:51  створка закрыта
-        17:46:51  импульс второй    ← лишний
-
-    Отличить одно от другого можно ровно по состоянию створки в момент
-    импульса. Закрыта — значит защёлку отпустили для человека, он открыл и
-    прошёл, всё сработало. Открыта — значит защёлка и так была отпущена, наш
-    импульс ничего не изменил, и когда створка закроется, человек останется
-    перед ней. Второй шанс полагается только этому случаю.
-
-    Неизвестное состояние — не повод открывать: незнание тут ближе к «сработало».
-    """
-    if not rules.enabled:
-        return False
-    if prior.pulse_gate_state != GATE_STATE_OPEN:
-        return False
-    if prior.pulses >= rules.max_pulses:
-        return False
-    last = prior.last_pulse_at
-    if last is None:
-        # Импульс был, а когда — неизвестно: строка из времён до счётчика.
-        # Считать это «давно» нельзя, второй шанс держится именно на времени.
-        return False
-    waited = now - last
-    if waited < rules.gap_seconds or waited < 0:
-        # Отрицательное — часы шагнули назад. Тогда ждём ещё, а не открываем.
-        return False
-    if not rules.require_closed:
-        return True
-    # Створка должна была закрыться именно после импульса. Закрытие до него —
-    # это то самое состояние, из-за которого импульс и пропал зря.
-    return gate_closed_at is not None and gate_closed_at > last
 
 
 @dataclass(frozen=True)
@@ -462,7 +409,6 @@ def execute_openings(
             executed.append(record)
             continue
         prior = already.get(record.frigate_event_id)
-        repeat = False
         if prior is not None and prior.decision == "error":
             waited = moment - prior.last_pulse_at if prior.last_pulse_at else None
             if waited is None or not 0 <= waited or waited < ERROR_RETRY_SECONDS:
@@ -486,16 +432,13 @@ def execute_openings(
                 continue
             # Пауза выдержана — событию положена новая попытка.
         elif prior is not None and prior.decision in TERMINAL_DECISIONS:
-            if not second_chance_allowed(
-                prior,
-                rules=config.second_chance,
-                gate_closed_at=gate_closed_at,
-                now=moment,
-            ):
-                # Исход уже есть — несём его дальше, а не прежнее «открыл бы».
-                executed.append(replace(record, decision=prior.decision))
-                continue
-            repeat = True
+            # Исход уже есть — несём его дальше, а не прежнее «открыл бы».
+            # Здесь до 31 августа жил «второй шанс» — повторный импульс тому же
+            # человеку, если первый ушёл в открытую створку. Под правилом
+            # стороны он стал структурно мёртв (створка, ходившая во время
+            # события, отнимает право на импульс раньше) и вырезан.
+            executed.append(replace(record, decision=prior.decision))
+            continue
         if pulsed_at is not None and config.cooldown_seconds > 0:
             # Пауза обязана действовать и внутри одного опроса: два события в
             # одной пачке — два человека или один, разорванный Frigate на два
@@ -554,23 +497,8 @@ def execute_openings(
             )
             continue
         pulse = opener.pulse(relay, config.pulse_ms)
-        if repeat and prior is not None and not pulse.ok:
-            # Второй шанс не удался. Разжаловать «opened» в «error» нельзя:
-            # успешное открытие уже случилось, и журнал не должен его терять, а
-            # запись «error» открывала бы обход всех лимитов второго шанса
-            # через ветку повтора. Несём прежний исход; время попытки — в
-            # запись, чтобы следующая ждала нового закрытия створки.
-            executed.append(
-                replace(record, decision=prior.decision, last_pulse_at=moment)
-            )
-            continue
         sent = (prior.pulses if prior is not None else 0) + 1
-        if pulse.ok and repeat:
-            reason = (
-                f"{record.person_name}: открыто ещё раз — створка закрылась, "
-                f"а человек ещё здесь. {pulse.detail}"
-            )
-        elif pulse.ok:
+        if pulse.ok:
             reason = f"{record.person_name}: открыто по лицу. {pulse.detail}"
         else:
             reason = f"{record.person_name}: открыть не удалось. {pulse.detail}"
@@ -599,7 +527,6 @@ def execute_openings(
             notify(
                 f"Калитка: {'открыта' if pulse.ok else 'открыть не удалось'} "
                 f"по лицу — {record.person_name}"
-                + (" (второй раз: створка закрылась, а человек ещё здесь)" if repeat else "")
             )
     return executed, pulsed_at
 

@@ -8,10 +8,8 @@ import pytest
 
 from src.common.gate_access_config import (
     MOVEMENT_PRESET,
-    SECOND_CHANCE_PRESET,
     GateAccessConfig,
     apply_movement_preset,
-    apply_second_chance_preset,
     gate_access_config_path,
     load_gate_access_config,
     mask_mac,
@@ -136,29 +134,46 @@ def test_a_mac_is_shown_by_its_tail_only() -> None:
     assert mask_mac("") == ""
 
 
-def test_both_presets_survive_a_round_trip(tmp_path: Path) -> None:
-    """Пресеты и их резервные копии обязаны пережить перезапуск службы.
+def test_the_preset_survives_a_round_trip(tmp_path: Path) -> None:
+    """Пресет и его резервная копия обязаны пережить перезапуск службы.
 
     Настройки живут в одном файле, и служба перечитывает его на ходу. Потеря
-    любой из двух резервных копий означала бы, что кнопка «вернуть как было»
-    после перезагрузки узла возвращает не то, что было.
+    резервной копии означала бы, что кнопка «вернуть как было» после
+    перезагрузки узла возвращает не то, что было.
     """
     path = tmp_path / "gate-access.json"
-    config = apply_second_chance_preset(
-        apply_movement_preset(GateAccessConfig(mode="on", cooldown_seconds=10))
-    )
+    config = apply_movement_preset(GateAccessConfig(mode="on", cooldown_seconds=10))
 
     save_gate_access_config(path, config)
     restored = load_gate_access_config(path, GateAccessConfig())
 
     assert restored == config
     assert restored.movement == MOVEMENT_PRESET
-    assert restored.second_chance == SECOND_CHANCE_PRESET
     assert restored.cooldown_seconds == 10
-    # Резервные копии — то, к чему возвращает откат. Без них кнопка отката
+    # Резервная копия — то, к чему возвращает откат. Без неё кнопка отката
     # молча выключала бы правила вместо возврата прежних.
     assert restored.replaced_by_preset is not None
-    assert restored.replaced_by_chance_preset is not None
+
+
+def test_old_second_chance_keys_are_ignored_not_fatal(tmp_path: Path) -> None:
+    """Файл на узле хранит ключи вырезанного «второго шанса» (31-08).
+
+    Незнакомый ключ обязан молча игнорироваться: отказ загрузки означал бы,
+    что после обновления служба калитки работает на умолчаниях — то есть в
+    режиме `off`, — и никто бы об этом не сказал.
+    """
+    path = tmp_path / "gate-access.json"
+    path.write_text(
+        '{"mode": "on", "cooldown_seconds": 10, '
+        '"second_chance": {"enabled": false, "max_pulses": 2}, '
+        '"replaced_by_chance_preset": null}',
+        encoding="utf-8",
+    )
+
+    restored = load_gate_access_config(path, GateAccessConfig())
+
+    assert restored.mode == "on"
+    assert restored.cooldown_seconds == 10
 
 
 def test_a_torn_file_leaves_the_running_settings_alone(tmp_path: Path) -> None:
@@ -170,7 +185,7 @@ def test_a_torn_file_leaves_the_running_settings_alone(tmp_path: Path) -> None:
     умолчаниям молча.
     """
     path = tmp_path / "gate-access.json"
-    running = apply_second_chance_preset(GateAccessConfig(mode="on", cooldown_seconds=10))
+    running = apply_movement_preset(GateAccessConfig(mode="on", cooldown_seconds=10))
     save_gate_access_config(path, running)
     text = path.read_text(encoding="utf-8")
     path.write_text(text[: len(text) // 2], encoding="utf-8")
@@ -178,7 +193,7 @@ def test_a_torn_file_leaves_the_running_settings_alone(tmp_path: Path) -> None:
     restored = load_gate_access_config(path, running)
 
     assert restored == running
-    assert restored.second_chance.enabled is True
+    assert restored.movement.enabled is True
 
 
 def test_saving_leaves_no_debris_behind(tmp_path: Path) -> None:
