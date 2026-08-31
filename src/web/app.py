@@ -28,6 +28,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from markupsafe import Markup
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import ColumnElement, func, select
 from sqlalchemy.orm import Session
@@ -925,6 +926,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return f"{seconds / 86400:.0f} дн назад"
 
     templates.env.filters["ago"] = _ago
+
+    def _hint(label: str, text: str) -> Markup:
+        """Значок «?» с подсказкой. Описания полей и панелей живут здесь, а не
+        абзацами под формой: пульт читается по приборам, пояснение — по
+        требованию. Один и тот же значок на всех страницах."""
+        return Markup(
+            '<span class="hint" tabindex="0" role="note" aria-label="Подсказка: {}" '
+            'data-tooltip="{}">?</span>'
+        ).format(label, text)
+
+    templates.env.globals["hint"] = _hint
     templates.env.filters["local_time"] = lambda value, pattern="%d.%m.%Y %H:%M": (
         format_local_time(value, display_timezone, pattern)
     )

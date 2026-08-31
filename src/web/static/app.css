@@ -571,7 +571,9 @@ label > input[type="checkbox"] { justify-self: start; width: 17px; height: 17px;
   z-index: 40;
   left: 50%;
   bottom: calc(100% + 8px);
-  width: min(300px, 70vw);
+  /* Подсказки панелей длиннее полевых: описание целиком переехало сюда из
+     абзацев под формой (31-08), и в 300px оно превращалось в столбик. */
+  width: min(420px, 80vw);
   padding: 9px 11px;
   border: 1px solid var(--line-strong);
   border-radius: var(--radius);
@@ -591,6 +593,8 @@ label > input[type="checkbox"] { justify-self: start; width: 17px; height: 17px;
 .hint:focus::after { opacity: 1; transform: translate(-50%, 0); }
 
 .label-with-hint { display: flex; align-items: center; gap: 6px; }
+/* Значок в заголовке панели — не крупнее текста рядом. */
+h2 .hint, h3 .hint, summary .hint { vertical-align: middle; margin-left: 2px; }
 
 /* ── Таблицы ──────────────────────────────────────────────────────────── */
 

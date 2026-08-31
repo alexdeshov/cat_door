@@ -189,3 +189,34 @@ def test_every_service_state_is_shown_in_admin() -> None:
 
 def test_internal_files_have_reasons() -> None:
     assert all(reason.strip() for reason in INTERNAL_FILES.values())
+
+
+# --- проза в шаблонах ---------------------------------------------------------
+
+# Описание, длиннее этого, — не подпись, а статья. Ей место в hint(), а не
+# абзацем под формой: пульт читается по приборам, пояснения — по требованию.
+PROSE_LIMIT = 180
+
+
+def _paragraphs(text: str) -> list[str]:
+    """Тексты статических абзацев `<p class="muted…">` — без Jinja внутри.
+
+    Абзац с `{{`/`{%` — это статус или пустое состояние, а не описание: он
+    меняется от данных и остаётся текстом."""
+    out: list[str] = []
+    for match in re.finditer(r'<p class="muted[^"]*"[^>]*>(.*?)</p>', text, re.DOTALL):
+        body = match.group(1)
+        if "{{" in body or "{%" in body:
+            continue
+        plain = re.sub(r"<[^>]+>", "", body)
+        out.append(" ".join(plain.split()))
+    return out
+
+
+def test_descriptions_live_in_hints_not_paragraphs() -> None:
+    offenders: list[str] = []
+    for template in sorted(TEMPLATES.glob("*.html")):
+        for paragraph in _paragraphs(template.read_text(encoding="utf-8")):
+            if len(paragraph) > PROSE_LIMIT:
+                offenders.append(f"{template.name}: {paragraph[:90]}… ({len(paragraph)} зн.)")
+    assert offenders == [], "описания абзацами вместо подсказок:\n  " + "\n  ".join(offenders)
