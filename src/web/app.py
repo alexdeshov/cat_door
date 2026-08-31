@@ -83,6 +83,7 @@ from src.common.circuits import (
 )
 from src.common.cloud_backup_config import (
     CloudBackupConfig,
+    cats_cloud_backup_state_path,
     cloud_backup_config_path,
     cloud_backup_state_path,
     load_cloud_backup_config,
@@ -150,6 +151,8 @@ from src.common.system_stats import (
 )
 from src.common.telegram import TelegramClient, TelegramError, hint_for
 from src.gate.access import gate_health_path
+from src.gate.notify import state_path as gate_notify_state_path
+from src.monitor.healthwatch import state_path as health_watch_state_path
 from src.recorder.detection_journal import frame_journal_path
 from src.recorder.ffmpeg import (
     RecorderError,
@@ -892,6 +895,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # конфигурации, то есть с перезапуском службы, а разбор имени зоны на
     # каждый проход в списке был бы работой впустую.
     display_timezone = ZoneInfo(settings.display_timezone)
+    def _ago(value: object) -> str:
+        """«7 мин назад» из эпохи или ISO-строки; пустое — «никогда»."""
+        if value in (None, "", 0):
+            return "никогда"
+        try:
+            moment = (
+                datetime.fromisoformat(str(value)).timestamp()
+                if isinstance(value, str)
+                else float(value)  # type: ignore[arg-type]
+            )
+        except (TypeError, ValueError):
+            return str(value)
+        seconds = max(0.0, time() - moment)
+        if seconds < 90:
+            return f"{seconds:.0f} с назад"
+        if seconds < 5400:
+            return f"{seconds / 60:.0f} мин назад"
+        if seconds < 172800:
+            return f"{seconds / 3600:.0f} ч назад"
+        return f"{seconds / 86400:.0f} дн назад"
+
+    templates.env.filters["ago"] = _ago
     templates.env.filters["local_time"] = lambda value, pattern="%d.%m.%Y %H:%M": (
         format_local_time(value, display_timezone, pattern)
     )
@@ -1876,11 +1901,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/cloud-backup/state")
     def cloud_backup_state() -> dict[str, object]:
-        """Живое состояние выгрузчика — для прогресс-бара на «Состоянии»."""
-        return _read_status(cloud_backup_state_path(settings.data_dir)) or {
+        """Живое состояние выгрузчиков — для прогресс-бара на «Состоянии».
+
+        Кошачья копия — отдельная служба со своим журналом, и её состояние
+        лежит рядом ключом `cats`: сутки после запуска его не показывал никто.
+        """
+        state = _read_status(cloud_backup_state_path(settings.data_dir)) or {
             "status": "idle",
             "message": "Выгрузчик ещё не отчитывался",
         }
+        state["cats"] = _read_status(cats_cloud_backup_state_path(settings.data_dir)) or {
+            "status": "idle",
+            "message": "Кошачья копия ещё не отчитывалась",
+        }
+        return state
 
     @app.post("/api/cloud-backup/test")
     def test_cloud_backup() -> dict[str, object]:
@@ -1970,6 +2004,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "cloud_state": _read_status(
                     cloud_backup_state_path(settings.data_dir)
                 ),
+                "cats_state": _read_status(cats_cloud_backup_state_path(settings.data_dir)),
+                "watch_state": _read_status(health_watch_state_path(settings.data_dir)),
+                "notify_state": _read_status(gate_notify_state_path(settings.data_dir)),
             },
         )
 

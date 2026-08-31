@@ -67,6 +67,7 @@
           enabled: document.querySelector("#cloud-enabled").checked,
           bucket: document.querySelector("#cloud-bucket").value.trim(),
           prefix: document.querySelector("#cloud-prefix").value.trim() || "events",
+          cameras: document.querySelector("#cloud-cameras").value.split(",").map(s => s.trim()).filter(Boolean),
           lookback_hours: Number(document.querySelector("#cloud-lookback").value),
           retention_days: Number(document.querySelector("#cloud-retention").value),
           cats_enabled: document.querySelector("#cats-enabled").checked,
@@ -251,50 +252,53 @@
   <div class="panel-body">
     <div class="controls">
       <label class="controls" style="font-size: 13px">
-        <input id="cloud-enabled" type="checkbox" {{ "checked" if cloud_backup.enabled }}>
+        <input id="cloud-enabled" data-field="enabled" type="checkbox" {{ "checked" if cloud_backup.enabled }}>
         выгружать клипы событий в бакет
       </label>
     </div>
     <div class="controls">
       <label for="cloud-bucket">бакет</label>
-      <input id="cloud-bucket" type="text" value="{{ cloud_backup.bucket }}" style="width: 14em">
+      <input id="cloud-bucket" data-field="bucket" type="text" value="{{ cloud_backup.bucket }}" style="width: 14em">
       <label for="cloud-prefix">префикс</label>
-      <input id="cloud-prefix" type="text" value="{{ cloud_backup.prefix }}" style="width: 8em">
+      <input id="cloud-prefix" data-field="prefix" type="text" value="{{ cloud_backup.prefix }}" style="width: 8em">
+      <label for="cloud-cameras">камеры</label>
+      <input id="cloud-cameras" data-field="cameras" type="text"
+        value="{{ cloud_backup.cameras | join(', ') }}" placeholder="все" style="width: 12em">
       <label for="cloud-lookback">оглядка, ч</label>
-      <input id="cloud-lookback" type="number" min="1" max="168"
+      <input id="cloud-lookback" data-field="lookback_hours" type="number" min="1" max="168"
         value="{{ cloud_backup.lookback_hours }}">
       <label for="cloud-retention">хранить, дн</label>
-      <input id="cloud-retention" type="number" min="0" max="3650"
+      <input id="cloud-retention" data-field="retention_days" type="number" min="0" max="3650"
         value="{{ cloud_backup.retention_days }}">
     </div>
     <div class="controls">
       <label class="controls" style="font-size: 13px">
-        <input id="cats-enabled" type="checkbox" {{ "checked" if cloud_backup.cats_enabled }}>
+        <input id="cats-enabled" data-field="cats_enabled" type="checkbox" {{ "checked" if cloud_backup.cats_enabled }}>
         выгружать клипы кошачьих проходов
       </label>
     </div>
     <div class="controls">
       <label for="cats-bucket">бакет котов</label>
-      <input id="cats-bucket" type="text" value="{{ cloud_backup.cats_bucket }}"
+      <input id="cats-bucket" data-field="cats_bucket" type="text" value="{{ cloud_backup.cats_bucket }}"
         placeholder="{{ cloud_backup.bucket or 'общий' }}" style="width: 14em">
       <label for="cats-prefix">префикс</label>
-      <input id="cats-prefix" type="text" value="{{ cloud_backup.cats_prefix }}" style="width: 8em">
+      <input id="cats-prefix" data-field="cats_prefix" type="text" value="{{ cloud_backup.cats_prefix }}" style="width: 8em">
       <label for="cats-retention">хранить, дн</label>
-      <input id="cats-retention" type="number" min="0" max="3650"
+      <input id="cats-retention" data-field="cats_retention_days" type="number" min="0" max="3650"
         value="{{ cloud_backup.cats_retention_days }}">
     </div>
     <div class="controls">
       <label for="cloud-endpoint">endpoint</label>
-      <input id="cloud-endpoint" type="text" value="{{ cloud_backup.endpoint }}" style="width: 18em">
+      <input id="cloud-endpoint" data-field="endpoint" type="text" value="{{ cloud_backup.endpoint }}" style="width: 18em">
       <label for="cloud-region">регион</label>
-      <input id="cloud-region" type="text" value="{{ cloud_backup.region }}" style="width: 8em">
+      <input id="cloud-region" data-field="region" type="text" value="{{ cloud_backup.region }}" style="width: 8em">
     </div>
     <div class="controls">
       <label for="cloud-key-id">key id</label>
-      <input id="cloud-key-id" type="text" autocomplete="off"
+      <input id="cloud-key-id" data-field="access_key_id" type="text" autocomplete="off"
         placeholder="{{ cloud_backup.access_key_id or 'не задан' }}" style="width: 12em">
       <label for="cloud-secret">secret</label>
-      <input id="cloud-secret" type="password" autocomplete="new-password"
+      <input id="cloud-secret" data-field="secret_key" type="password" autocomplete="new-password"
         placeholder="{{ 'сохранён' if cloud_backup.has_secret else 'не задан' }}" style="width: 14em">
       <button id="save-cloud" type="button">Сохранить</button>
       <button id="test-cloud" type="button">Проверить соединение</button>
@@ -379,6 +383,45 @@
       {% endfor %}
     </div>
   </section>
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>Службы узла</h2>
+    <span class="muted">то, что они пишут о себе</span>
+  </div>
+  <div class="panel-body">
+    <dl class="readouts">
+      <dt>Сторож здоровья</dt>
+      <dd class="data">
+        {% if watch_state and watch_state.checked_at %}
+          последний круг {{ watch_state.checked_at | ago }}
+          {%- if watch_state.problems %} · <span class="dash-warn">бед: {{ watch_state.problems | length }}</span>
+            — {% for key, p in watch_state.problems.items() %}{{ p.title }} (с {{ p.since | ago }}){{ ", " if not loop.last }}{% endfor %}
+          {%- else %} · бед нет{% endif %}
+          {%- if watch_state.pending %} · подтверждается: {{ watch_state.pending | length }}{% endif %}
+        {% elif watch_state %}
+          состояние есть, но без отметки круга — служба со старым кодом
+        {% else %}
+          ещё не отчитывался
+        {% endif %}
+      </dd>
+      <dt>Копия кошачьих проходов</dt>
+      <dd class="data">
+        {% if cats_state %}
+          {{ cats_state.message }}{% if cats_state.pending %} · в очереди {{ cats_state.pending }}{% endif %}
+          {%- if cats_state.updated_at %} · {{ cats_state.updated_at | ago }}{% endif %}
+        {% else %}ещё не отчитывалась{% endif %}
+      </dd>
+      <dt>Уведомления калитки</dt>
+      <dd class="data">
+        {% if notify_state and notify_state.sent %}
+          отправлено за окно наблюдения: {{ notify_state.sent | length }} ·
+          последнее событие {{ (notify_state.sent.values() | max) | ago }}
+        {% else %}за окно наблюдения ничего не отправлялось{% endif %}
+      </dd>
+    </dl>
+  </div>
+</section>
 {% endfor %}
 
 <section class="panel padded">

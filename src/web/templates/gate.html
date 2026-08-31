@@ -197,7 +197,7 @@
       ограничение — и кнопка, которая его снимает, когда железо позволит.
     </p>
     <div class="controls">
-      <button id="exclusive-toggle" type="button"
+      <button id="exclusive-toggle" data-field="exclusive" type="button"
         data-exclusive="{{ 'true' if circuits.exclusive else 'false' }}">
         {{ "Разрешить одновременную работу" if circuits.exclusive
            else "Вернуть ограничение узла" }}
@@ -220,15 +220,15 @@
   </div>
   <div class="panel-body">
     <div class="segmented" role="group" aria-label="Режим записи калитки">
-      <button type="button" class="recording-choice" data-recording="events"
+      <button type="button" class="recording-choice" data-field="gate_recording" data-recording="events"
         aria-pressed="{{ 'true' if circuits.gate_recording == 'events' else 'false' }}">
         только события
       </button>
-      <button type="button" class="recording-choice" data-recording="motion"
+      <button type="button" class="recording-choice" data-field="gate_recording" data-recording="motion"
         aria-pressed="{{ 'true' if circuits.gate_recording == 'motion' else 'false' }}">
         по движению, неделю
       </button>
-      <button type="button" class="recording-choice" data-recording="continuous"
+      <button type="button" class="recording-choice" data-field="gate_recording" data-recording="continuous"
         aria-pressed="{{ 'true' if circuits.gate_recording == 'continuous' else 'false' }}">
         круглосуточно
       </button>
@@ -302,15 +302,15 @@
   </div>
   <div class="panel-body">
     <div class="segmented" role="group" aria-label="Режим автооткрытия">
-      <button type="button" class="mode-choice" data-mode="off"
+      <button type="button" class="mode-choice" data-field="mode" data-mode="off"
         aria-pressed="{{ 'true' if gate_access.mode == 'off' else 'false' }}">
         выключено
       </button>
-      <button type="button" class="mode-choice" data-mode="dry"
+      <button type="button" class="mode-choice" data-field="mode" data-mode="dry"
         aria-pressed="{{ 'true' if gate_access.mode == 'dry' else 'false' }}">
         решать и записывать
       </button>
-      <button type="button" class="mode-choice" data-mode="on"
+      <button type="button" class="mode-choice" data-field="mode" data-mode="on"
         aria-pressed="{{ 'true' if gate_access.mode == 'on' else 'false' }}">
         открывать
       </button>
@@ -370,7 +370,7 @@
     <div class="filter-chips" id="access-names" style="margin: 0 0 12px">
       {% for name in face_library or gate_access.allowed_names %}
         <button type="button" data-name="{{ name }}"
-          class="filter-chip access-name{{ ' filter-chip-active' if name in gate_access.allowed_names }}"
+          data-field="allowed_names" class="filter-chip access-name{{ ' filter-chip-active' if name in gate_access.allowed_names }}"
           aria-pressed="{{ 'true' if name in gate_access.allowed_names else 'false' }}">
           {{ name }}
         </button>
@@ -386,15 +386,15 @@
 
     <div class="controls">
       <label for="access-min-score">порог узнавания</label>
-      <input id="access-min-score" type="number" min="0" max="1" step="0.01"
+      <input id="access-min-score" data-field="min_score" type="number" min="0" max="1" step="0.01"
         value="{{ gate_access.min_score }}">
       <label for="access-cooldown">пауза, с</label>
-      <input id="access-cooldown" type="number" min="0" max="3600"
+      <input id="access-cooldown" data-field="cooldown_seconds" type="number" min="0" max="3600"
         value="{{ gate_access.cooldown_seconds }}">
       <label for="access-from">с</label>
-      <input id="access-from" type="time" value="{{ gate_access.open_from }}">
+      <input id="access-from" data-field="open_from" type="time" value="{{ gate_access.open_from }}">
       <label for="access-to">до</label>
-      <input id="access-to" type="time" value="{{ gate_access.open_to }}">
+      <input id="access-to" data-field="open_to" type="time" value="{{ gate_access.open_to }}">
     </div>
     <p class="muted" style="font-size: 13px">
       Frigate ставит имя при 0.9 — свой порог выше намеренно. Пауза защищает от
@@ -403,10 +403,10 @@
 
     <div class="controls">
       <label for="access-relay">канал реле</label>
-      <input id="access-relay" type="number" min="1" max="8"
+      <input id="access-relay" data-field="gates.relay" type="number" min="1" max="8"
         value="{{ gate_access.gates[0].relay if gate_access.gates else 1 }}">
       <label for="access-pulse">импульс, мс</label>
-      <input id="access-pulse" type="number" min="100" max="5000" step="100"
+      <input id="access-pulse" data-field="pulse_ms" type="number" min="100" max="5000" step="100"
         value="{{ gate_access.pulse_ms }}">
     </div>
     <p class="muted" style="font-size: 13px">
@@ -417,7 +417,7 @@
 
     <div class="controls">
       <label for="access-camera">камера калитки</label>
-      <select id="access-camera">
+      <select id="access-camera" data-field="gates.camera">
         <option value="">не выбрана</option>
         {# Значение — имя камеры во Frigate, а не идентификатор инвентаря:
            события приходят с ним, и `test-cam` против `test_cam` дал бы
@@ -431,7 +431,7 @@
         {% endfor %}
       </select>
       <label for="access-zone">зона</label>
-      <input id="access-zone" type="text" placeholder="вся картинка"
+      <input id="access-zone" data-field="gates.zone" type="text" placeholder="вся картинка"
         value="{{ gate_access.gates[0].zone if gate_access.gates else '' }}">
     </div>
     <p class="muted" style="font-size: 13px">
@@ -453,10 +453,10 @@
         <div class="controls access-person" data-name="{{ person.name }}">
           <strong style="min-width: 120px">{{ person.name }}</strong>
           <label for="phone-ip-{{ loop.index }}">адрес</label>
-          <input id="phone-ip-{{ loop.index }}" class="phone-ip" type="text"
+          <input id="phone-ip-{{ loop.index }}" class="phone-ip" data-field="people.phone_ip" type="text"
             value="{{ person.phone_ip }}" placeholder="192.168.х.х">
           <label for="phone-mac-{{ loop.index }}">MAC</label>
-          <input id="phone-mac-{{ loop.index }}" class="phone-mac" type="text"
+          <input id="phone-mac-{{ loop.index }}" class="phone-mac" data-field="people.phone_mac" type="text"
             placeholder="{{ person.phone_mac or 'не задан' }}">
         </div>
       {% else %}
@@ -472,7 +472,7 @@
       узле и в репозиторий не попадают.
     </p>
     <label class="controls" style="font-size: 13px">
-      <input id="access-second-factor" type="checkbox"
+      <input id="access-second-factor" data-field="require_second_factor" type="checkbox"
         {{ 'checked' if gate_access.require_second_factor }}>
       требовать телефон обязательно
     </label>
@@ -500,25 +500,25 @@
     </p>
     <div class="controls">
       <label class="controls" style="font-size: 13px">
-        <input id="movement-enabled" type="checkbox"
+        <input id="movement-enabled" data-field="movement.enabled" type="checkbox"
           {{ "checked" if gate_access.movement.enabled }}>
         учитывать направление
       </label>
       <label class="controls" style="font-size: 13px">
-        <input id="movement-still" type="checkbox"
+        <input id="movement-still" data-field="movement.open_when_still" type="checkbox"
           {{ "checked" if gate_access.movement.open_when_still }}>
         пускать вернувшегося
       </label>
     </div>
     <div class="controls">
       <label for="movement-approaching">идёт к калитке, если вырос в</label>
-      <input id="movement-approaching" type="number" min="1.1" max="20" step="0.1"
+      <input id="movement-approaching" data-field="movement.approaching_ratio" type="number" min="1.1" max="20" step="0.1"
         value="{{ gate_access.movement.approaching_ratio }}">
       <label for="movement-leaving">уходит, если упал до</label>
-      <input id="movement-leaving" type="number" min="0.05" max="0.95" step="0.05"
+      <input id="movement-leaving" data-field="movement.leaving_ratio" type="number" min="0.05" max="0.95" step="0.05"
         value="{{ gate_access.movement.leaving_ratio }}">
       <label for="movement-window">окно возвращения, с</label>
-      <input id="movement-window" type="number" min="0" max="600"
+      <input id="movement-window" data-field="movement.return_window_seconds" type="number" min="0" max="600"
         value="{{ gate_access.movement.return_window_seconds }}">
     </div>
     <div class="controls">

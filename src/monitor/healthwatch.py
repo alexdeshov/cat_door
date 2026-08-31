@@ -388,6 +388,9 @@ def run(*, once: bool = False) -> None:
         if delivered:
             # Без бота заметка тоже снимается: вечный повтор в журнал — шум.
             state.pop("boot_note", None)
+        # Отметка круга — чтобы страница «Состояние» видела, жив ли сам сторож:
+        # за сторожем смотрит только systemd, а он о молчании не скажет.
+        state["checked_at"] = time.time()
         save_state(path, state)
         notifier.watchdog()
         if once:

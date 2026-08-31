@@ -23,13 +23,13 @@
        чтобы выключение контура не стирало выбор между наблюдением и записью. #}
     <div class="segmented" role="group" aria-label="Автоматический сбор">
       <button type="button" class="capture-choice" {{ "disabled" if not circuits.cats }}
-        data-state="off"
+        data-state="off" data-field="state"
         aria-pressed="{{ 'true' if capture_state == 'off' else 'false' }}">выключен</button>
       <button type="button" class="capture-choice" {{ "disabled" if not circuits.cats }}
-        data-state="observe"
+        data-state="observe" data-field="state"
         aria-pressed="{{ 'true' if capture_state == 'observe' else 'false' }}">наблюдение</button>
       <button type="button" class="capture-choice" {{ "disabled" if not circuits.cats }}
-        data-state="record"
+        data-state="record" data-field="state"
         aria-pressed="{{ 'true' if capture_state == 'record' else 'false' }}">запись</button>
     </div>
     <span id="capture-mode-status" class="muted data" style="font-size: 12px"></span>
@@ -262,11 +262,11 @@
   </div>
   <div class="panel-body">
     <div class="segmented" role="group" aria-label="Режим дверцы">
-      <button type="button" class="door-mode" data-mode="off"
+      <button type="button" class="door-mode" data-field="mode" data-mode="off"
         aria-pressed="{{ 'true' if cat_door.mode == 'off' else 'false' }}">выключено</button>
-      <button type="button" class="door-mode" data-mode="dry"
+      <button type="button" class="door-mode" data-field="mode" data-mode="dry"
         aria-pressed="{{ 'true' if cat_door.mode == 'dry' else 'false' }}">решать и записывать</button>
-      <button type="button" class="door-mode" data-mode="on"
+      <button type="button" class="door-mode" data-field="mode" data-mode="on"
         aria-pressed="{{ 'true' if cat_door.mode == 'on' else 'false' }}">открывать</button>
     </div>
     <div class="controls">
@@ -277,7 +277,7 @@
     <div class="filter-chips" id="door-cats" style="margin: 0 0 12px">
       {% for name in known_cat_names %}
         <button type="button" data-name="{{ name }}"
-          class="filter-chip door-cat{{ ' filter-chip-active' if name in cat_door.allowed_cats }}"
+          data-field="allowed_cats" class="filter-chip door-cat{{ ' filter-chip-active' if name in cat_door.allowed_cats }}"
           aria-pressed="{{ 'true' if name in cat_door.allowed_cats else 'false' }}">{{ name }}</button>
       {% endfor %}
     </div>
@@ -303,21 +303,21 @@
     </p>
     <div class="controls">
       <label for="door-relay">канал реле</label>
-      <input id="door-relay" type="number" min="1" max="8" value="{{ cat_door.relay }}">
+      <input id="door-relay" data-field="relay" type="number" min="1" max="8" value="{{ cat_door.relay }}">
       <label for="door-hold">держать, мс</label>
-      <input id="door-hold" type="number" min="200" max="15000" step="100"
+      <input id="door-hold" data-field="hold_ms" type="number" min="200" max="15000" step="100"
         value="{{ cat_door.hold_ms }}">
       <label for="door-confidence">порог опознания</label>
-      <input id="door-confidence" type="number" min="0" max="1" step="0.01"
+      <input id="door-confidence" data-field="min_confidence" type="number" min="0" max="1" step="0.01"
         value="{{ cat_door.min_confidence }}">
       <label for="door-confirm">кадров подряд</label>
-      <input id="door-confirm" type="number" min="1" max="30"
+      <input id="door-confirm" data-field="confirm_frames" type="number" min="1" max="30"
         value="{{ cat_door.confirm_frames }}">
       <label for="door-cooldown">пауза, с</label>
-      <input id="door-cooldown" type="number" min="0" max="3600"
+      <input id="door-cooldown" data-field="cooldown_seconds" type="number" min="0" max="3600"
         value="{{ cat_door.cooldown_seconds }}">
       <label for="door-delay">ждать после опознания, с</label>
-      <input id="door-delay" type="number" min="0" max="30" step="0.5"
+      <input id="door-delay" data-field="open_delay_seconds" type="number" min="0" max="30" step="0.5"
         value="{{ cat_door.open_delay_seconds }}">
     </div>
     <p class="muted" style="font-size: 13px">
