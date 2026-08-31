@@ -165,6 +165,14 @@ from src.recorder.preview import local_mjpeg_stream, preview_is_fresh, preview_p
 from src.recorder.status import read_recorder_status, recorder_status_path
 from src.web.door_monitor import DoorMonitor
 from src.web.live_stream import resilient_mjpeg_stream, until
+from src.web.logs import (
+    DEFAULT_LINES,
+    MAX_LINES,
+    SOURCE_BY_KEY,
+    SOURCES,
+    clamp_lines,
+    read_log,
+)
 from training.workflow import write_status
 
 LABELS = {"pending", "known_cat", "foreign_cat", "not_visible", "multiple_cats"}
@@ -2009,6 +2017,33 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "notify_state": _read_status(gate_notify_state_path(settings.data_dir)),
             },
         )
+
+    @app.get("/logs", response_class=HTMLResponse)
+    def logs_page(request: Request, source: str = "recorder") -> HTMLResponse:
+        selected = source if source in SOURCE_BY_KEY else "recorder"
+        return templates.TemplateResponse(
+            request,
+            "logs.html",
+            {
+                "circuit": "logs",
+                "sources": SOURCES,
+                "selected": selected,
+                "lines": DEFAULT_LINES,
+                "max_lines": MAX_LINES,
+                "hints": {item.key: item.hint for item in SOURCES},
+            },
+        )
+
+    @app.get("/api/logs/{source}")
+    def logs_api(source: str, lines: int | None = None) -> dict[str, object]:
+        """Хвост журнала одним куском. Фильтр — на стороне страницы: строк
+        мало, а серверный grep означал бы второй вызов journalctl на каждую
+        букву в поле фильтра."""
+        item = SOURCE_BY_KEY.get(source)
+        if item is None:
+            raise HTTPException(404, f"Нет такого журнала: {source}")
+        text, error = read_log(item, settings.data_dir, clamp_lines(lines))
+        return {"source": item.key, "title": item.title, "text": text, "error": error}
 
     @app.get("/api/recorder/status")
     def recorder_status() -> dict[str, object]:

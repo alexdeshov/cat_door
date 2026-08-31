@@ -70,6 +70,15 @@ for unit in catdoor-recorder.service catdoor-web.service \
     install -m 644 "$REPO_DIR/install/$unit" "$UNIT_DIR/$unit"
 done
 
+# Журналы служб читаются со страницы «Журналы» самой веб-службой: без членства
+# в systemd-journal journalctl отвечает «No journal files were found», и страница
+# неотличима от пустого журнала. Членство применяется при старте процесса —
+# отсюда перезапуск веб-службы ниже.
+if ! id -nG "$SERVICE_USER" | tr " " "\n" | grep -qx systemd-journal; then
+    usermod -aG systemd-journal "$SERVICE_USER"
+    echo "пользователь $SERVICE_USER добавлен в systemd-journal (журналы в админке)"
+fi
+
 systemctl daemon-reload
 systemctl enable catdoor-recorder.service catdoor-web.service >/dev/null
 # Запрет турбо-частот — лекарство от слабого кулера конкретного железа, а не
