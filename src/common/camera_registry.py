@@ -246,10 +246,6 @@ class CameraRecord(BaseModel):
             self.preview_stream_path or self.detect_stream_path or self.stream_path
         )
 
-    def stream_signature(self) -> tuple[str, bool]:
-        """То, из-за чего поток приходится пересоздавать."""
-        return (self.rtsp_url(), self.rotate_180)
-
 
 class CameraRegistry(BaseModel):
     version: int = REGISTRY_VERSION
@@ -296,10 +292,6 @@ class CameraRegistry(BaseModel):
             if by_role is not None:
                 return by_role
         return self.get(name)
-
-    def role_of(self, camera_id: str) -> CameraRole | None:
-        camera = self.get(camera_id)
-        return camera.role if camera is not None else None
 
     def with_camera(self, camera: CameraRecord) -> CameraRegistry:
         """Добавить или заменить запись, освободив роль у прежнего владельца.

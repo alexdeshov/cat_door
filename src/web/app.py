@@ -3104,12 +3104,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             (settings.identity_face_model_path, settings.identity_side_model_path)
         )
 
-    @app.get("/api/metrics/online")
-    def online_metrics(
-        session: Annotated[Session, Depends(get_session)],
-    ) -> dict[str, object]:
-        return build_online_metrics(session, known_names=installed_cat_names())
-
     @app.get("/metrics", response_class=HTMLResponse)
     def metrics_page(
         request: Request,
