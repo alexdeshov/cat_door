@@ -230,3 +230,29 @@ def test_an_undelivered_boot_note_is_retried_next_cycle(monkeypatch) -> None:
     assert first is not None and first.startswith("🔄")
     assert retried == first
     assert calm is None
+
+
+def test_every_installed_service_is_watched() -> None:
+    """Служба без строки в `WATCHED_UNITS` — слепое пятно.
+
+    Кошачья облачная копия появилась 30 августа и сутки жила ненаблюдаемой:
+    упади она — сторож промолчал бы. Список сверяется с каталогом `install/`,
+    а не ведётся руками: рукописный список и был причиной.
+
+    Исключения названы поимённо и с причиной: сторож не наблюдает сам себя
+    (упавший сторож не сообщит о себе по построению — за ним смотрит systemd
+    через `Restart=`), а `cpu-thermal` выключен по замыслу на этом железе.
+    """
+    from pathlib import Path
+
+    from src.monitor.healthwatch import WATCHED_UNITS
+
+    install = Path(__file__).resolve().parents[1] / "install"
+    installed = {p.stem for p in install.glob("catdoor-*.service")}
+    exempt = {"catdoor-healthwatch", "catdoor-cpu-thermal", "catdoor-backup", "catdoor-gate-sync"}
+    # backup и gate-sync — oneshot по таймеру: `is-active` у них почти всегда
+    # inactive, и это норма; их беды видны иначе (отчёт копии, примиритель).
+
+    unwatched = installed - set(WATCHED_UNITS) - exempt
+
+    assert unwatched == set()

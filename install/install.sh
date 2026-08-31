@@ -65,7 +65,8 @@ for unit in catdoor-recorder.service catdoor-web.service \
         catdoor-cloud-backup.service catdoor-cloud-backup-cats.service \
         catdoor-healthwatch.service \
         catdoor-cpu-thermal.service \
-        catdoor-backup.service catdoor-backup.timer; do
+        catdoor-backup.service catdoor-backup.timer \
+        wifi-keepalive.service; do
     install -m 644 "$REPO_DIR/install/$unit" "$UNIT_DIR/$unit"
 done
 
@@ -100,6 +101,14 @@ systemctl enable catdoor-cloud-backup-cats.service >/dev/null
 # журнал, а забытый enable означал бы, что после перезагрузки за узлом снова
 # никто не смотрит — ровно та слепота 2026-08-21, ради которой он написан.
 systemctl enable --now catdoor-healthwatch.service >/dev/null
+# Заплатка Wi-Fi — по той же логике, что запрет турбо-частот: лекарство от
+# конкретного железа, а не часть CatDoor. Где уже включена — сохраняется, на
+# свежем узле включается только явной просьбой.
+if systemctl is-enabled --quiet wifi-keepalive.service 2>/dev/null \
+        || [ "${CATDOOR_WIFI_KEEPALIVE:-0}" = "1" ]; then
+    systemctl enable --now wifi-keepalive.service >/dev/null
+    echo "заплатка Wi-Fi включена (wifi-keepalive)"
+fi
 
 # Уведомления о калитке включаются только там, где настроен бот: без токена
 # служба падала бы каждые пять секунд и засыпала журнал одной и той же жалобой.
