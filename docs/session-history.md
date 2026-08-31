@@ -5552,3 +5552,30 @@ oneshot по таймеру, у них `inactive` — норма).
   `docs/architecture.md`, `docs/reference-configuration.md`.
 - Проверки: `pytest` 999 passed; `ruff` чист; `mypy` чист.
 - Статус: первый из трёх PR аудита.
+
+## 2026-08-31 — Аудит, часть 2: уборка
+
+Что убрано и почему это было мёртвым:
+
+- `CameraRecord.stream_signature()` и `CameraRegistry.role_of()` — ни одного
+  вызова во всём дереве, включая тесты.
+- `scripts/smoke_ring_capture.py` — дымовой тест кольцевого буфера от 29 июля,
+  Windows-эпоха; ни одной ссылки.
+- `GET /api/metrics/online` — ни один шаблон и скрипт его не звал: страница
+  метрик собирает те же числа на сервере через `build_online_metrics`.
+- Шесть `docs/codex-*-prompt.md` от июля переехали в `docs/archive/` с
+  пояснением: это задания для Codex, а не инструкции.
+- На узле: `/opt/catdoor/kernel.errors.txt` (10-08, разбор VA-API) и
+  `models/*.bak` (13-08, копии перед активацией). `data/test-runtime/…/catdoor.sqlite3`
+  — та самая паразитная база от `Settings()` без окружения службы — создана от
+  имени службы и требует `sudo` владельца.
+
+Переименована панель на главной: «Кошачья дверь» → «Контроллер дверцы». Рядом
+стояла «Кошачья дверца» (настройки автоматики), и по заголовку их было не
+отличить; новая говорит, что внутри — живые показания геркона и замка.
+
+- Изменённые файлы: `src/common/camera_registry.py`, `src/web/app.py`,
+  `src/web/templates/index.html`, `docs/roadmap.md`, `docs/archive/*`;
+  удалён `scripts/smoke_ring_capture.py`.
+- Проверки: `pytest` 999 passed; `ruff` чист; `mypy` чист.
+- Статус: завершено. Следующий PR — вырезание «второго шанса».
