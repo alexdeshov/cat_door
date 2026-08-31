@@ -41,12 +41,37 @@ def test_path_settings_are_absolute() -> None:
         assert assignments[key].startswith("/"), f"{key} is not absolute"
 
 
-def test_every_documented_key_exists_in_settings() -> None:
-    """An unknown key is silently dropped by extra="ignore", so it would lie."""
-    fields = set(Settings.model_fields)
-    unknown = [
-        key
-        for key in _assignments()
-        if key.removeprefix("CATDOOR_").lower() not in fields
-    ]
+def _shell_keys() -> set[str]:
+    """Keys the backup shell script reads. It has its own settings — retention
+    windows, archive paths — and they never reach `Settings`.
+
+    Read out of the script rather than listed here on purpose: a hand-kept list
+    would happily accept a typo, which is the one thing this file exists to
+    catch.
+    """
+    scripts = Path(__file__).resolve().parent.parent / "scripts"
+    text = (scripts / "backup_to_archive.sh").read_text(encoding="utf-8")
+    return set(re.findall(r"\$\{(CATDOOR_[A-Z0-9_]+)", text))
+
+
+def test_every_documented_key_is_read_by_something() -> None:
+    """An unknown key is silently dropped by extra="ignore", so it would lie.
+
+    Two readers, not one: most keys land in `Settings`, but the backup script
+    is a shell script with its own. Until 31.08 its unit had no
+    `EnvironmentFile` at all, so none of them were read anywhere — documented
+    and dead at the same time.
+    """
+    known = {f"CATDOOR_{name.upper()}" for name in Settings.model_fields} | _shell_keys()
+
+    unknown = [key for key in _assignments() if key not in known]
+
     assert unknown == []
+
+
+def test_the_backup_unit_can_actually_receive_its_keys() -> None:
+    """Documenting a key for a service that reads no environment file is a lie
+    of the same kind: it looks configurable and is not."""
+    unit = Path(__file__).resolve().parent.parent / "install" / "catdoor-backup.service"
+
+    assert "EnvironmentFile" in unit.read_text(encoding="utf-8")

@@ -322,3 +322,32 @@ def test_the_cloud_backup_service_starts_after_a_reboot() -> None:
     script = (Path("install") / "install.sh").read_text(encoding="utf-8")
 
     assert "systemctl enable catdoor-cloud-backup.service" in script
+
+
+# Юниты, которым настройки приходят из окружения. Список отдельный от UNITS:
+# те проверки про sd_notify и пользователя, а эта — про то, что настраивать
+# службу вообще возможно.
+CONFIGURED_UNITS = (
+    "catdoor-recorder.service",
+    "catdoor-web.service",
+    "catdoor-gate-access.service",
+    "catdoor-cloud-backup.service",
+    "catdoor-cloud-backup-cats.service",
+    "catdoor-backup.service",
+)
+
+
+@pytest.mark.parametrize("name", CONFIGURED_UNITS)
+def test_unit_reads_the_environment_file(name: str) -> None:
+    """Служба без `EnvironmentFile` неотличима от настроенной, пока настройка не
+    понадобится.
+
+    У `catdoor-backup.service` строки не было с самого начала, и все её
+    переменные — сроки хранения, пути, окно подрезки зеркала проходов — при
+    запуске по таймеру молча брали умолчания. Обнаружилось 31 августа: попытка
+    включить подрезку через `/etc/catdoor/catdoor.env` не дала бы ничего, и
+    понять это по журналу было бы невозможно — скрипт отработал бы «успешно».
+    """
+    value = _unit(name)["Service"]["EnvironmentFile"]
+
+    assert value.lstrip("-") == "/etc/catdoor/catdoor.env"
