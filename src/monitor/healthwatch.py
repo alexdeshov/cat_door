@@ -68,6 +68,11 @@ WATCHED_UNITS = (
     "catdoor-gate-access",
     "catdoor-gate-notify",
     "catdoor-cloud-backup",
+    # Кошачья копия появилась 30 августа, а в этот список попала только 31-го,
+    # аудитом: новая служба без строки здесь — слепое пятно, о падении которого
+    # никто не скажет. Тест `test_every_installed_service_is_watched` не даст
+    # повториться.
+    "catdoor-cloud-backup-cats",
     # Инфраструктура узла — не catdoor, но без неё контуры слепнут.
     # 2026-08-21 dnsmasq не поднялся после обрыва питания из-за забытого
     # .bak-файла в /etc/dnsmasq.d, камеры на DHCP остались без адресов —
