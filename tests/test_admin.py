@@ -3540,3 +3540,36 @@ def test_gate_passes_api_serves_the_journal_for_audit(
     assert row["pulses"] == 1
     assert row["pulse_gate_state"] == "closed"
     assert row["created_at"].startswith("2026-08-20T09:00:00")
+
+
+def test_the_camera_card_offers_the_decode_path(runtime_path: Path, monkeypatch) -> None:
+    """Путь декодирования задаётся из админки, а не только через API.
+
+    До 31 августа поле жило в модели и в ответе API, но формы у него не было:
+    настройка, которой нельзя воспользоваться. Цена этого выяснилась на седьмой
+    камере — она встала на `auto`, то есть на VA-API, и падала раз в минуту с
+    «Failed to sync surface», пока путь не досылали запросом мимо интерфейса.
+    """
+    client = make_client(runtime_path, monkeypatch)
+    client.post(
+        "/api/cameras",
+        json={"id": "terr", "title": "на террасе", "host": "192.168.1.67",
+              "circuit": "nvr", "decode": "qsv"},
+    )
+
+    page = client.get("/cameras")
+
+    assert 'data-field="decode"' in page.text
+    # Сохранённое значение выбрано, а не сброшено на умолчание: иначе первое же
+    # сохранение соседнего поля вернуло бы камеру на ломающийся VA-API.
+    assert '<option value="qsv" selected>QuickSync</option>' in page.text
+
+
+def test_saving_the_card_keeps_the_decode_path(runtime_path: Path, monkeypatch) -> None:
+    client = make_client(runtime_path, monkeypatch)
+    client.post("/api/cameras", json={"id": "terr", "host": "192.168.1.67", "decode": "qsv"})
+
+    updated = client.put("/api/cameras/terr", json={"host": "192.168.1.68", "decode": "qsv"}).json()
+
+    assert updated["decode"] == "qsv"
+    assert updated["host"] == "192.168.1.68"
