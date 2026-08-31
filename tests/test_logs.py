@@ -45,7 +45,7 @@ def test_empty_journal_is_not_an_error(monkeypatch) -> None:
 
 
 def test_forbidden_journal_names_the_fix(monkeypatch) -> None:
-    monkeypatch.setattr(subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 1, "", "No journal files were found.\n"))
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 1, "", "Hint: You are currently not seeing messages from other users and the system.\nNo journal files were opened due to insufficient permissions.\n"))
 
     text, error = read_unit_log("catdoor-recorder", 50)
 

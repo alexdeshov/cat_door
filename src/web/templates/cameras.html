@@ -2,15 +2,10 @@
 {% set circuit = "cameras" %}
 {% block title %}CatDoor — камеры{% endblock %}
 
-{% macro hint(label, text) -%}
-<span class="hint" tabindex="0" role="note" aria-label="Подсказка: {{ label }}"
-  data-tooltip="{{ text }}">?</span>
-{%- endmacro %}
-
 {% block content %}
 <section class="panel">
   <div class="panel-head">
-    <h2>Роли</h2>
+    <h2>Роли {{ hint("Роли", "Роли живут отдельно от камер: на них завязаны детектор, таблицы событий и модели по ракурсам. Переставили камеры местами — смените роль, адреса трогать не нужно. Настройки детекции остаются за ролью: они описывают сцену, а не железку.") }}</h2>
     <div class="controls" style="margin-left: auto">
       <button id="swap-roles" type="button">Поменять роли местами</button>
       <span id="swap-status" class="muted"></span>
@@ -47,12 +42,6 @@
         </div>
       {% endfor %}
     </div>
-    <p class="muted" style="font-size: 13px">
-      Роли живут отдельно от камер: на них завязаны детектор, таблицы событий и
-      модели по ракурсам. Переставили камеры местами — смените роль, адреса
-      трогать не нужно. Настройки детекции остаются за ролью: они описывают
-      сцену, а не железку.
-    </p>
   </div>
 </section>
 
@@ -321,7 +310,7 @@
 
 <section class="panel">
   <div class="panel-head">
-    <h2>Настройки детекции</h2>
+    <h2>Настройки детекции {{ hint("Настройки детекции", "Recorder применяет настройки на ходу, когда автомат событий находится в состоянии ожидания.") }}</h2>
     <span class="muted">принадлежат роли, а не камере</span>
     <div class="controls" style="margin-left: auto">
       <button id="save-detection-settings" class="primary" type="button">Сохранить</button>
@@ -438,10 +427,6 @@
           value="{{ detection_config.max_event_seconds }}">
       </label>
     </div>
-    <p class="muted" style="font-size: 13px">
-      Recorder применяет настройки на ходу, когда автомат событий находится
-      в состоянии ожидания.
-    </p>
   </div>
 </section>
 {% endblock %}

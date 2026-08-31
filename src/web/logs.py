@@ -93,7 +93,8 @@ def read_unit_log(unit: str, lines: int) -> tuple[str, str | None]:
         return "", f"journalctl не ответил за {TIMEOUT_SECONDS:.0f} с"
     if result.returncode != 0:
         detail = (result.stderr or result.stdout).strip()
-        if "No journal files were found" in detail or "not permitted" in detail.lower():
+        lowered = detail.lower()
+        if any(sign in lowered for sign in ("no journal files", "insufficient permissions", "not permitted")):
             detail = (
                 "службе не дали читать журнал: пользователь catdoor должен быть в группе "
                 "systemd-journal (делает install/install.sh), после — перезапуск catdoor-web"
