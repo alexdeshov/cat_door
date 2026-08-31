@@ -160,6 +160,16 @@
             <input data-field="preview_stream_path" type="text"
               value="{{ camera.preview_stream_path }}" placeholder="самый мелкий поток камеры">
           </label>
+          <label>
+            <span class="label-with-hint">Декодирование
+              {{ hint("путь декодирования", "Чем Frigate раскодирует поток камеры. «Автоматически» на этом узле означает VA-API, а он на Gen12 ломается в известном месте драйвера: ffmpeg падает раз в 1–3 минуты с «Failed to sync surface», и камера не пишет и не считает. Лекарство — QuickSync: то же видеоядро другим путём. Программный путь работает с чем угодно, но стоит около трети ядра на камеру. Камеры регистратора переведены на QuickSync 9 августа именно поэтому.") }}
+            </span>
+            <select data-field="decode">
+              <option value="auto" {{ "selected" if camera.decode == "auto" }}>автоматически (VA-API)</option>
+              <option value="qsv" {{ "selected" if camera.decode == "qsv" }}>QuickSync</option>
+              <option value="software" {{ "selected" if camera.decode == "software" }}>программное</option>
+            </select>
+          </label>
           <label>Логин
             <input data-field="username" type="text" value="{{ camera.username }}" autocomplete="off">
           </label>
@@ -274,6 +284,13 @@
       </label>
       <label>Поток для превью
         <input data-field="preview_stream_path" type="text" placeholder="самый мелкий поток камеры">
+      </label>
+      <label>Декодирование
+        <select data-field="decode">
+          <option value="auto" selected>автоматически (VA-API)</option>
+          <option value="qsv">QuickSync</option>
+          <option value="software">программное</option>
+        </select>
       </label>
       <label>Логин
         <input data-field="username" type="text" autocomplete="off">
