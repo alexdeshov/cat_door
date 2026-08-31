@@ -539,73 +539,6 @@
 
     </details>
 
-    <details class="folded">
-      <summary>Второй шанс
-        <span class="state-line data">
-          {{ "включён" if gate_access.second_chance.enabled else "выключен" }} ·
-          {{ gate_access.second_chance.max_pulses }} имп ·
-          {{ gate_access.second_chance.gap_seconds }} с</span>
-      </summary>
-    <h3 style="margin: 16px 0 8px; font-size: 15px">Второй шанс</h3>
-    <p class="muted" style="font-size: 13px">
-      Одно событие — один импульс: это защита от качания, из-за которой калитка
-      однажды щёлкала каждые две секунды. У неё есть цена. Если импульс попал в
-      уже открытую створку, он пропал зря, а человек перед закрывшейся калиткой
-      остаётся ни с чем, пока не выйдет из кадра: для Frigate он всё ещё то же
-      событие. Правило говорит: <strong>наш импульс пропал зря, створка с тех
-      пор закрылась, а человек всё ещё здесь — открыть ещё раз.</strong>
-    </p>
-    <p class="muted" style="font-size: 13px">
-      «Пропал зря» проверяется по состоянию створки в момент импульса. Закрыта —
-      значит защёлку отпустили для человека, он открыл и прошёл. Открыта —
-      значит защёлка и так была отпущена, и наш импульс ничего не изменил.
-      Второй шанс полагается только этому случаю: без такой проверки калитка
-      пикает вслед прошедшему, что она 12 августа и делала.
-    </p>
-    <div class="controls">
-      <label class="controls" style="font-size: 13px">
-        <input id="chance-enabled" type="checkbox"
-          {{ "checked" if gate_access.second_chance.enabled }}>
-        давать второй шанс
-      </label>
-      <label class="controls" style="font-size: 13px">
-        <input id="chance-closed" type="checkbox"
-          {{ "checked" if gate_access.second_chance.require_closed }}>
-        только если створка закрылась
-      </label>
-    </div>
-    <div class="controls">
-      <label for="chance-max">импульсов на проход</label>
-      <input id="chance-max" type="number" min="1" max="5"
-        value="{{ gate_access.second_chance.max_pulses }}">
-      <label for="chance-gap">пауза между ними, с</label>
-      <input id="chance-gap" type="number" min="1" max="120"
-        value="{{ gate_access.second_chance.gap_seconds }}">
-    </div>
-    <div class="controls">
-      <button id="apply-chance-preset" type="button">
-        Накатить пресет «{{ gate_access.chance_preset_name }}»
-      </button>
-      <button id="rollback-chance-preset" type="button"
-        {{ "" if gate_access.chance_preset_applied else "disabled" }}>
-        Вернуть как было
-      </button>
-      <span id="chance-preset-status" class="muted data" style="font-size: 12px">
-        {{ "пресет применён" if gate_access.chance_preset_applied else "" }}
-      </span>
-    </div>
-    <p class="muted" style="font-size: 13px">
-      Пресет отдельный от правил движения намеренно: они решают разные задачи.
-      Правила движения отказывают уходящему, второй шанс доводит до конца
-      открытие тому, кто пришёл. Откат одного не роняет другой.
-      {% if not gate_access.second_chance.require_closed %}
-        <strong>Условие про створку выключено</strong> — единственной защитой от
-        очереди импульсов осталась пауза между ними.
-      {% endif %}
-    </p>
-
-
-    </details>
   </div>
 </section>
 </aside>
@@ -647,12 +580,6 @@
         approaching_ratio: Number(document.querySelector("#movement-approaching").value),
         leaving_ratio: Number(document.querySelector("#movement-leaving").value),
         return_window_seconds: Number(document.querySelector("#movement-window").value)
-      },
-      second_chance: {
-        enabled: document.querySelector("#chance-enabled").checked,
-        require_closed: document.querySelector("#chance-closed").checked,
-        max_pulses: Number(document.querySelector("#chance-max").value),
-        gap_seconds: Number(document.querySelector("#chance-gap").value)
       },
       min_score: Number(document.querySelector("#access-min-score").value),
       cooldown_seconds: Number(document.querySelector("#access-cooldown").value),
@@ -715,12 +642,6 @@
 
   document.querySelector("#apply-preset")?.addEventListener("click", () => preset(false));
   document.querySelector("#rollback-preset")?.addEventListener("click", () => preset(true));
-
-  const chancePreset = {route: "second-chance-preset", box: "#chance-preset-status"};
-  document.querySelector("#apply-chance-preset")
-    ?.addEventListener("click", () => preset(false, chancePreset));
-  document.querySelector("#rollback-chance-preset")
-    ?.addEventListener("click", () => preset(true, chancePreset));
 
   document.querySelector("#save-access-settings").addEventListener("click", async event => {
     const button = event.currentTarget;

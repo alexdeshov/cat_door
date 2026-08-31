@@ -157,11 +157,11 @@ class GatePass(Base):
     pulse_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     modbus_ok: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     # Сколько импульсов ушло по этому проходу и когда последний. Больше одного
-    # бывает только при включённом втором шансе.
+    # бывает только у строк до 31 августа, когда ещё жил «второй шанс».
     pulses: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     last_pulse_at: Mapped[float | None] = mapped_column(Float, nullable=True)
-    # Какой была створка в момент импульса. По этому второй шанс отличает
-    # пропавший зря импульс от использованного.
+    # Какой была створка в момент импульса. Заведено для «второго шанса»
+    # (вырезан 31-08); осталось как память: по нему разбираются старые строки.
     pulse_gate_state: Mapped[str | None] = mapped_column(String(20), nullable=True)
     # Открылась ли калитка на самом деле. Геркона на ней нет — поля заведены
     # заранее и остаются пустыми. Ответ на тот же вопрос приходит от
