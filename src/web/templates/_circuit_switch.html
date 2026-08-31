@@ -8,7 +8,7 @@
    Обёртки нет намеренно: строка состояния сверстана сеткой в три колонки, и
    собственный контейнер уехал бы четвёртой ячейкой на новую строку. Каждая
    страница кладёт этот кусок в свою ячейку. #}
-<button id="circuit-toggle" type="button"
+<button id="circuit-toggle" data-field="circuit" type="button"
   class="{{ 'primary' if not circuits[circuit] }}"
   data-circuit="{{ circuit }}" data-enabled="{{ 'true' if circuits[circuit] else 'false' }}">
   {{ "Выключить контур" if circuits[circuit] else "Включить контур" }}

@@ -1586,7 +1586,7 @@ def test_switch_shows_the_current_mode(runtime_path: Path, monkeypatch) -> None:
     assert page.text.count('class="capture-choice"') == 3
     # Нажатое положение приходит с сервера, а не выставляется скриптом после
     # загрузки: иначе переключатель на секунду показывал бы чужое состояние.
-    assert 'data-state="observe"\n        aria-pressed="true"' in page.text
+    assert 'data-state="observe" data-field="state"\n        aria-pressed="true"' in page.text
     # Режим сбора имеет смысл, только когда контур разрешён на уровне узла.
     client.put("/api/circuits", json={"circuit": "gate", "enabled": True})
     stopped = client.get("/")
@@ -3544,3 +3544,54 @@ def test_saving_the_card_keeps_the_decode_path(runtime_path: Path, monkeypatch) 
 
     assert updated["decode"] == "qsv"
     assert updated["host"] == "192.168.1.68"
+
+
+def test_the_health_page_shows_what_services_write_about_themselves(
+    runtime_path: Path, monkeypatch
+) -> None:
+    """Состояние, которое никто не показывает, всё равно что не пишется.
+
+    Сторож, кошачья копия и уведомитель калитки пишут свои файлы в runtime/;
+    до 31 августа ни один из трёх не читала ни одна страница.
+    """
+    import json
+    import time
+
+    client = make_client(runtime_path, monkeypatch)
+    runtime = runtime_path / "runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    (runtime / "health-watch.json").write_text(
+        json.dumps({
+            "checked_at": time.time() - 40,
+            "problems": {"unit:frigate": {"title": "frigate лежит", "since": time.time() - 600}},
+            "pending": {},
+        }),
+        encoding="utf-8",
+    )
+    (runtime / "cats-cloud-backup-state.json").write_text(
+        json.dumps({"status": "ok", "message": "Очередь пуста: все проходы в облаке", "pending": 0}),
+        encoding="utf-8",
+    )
+    (runtime / "gate-notify.json").write_text(
+        json.dumps({"sent": {"evt-1": time.time() - 300, "evt-2": time.time() - 120}}),
+        encoding="utf-8",
+    )
+
+    page = client.get("/health").text
+    state = client.get("/api/cloud-backup/state").json()
+
+    assert "Службы узла" in page
+    assert "frigate лежит" in page and "бед: 1" in page
+    assert "все проходы в облаке" in page
+    assert "отправлено за окно наблюдения: 2" in page
+    assert state["cats"]["message"] == "Очередь пуста: все проходы в облаке"
+
+
+def test_the_health_page_survives_missing_service_states(runtime_path: Path, monkeypatch) -> None:
+    """Свежий узел: ни один файл ещё не написан — страница обязана открыться."""
+    client = make_client(runtime_path, monkeypatch)
+
+    page = client.get("/health").text
+
+    assert "ещё не отчитывался" in page
+    assert client.get("/api/cloud-backup/state").json()["cats"]["status"] == "idle"

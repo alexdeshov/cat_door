@@ -79,6 +79,12 @@
         <input data-field="subnet" type="text" value="{{ discovery_subnet }}"
           placeholder="192.168.1.0/24">
       </label>
+      <label>
+        <span class="label-with-hint">Пробовать потоки
+          {{ hint("проба потоков", "Для каждой найденной камеры подобрать рабочий путь RTSP, взяв по кадру. Медленнее, зато поле «путь потока» заполняется само. Выключите, если нужен только список адресов: у камер калитки предел в две RTSP-сессии, и лишняя проба может отнять одну у детекции.") }}
+        </span>
+        <input data-field="probe_streams" type="checkbox" checked>
+      </label>
     </div>
     <div class="controls">
       <button id="discover" class="primary" type="button">Найти камеры</button>
@@ -337,59 +343,59 @@
         <span class="label-with-hint">Рабочий confidence
           {{ hint("рабочий confidence", "Минимальная уверенность модели, при которой кадр считается обнаружением кота. Ниже — детекция быстрее и чаще, но больше ложных срабатываний. Выше — строже, но кот может быть пропущен.") }}
         </span>
-        <input id="detection-{{ role }}-confidence-threshold" type="number" min="0" max="1" step="0.01"
+        <input id="detection-{{ role }}-confidence-threshold" data-field="{{ role }}.confidence_threshold" type="number" min="0" max="1" step="0.01"
           value="{{ camera_config.confidence_threshold }}">
       </label>
       <label>
         <span class="label-with-hint">Минимум для рамки
           {{ hint("минимум для рамки", "Минимальная уверенность для показа цветной рамки на превью. На запуск события не влияет. Ниже — видно больше слабых гипотез модели, выше — только уверенные рамки.") }}
         </span>
-        <input id="detection-{{ role }}-box-min-confidence" type="number" min="0" max="1" step="0.01"
+        <input id="detection-{{ role }}-box-min-confidence" data-field="{{ role }}.box_min_confidence" type="number" min="0" max="1" step="0.01"
           value="{{ camera_config.box_min_confidence }}">
       </label>
       <label>
         <span class="label-with-hint">Подтверждений
           {{ hint("число подтверждений", "Сколько кадров в окне должны превысить рабочий confidence. Меньше — реакция быстрее, но чувствительнее к одиночным ошибкам. Больше — стабильнее, но детекция начинается позже.") }}
         </span>
-        <input id="detection-{{ role }}-confirmation-frames" type="number" min="1" max="20"
+        <input id="detection-{{ role }}-confirmation-frames" data-field="{{ role }}.confirmation_frames" type="number" min="1" max="20"
           value="{{ camera_config.confirmation_frames }}">
       </label>
       <label>
         <span class="label-with-hint">Размер окна кадров
           {{ hint("размер окна кадров", "Число последних обработанных кадров, среди которых ищутся подтверждения. Большее окно допускает паузы между удачными кадрами, но дольше помнит старые обнаружения. Окно не должно быть меньше числа подтверждений.") }}
         </span>
-        <input id="detection-{{ role }}-window-frames" type="number" min="1" max="30"
+        <input id="detection-{{ role }}-window-frames" data-field="{{ role }}.window_frames" type="number" min="1" max="30"
           value="{{ camera_config.window_frames }}">
       </label>
       <label>
         <span class="label-with-hint">Кадров в секунду
           {{ hint("частота детектора", "Сколько кадров этой камеры анализировать каждую секунду. Больше — выше шанс поймать быстро проходящего кота, но выше нагрузка на процессор. Камере идентификации обычно полезны 6–8 FPS, камере подхода достаточно 3 FPS.") }}
         </span>
-        <input id="detection-{{ role }}-sample-fps" type="number" min="0.1" max="10" step="0.1"
+        <input id="detection-{{ role }}-sample-fps" data-field="{{ role }}.sample_fps" type="number" min="0.1" max="10" step="0.1"
           value="{{ camera_config.sample_fps }}">
       </label>
       <label>
         <span class="label-with-hint">Использовать ROI
           {{ hint("область интереса", "ROI обрезает для детектора только полезную часть кадра до масштабирования, поэтому кот становится крупнее. Превью и записи остаются полнокадровыми. Координаты задаются долями от 0 до 1.") }}
         </span>
-        <input id="detection-{{ role }}-roi-enabled" type="checkbox"
+        <input id="detection-{{ role }}-roi-enabled" data-field="{{ role }}.roi" type="checkbox"
           {{ "checked" if camera_config.roi else "" }}>
       </label>
       {% set roi = camera_config.roi %}
       <label>ROI X
-        <input id="detection-{{ role }}-roi-x" type="number" min="0" max="0.99" step="0.01"
+        <input id="detection-{{ role }}-roi-x" data-field="{{ role }}.roi.x" type="number" min="0" max="0.99" step="0.01"
           value="{{ roi.x if roi else 0 }}">
       </label>
       <label>ROI Y
-        <input id="detection-{{ role }}-roi-y" type="number" min="0" max="0.99" step="0.01"
+        <input id="detection-{{ role }}-roi-y" data-field="{{ role }}.roi.y" type="number" min="0" max="0.99" step="0.01"
           value="{{ roi.y if roi else 0 }}">
       </label>
       <label>ROI ширина
-        <input id="detection-{{ role }}-roi-width" type="number" min="0.01" max="1" step="0.01"
+        <input id="detection-{{ role }}-roi-width" data-field="{{ role }}.roi.width" type="number" min="0.01" max="1" step="0.01"
           value="{{ roi.width if roi else 1 }}">
       </label>
       <label>ROI высота
-        <input id="detection-{{ role }}-roi-height" type="number" min="0.01" max="1" step="0.01"
+        <input id="detection-{{ role }}-roi-height" data-field="{{ role }}.roi.height" type="number" min="0.01" max="1" step="0.01"
           value="{{ roi.height if roi else 1 }}">
       </label>
     </div>
@@ -400,35 +406,35 @@
         <span class="label-with-hint">Таймаут кандидата, сек.
           {{ hint("таймаут кандидата", "Сколько времени после первого возможного обнаружения система ждёт остальные подтверждения. Больше — легче поймать быстро исчезающего или плохо видимого кота. Меньше — быстрее сбрасываются случайные гипотезы.") }}
         </span>
-        <input id="detection-candidate-timeout" type="number" min="0.1" max="30" step="0.1"
+        <input id="detection-candidate-timeout" data-field="candidate_timeout_seconds" type="number" min="0.1" max="30" step="0.1"
           value="{{ detection_config.candidate_timeout_seconds }}">
       </label>
       <label>
         <span class="label-with-hint">До потери кота, сек.
           {{ hint("время до потери кота", "Сколько секунд без подтверждённого кота ждать перед завершением активной части события. Больше — терпимее к кратким пропаданиям из кадра, но запись получается длиннее.") }}
         </span>
-        <input id="detection-absence-seconds" type="number" min="0.1" max="60" step="0.1"
+        <input id="detection-absence-seconds" data-field="absence_seconds" type="number" min="0.1" max="60" step="0.1"
           value="{{ detection_config.absence_seconds }}">
       </label>
       <label>
         <span class="label-with-hint">Хвост события, сек.
           {{ hint("хвост события", "Сколько видео сохранить после того, как отсутствие кота подтверждено. Большее значение лучше захватывает уход кота, но увеличивает длительность и размер записи.") }}
         </span>
-        <input id="detection-tail-seconds" type="number" min="0" max="60" step="0.1"
+        <input id="detection-tail-seconds" data-field="tail_seconds" type="number" min="0" max="60" step="0.1"
           value="{{ detection_config.tail_seconds }}">
       </label>
       <label>
         <span class="label-with-hint">Пауза после события, сек.
           {{ hint("пауза после события", "Период после завершения события, когда новые детекции не создают следующую запись. Больше — меньше дубликатов одного прохода, но можно пропустить следующий близкий проход.") }}
         </span>
-        <input id="detection-cooldown-seconds" type="number" min="0" max="300" step="0.1"
+        <input id="detection-cooldown-seconds" data-field="cooldown_seconds" type="number" min="0" max="300" step="0.1"
           value="{{ detection_config.cooldown_seconds }}">
       </label>
       <label>
         <span class="label-with-hint">Максимум события, сек.
           {{ hint("максимум события", "Потолок длительности одной записи. Кот, заснувший у дверцы, детектору виден так же уверенно, как идущий, и без потолка одна детекция записала бы диск досуха. По достижении событие закрывается принудительно; если кот всё ещё там, после паузы начнётся новое. Ноль — без лимита.") }}
         </span>
-        <input id="detection-max-event-seconds" type="number" min="0" max="600" step="1"
+        <input id="detection-max-event-seconds" data-field="max_event_seconds" type="number" min="0" max="600" step="1"
           value="{{ detection_config.max_event_seconds }}">
       </label>
     </div>
