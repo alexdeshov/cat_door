@@ -20,6 +20,9 @@
 
 set -eu
 
+# Каталог самого скрипта: рядом лежит подрезчик архива.
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+
 ARCHIVE=${CATDOOR_ARCHIVE_DIR:-/srv/archive}
 DATA=${CATDOOR_DATA_DIR:-/var/lib/catdoor}
 FRIGATE=${CATDOOR_FRIGATE_DIR:-/var/lib/frigate}
@@ -30,6 +33,18 @@ RECORDINGS_AGE_DAYS=${CATDOOR_ARCHIVE_RECORDINGS_AGE_DAYS:-7}
 # перезаписывается поверх, повторяет за оригиналом и порчу, и случайное
 # удаление разметки. Место позволяет — база весит сотни килобайт.
 KEEP_DB_SNAPSHOTS=${CATDOOR_ARCHIVE_DB_SNAPSHOTS:-30}
+# Сколько суток держать клипы проходов в архиве. Ноль — не подрезать вовсе, и
+# это умолчание: зеркало событий росло без предела с самого начала (`rsync` без
+# `--delete` и без отсечки), и включать удаление само по себе, обновлением, —
+# последнее, что здесь можно делать.
+#
+# Подрезка **никогда не трогает проход, которого нет в облаке**: она сверяется
+# с журналом залитого у `catdoor-cloud-backup-cats`. Нет журнала или он не
+# читается — не удаляется ничего. Клипы проходов существуют в единственном
+# экземпляре (камеры контура котов Frigate не пишет), и «удалили по возрасту, а
+# копия не уехала» — это потеря навсегда.
+EVENTS_AGE_DAYS=${CATDOOR_ARCHIVE_EVENTS_AGE_DAYS:-0}
+CATS_STATE=${CATDOOR_CATS_BACKUP_STATUS:-$DATA/runtime/cats-cloud-backup-state.json}
 
 # Отметка о копии для страницы состояния. Лежит **на внутреннем диске**, а не в
 # архиве, и это главное в ней: чаще всего копия не проходит из-за переполненного
@@ -119,6 +134,21 @@ prune_snapshots "$root/frigate/db"
 rsync -a --info=stats2 "$DATA/events/" "$root/events/" | grep -E "transferred|Total" | head -2
 rsync -a --exclude=ring "$DATA/runtime/" "$root/runtime/"
 say "проходов в архиве: $(find "$root/events" -mindepth 1 -maxdepth 1 -type d | wc -l)"
+
+# Подрезка зеркала событий по возрасту. Комментарий выше объясняет, почему у
+# `rsync` нет `--delete` и почему архив «чистится руками»: руки до него не
+# дошли ни разу, и к 30 августа зеркало весило 84 ГБ на диске, который Frigate
+# держит полным. Это та самая ручная чистка, только с двумя предохранителями:
+# возрастом и подтверждением, что проход уже в облаке.
+if [ "$EVENTS_AGE_DAYS" -gt 0 ]; then
+    python3 "$SCRIPT_DIR/prune_archived_events.py" \
+        --events-dir "$root/events" \
+        --database "$DATA/catdoor.sqlite3" \
+        --state "$CATS_STATE" \
+        --days "$EVENTS_AGE_DAYS"
+else
+    say "подрезка событий выключена (CATDOOR_ARCHIVE_EVENTS_AGE_DAYS=0)"
+fi
 
 # --- Frigate: лица и старые записи --------------------------------------
 if [ -d "$FRIGATE/media/clips/faces" ]; then
