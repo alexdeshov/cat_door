@@ -10,7 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
-from prune_archived_events import prune, uploaded_ids
+from prune_archived_events import prune, uploaded_ids, write_exclude_file
 
 NOW = time.mktime((2026, 8, 31, 12, 0, 0, 0, 0, -1))
 
@@ -153,6 +153,60 @@ def test_unreadable_database_stops_everything(tmp_path: Path) -> None:
 
     assert report.removed == 0
     assert (events / "00000001").exists()
+
+
+def test_prunable_covers_already_missing_directories(tmp_path: Path) -> None:
+    """Защита от круговорота. Подрезанный вчера проход всё ещё лежит в живом
+    каталоге, и rsync без исключения привозил его в архив обратно — ~77 ГБ
+    каждое утро (31.08–02.09). Поэтому в список исключений входит всё, что
+    попадает под предикат подрезки, даже если в архиве каталога уже нет."""
+    events = _archive(tmp_path / "events", [2])  # первого в архиве уже нет
+    database = _database(
+        tmp_path / "db.sqlite3",
+        [(1, "2026-08-01 10:00:00"), (2, "2026-08-02 10:00:00"), (3, "2026-08-03 10:00:00"), (4, "2026-08-30 10:00:00")],
+    )
+    state = _state(tmp_path / "state.json", [1, 2, 4])  # третий не залит
+
+    report = prune(
+        events_dir=events, database=database, state_path=state, days=7, now=NOW
+    )
+
+    assert report.removed == 1
+    assert report.prunable == ("00000001", "00000002")  # без свежего и незалитого
+
+
+def test_exclude_file_lists_anchored_directories(tmp_path: Path) -> None:
+    events = _archive(tmp_path / "events", [1])
+    database = _database(tmp_path / "db.sqlite3", [(1, "2026-08-01 10:00:00")])
+    state = _state(tmp_path / "state.json", [1])
+    exclude = tmp_path / "exclude.list"
+
+    report = prune(
+        events_dir=events, database=database, state_path=state, days=7, now=NOW
+    )
+    write_exclude_file(report, exclude)
+
+    assert exclude.read_text(encoding="utf-8") == "/00000001/\n"
+
+
+def test_exclude_file_is_empty_when_pruning_declined(tmp_path: Path) -> None:
+    """Не состоялась подрезка — не должно быть и исключений: rsync копирует
+    всё, как до этой правки."""
+    events = _archive(tmp_path / "events", [1])
+    database = _database(tmp_path / "db.sqlite3", [(1, "2026-08-01 10:00:00")])
+    exclude = tmp_path / "exclude.list"
+
+    report = prune(
+        events_dir=events,
+        database=database,
+        state_path=tmp_path / "нет-журнала.json",
+        days=7,
+        now=NOW,
+    )
+    write_exclude_file(report, exclude)
+
+    assert report.reason
+    assert exclude.read_text(encoding="utf-8") == ""
 
 
 def test_journal_reader_tells_unreadable_from_empty(tmp_path: Path) -> None:

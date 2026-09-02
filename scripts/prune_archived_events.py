@@ -20,6 +20,14 @@
 
 Живой каталог `$DATA/events` не трогается: он лежит на просторном томе, и его
 читает админка, когда показывает проход.
+
+Из этого следует третья обязанность: отдавать `rsync` список исключений
+(`--exclude-file`). Подрезанный проход остаётся в живом каталоге, и `rsync`
+без исключений копирует его в архив заново — первые дни после включения
+подрезки (31.08–02.09) копия каждое утро полчаса возила ~77 ГБ туда, а
+подрезка тут же удаляла их обратно, продавливая свободное место архивного
+диска до алерта. Список строится тем же предикатом, что и удаление (старше
+окна **и** подтверждён облаком), поэтому исключить лишнего он не может.
 """
 
 from __future__ import annotations
@@ -39,6 +47,10 @@ class PruneReport:
     freed_bytes: int = 0
     kept_not_in_cloud: int = 0
     reason: str = ""
+    # Имена каталогов, попавших под предикат подрезки, — включая уже
+    # отсутствующие в архиве: они всё ещё лежат в живом каталоге, и без
+    # исключения rsync привезёт их обратно.
+    prunable: tuple[str, ...] = ()
 
     def line(self, days: int) -> str:
         if self.reason:
@@ -104,11 +116,14 @@ def prune(
         return PruneReport(reason="база проходов не прочитана")
 
     removed = freed = kept = 0
+    prunable: list[str] = []
     for (event_id,) in rows:
         if str(event_id) not in uploaded:
             kept += 1
             continue
-        path = events_dir / f"{int(event_id):08d}"
+        name = f"{int(event_id):08d}"
+        prunable.append(name)
+        path = events_dir / name
         if not path.is_dir():
             continue
         size = _directory_size(path)
@@ -118,7 +133,26 @@ def prune(
             continue
         removed += 1
         freed += size
-    return PruneReport(removed=removed, freed_bytes=freed, kept_not_in_cloud=kept)
+    return PruneReport(
+        removed=removed,
+        freed_bytes=freed,
+        kept_not_in_cloud=kept,
+        prunable=tuple(prunable),
+    )
+
+
+def write_exclude_file(report: PruneReport, path: Path) -> None:
+    """Список исключений для rsync: по строке `/имя/` на подрезанный каталог.
+
+    Пишется через переименование: оборванный на середине файл исключил бы
+    непонятно что. Пустой список — тоже результат (подрезка выключена или не
+    состоялась): rsync с пустым файлом копирует всё, как и раньше.
+    """
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(
+        "".join(f"/{name}/\n" for name in report.prunable), encoding="utf-8"
+    )
+    tmp.replace(path)
 
 
 def main() -> None:
@@ -127,6 +161,7 @@ def main() -> None:
     parser.add_argument("--database", type=Path, required=True)
     parser.add_argument("--state", type=Path, required=True)
     parser.add_argument("--days", type=int, required=True)
+    parser.add_argument("--exclude-file", type=Path, default=None)
     args = parser.parse_args()
     report = prune(
         events_dir=args.events_dir,
@@ -134,6 +169,8 @@ def main() -> None:
         state_path=args.state,
         days=args.days,
     )
+    if args.exclude_file is not None:
+        write_exclude_file(report, args.exclude_file)
     print(report.line(args.days))
 
 
