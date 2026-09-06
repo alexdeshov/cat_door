@@ -68,6 +68,10 @@ report() {
 }
 
 say() { echo "архив: $1"; }
+# rsync с кодом 24 — «файл исчез, пока копировали»: рекордер пишет превью через
+# временный файл, и 2026-09-06 копия целиком провалилась из-за одного такого
+# `.tmp` в `runtime/previews`. Это не потеря — файл и не был нужен.
+copy() { rsync "$@" || { rc=$?; [ "$rc" -eq 24 ] || return "$rc"; }; }
 fail() { report false "$1"; echo "архив: $1" >&2; exit 1; }
 # Обрыв на полпути — тоже неудача: копия, прерванная выключением питания,
 # оставила бы отчёт об успехе прошлого раза и выглядела бы свежей.
@@ -159,12 +163,12 @@ fi
 # каталоги из списка подрезчика: они уже в облаке и вышли из окна оглядки.
 rsync -a --info=stats2 --exclude-from="$exclude_list" \
     "$DATA/events/" "$root/events/" | grep -E "transferred|Total" | head -2
-rsync -a --exclude=ring "$DATA/runtime/" "$root/runtime/"
+copy -a --exclude=ring --exclude='.*.tmp' "$DATA/runtime/" "$root/runtime/"
 say "проходов в архиве: $(find "$root/events" -mindepth 1 -maxdepth 1 -type d | wc -l)"
 
 # --- Frigate: лица и старые записи --------------------------------------
 if [ -d "$FRIGATE/media/clips/faces" ]; then
-    rsync -a "$FRIGATE/media/clips/faces/" "$root/frigate/faces/"
+    copy -a "$FRIGATE/media/clips/faces/" "$root/frigate/faces/"
     say "снимков лиц: $(find "$root/frigate/faces" -type f | wc -l)"
 fi
 

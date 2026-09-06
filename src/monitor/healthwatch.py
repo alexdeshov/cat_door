@@ -113,6 +113,10 @@ class Trouble:
 
     id: str
     title: str
+    # «warn» — есть время подумать, «fail» — уже сломано. В чате они должны
+    # различаться значком: хроника про место на диске неотличима была от
+    # упавшей копии.
+    severity: str = "fail"
 
 
 def reconcile(
@@ -155,7 +159,8 @@ def reconcile(
                 "misses": 0,
             }
             pending.pop(trouble.id, None)
-            lines.append(f"🔴 {trouble.title}")
+            icon = "🟡" if trouble.severity == "warn" else "🔴"
+            lines.append(f"{icon} {trouble.title}")
         else:
             pending[trouble.id] = count
     for missing in [key for key in pending if key not in seen]:
@@ -200,13 +205,15 @@ def health_troubles(payload: dict[str, Any] | None) -> list[Trouble]:
     troubles = []
     for group in payload.get("groups") or []:
         for check in group.get("checks") or []:
-            if check.get("status") not in ALERT_STATUSES:
+            status = str(check.get("status"))
+            if status not in ALERT_STATUSES:
                 continue
             actual = str(check.get("actual") or "—")
             troubles.append(
                 Trouble(
                     f"check:{check.get('key')}",
                     f"{group.get('title')}: {check.get('title')} — {actual}",
+                    severity=status,
                 )
             )
     return troubles

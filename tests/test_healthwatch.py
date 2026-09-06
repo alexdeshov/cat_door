@@ -105,6 +105,17 @@ def test_health_checks_become_named_troubles() -> None:
 
     assert [item.id for item in troubles] == ["check:gate_alive_test_cam", "check:cpu_temp"]
     assert troubles[0].title == "Контур калитки: Кадры идут, test_cam — 0.0 к/с"
+    assert [item.severity for item in troubles] == ["fail", "warn"]
+
+
+def test_a_warning_wears_a_different_badge_than_a_failure() -> None:
+    """Хроника про место на диске не должна выглядеть как упавшая копия."""
+    observed = [Trouble("check:a", "Сломано"), Trouble("check:b", "Тесно", severity="warn")]
+
+    _, state = _cycle(observed, {}, NOON)
+    lines, _ = _cycle(observed, state, NOON + 60)
+
+    assert lines == ["🔴 Сломано", "🟡 Тесно"]
 
 
 def test_a_silent_admin_is_a_trouble_itself() -> None:
