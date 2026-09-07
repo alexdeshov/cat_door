@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -20,6 +21,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 TELEGRAM_API = "https://api.telegram.org"
+
+
+logger = logging.getLogger("catdoor.telegram")
 
 
 class TelegramError(RuntimeError):
@@ -96,22 +100,53 @@ class TelegramClient:
     api_base: str = TELEGRAM_API
 
     @property
+    def chat_ids(self) -> list[str]:
+        """Получатели: один chat id или несколько через запятую.
+
+        Каждому пишется лично, а не в общую группу: у людей в семье разные
+        чаты, и переезд уведомлений в группу отнял бы их у того, кто настроил.
+        """
+        return [part.strip() for part in self.chat_id.split(",") if part.strip()]
+
+    @property
     def configured(self) -> bool:
-        return bool(self.token and self.chat_id)
+        return bool(self.token and self.chat_ids)
 
     def mask(self, text: str) -> str:
         return text.replace(self.token, "***") if self.token else text
 
     def send_message(self, text: str) -> None:
-        self._call("sendMessage", {"chat_id": self.chat_id, "text": text})
+        self._broadcast("sendMessage", {"text": text})
 
     def send_photo(self, photo: Path, caption: str) -> None:
         """Снимок с подписью. Подпись Телеграм обрезает на 1024 символах."""
-        self._call(
-            "sendPhoto",
-            {"chat_id": self.chat_id, "caption": caption[:1024]},
-            file=("photo", photo),
-        )
+        self._broadcast("sendPhoto", {"caption": caption[:1024]}, file=("photo", photo))
+
+    def _broadcast(
+        self,
+        method: str,
+        fields: dict[str, str],
+        file: tuple[str, Path] | None = None,
+    ) -> None:
+        """Отправка всем получателям по очереди.
+
+        Доставлено — если дошло хоть до одного: иначе один заблокировавший бота
+        получатель ронял бы отправку целиком, а сторож здоровья повторял бы
+        сообщение о перезагрузке остальным до бесконечности. Недоставленные
+        адреса уходят в журнал; отказ всем подряд — ошибка, как и раньше.
+        """
+        if not self.configured:
+            raise TelegramError("бот не настроен: нет токена или адреса чата")
+        failures: list[Exception] = []
+        for chat_id in self.chat_ids:
+            try:
+                self._call(method, {"chat_id": chat_id, **fields}, file=file)
+            except (TelegramError, TelegramUnreachable) as exc:
+                failures.append(exc)
+                if len(self.chat_ids) > 1:
+                    logger.warning("Получателю %s не доставлено: %s", chat_id, exc)
+        if failures and len(failures) == len(self.chat_ids):
+            raise failures[0]
 
     def _call(
         self,
