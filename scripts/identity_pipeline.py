@@ -43,7 +43,10 @@ MIN_CATS = 2
 
 ACTIVE_EXPORT_STATES = {"starting", "preparing", "training"}
 # Два часа: живой набор режется около часа, и запас нужен на рост разметки.
-EXPORT_WAIT_SECONDS = 7200.0
+# Сборка набора на узле режет ролики по кадру в секунду и прогоняет детектор
+# на процессоре: 650 проходов 07.09 не уложились в два часа, и конвейер ушёл
+# по таймауту, хотя сборка продолжалась. Четырёх часов хватает с запасом.
+EXPORT_WAIT_SECONDS = 4 * 3600.0
 EXPORT_POLL_SECONDS = 30.0
 # Сколько готовый набор считается свежим. Шесть часов — это «собран сегодня и
 # с тех пор разметка почти не менялась»; за большее время владелец успевает
@@ -112,7 +115,7 @@ def fetch(root: Path, admin: str, scope: str = "macbook", *, rebuild: bool = Fal
         if state in {"failed", "idle"}:
             raise PipelineError(f"сборка набора не удалась: {status.get('message', state)}")
         if time.monotonic() > deadline:
-            raise PipelineError("сборка набора не закончилась за два часа")
+            raise PipelineError("сборка набора не закончилась за четыре часа")
         print(f"  {status.get('message', state)} …", flush=True)
         time.sleep(EXPORT_POLL_SECONDS)
 
