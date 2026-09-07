@@ -108,6 +108,41 @@ def test_unreachable_telegram_is_an_error_not_a_crash(monkeypatch) -> None:
         _client().send_message("проверка")
 
 
+def test_every_listed_recipient_gets_the_message(monkeypatch) -> None:
+    """Семья — не группа: chat id через запятую, каждому лично."""
+    bodies: list[bytes] = []
+
+    def fake_urlopen(request, timeout):
+        bodies.append(request.data)
+        return _Response({"ok": True, "result": {}})
+
+    monkeypatch.setattr("src.common.telegram.urllib.request.urlopen", fake_urlopen)
+
+    TelegramClient(token=TOKEN, chat_id="12345, 462634240").send_message("Проход в 14:32")
+
+    assert [b"chat_id=12345" in body for body in bodies] == [True, False]
+    assert b"chat_id=462634240" in bodies[1]
+
+
+def test_one_blocked_recipient_does_not_fail_the_delivery(monkeypatch) -> None:
+    """Заблокировавший бота не должен ронять доставку остальным —
+    иначе сторож повторял бы «узел перезагружался» до бесконечности."""
+
+    def fake_urlopen(request, timeout):
+        if b"chat_id=666" in request.data:
+            raise urllib.error.HTTPError(
+                request.full_url, 403, "Forbidden", {}, io.BytesIO(b"bot was blocked")
+            )
+        return _Response({"ok": True, "result": {}})
+
+    monkeypatch.setattr("src.common.telegram.urllib.request.urlopen", fake_urlopen)
+
+    TelegramClient(token=TOKEN, chat_id="666,12345").send_message("проверка")  # не падает
+
+    with pytest.raises(TelegramError, match="403"):
+        TelegramClient(token=TOKEN, chat_id="666").send_message("проверка")
+
+
 def test_unconfigured_client_refuses_before_touching_the_network() -> None:
     with pytest.raises(TelegramError, match="не настроен"):
         TelegramClient(token="", chat_id="").send_message("проверка")
