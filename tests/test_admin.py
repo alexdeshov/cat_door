@@ -2238,7 +2238,7 @@ def test_notification_test_button_reports_what_telegram_answered(
     )
     monkeypatch.setattr(
         "src.common.telegram.TelegramClient.send_message",
-        lambda self, text: (_ for _ in ()).throw(TelegramError("Телеграм отказал (401)")),
+        lambda self, text, buttons=(): (_ for _ in ()).throw(TelegramError("Телеграм отказал (401)")),
     )
 
     response = client.post("/api/notifications/test")

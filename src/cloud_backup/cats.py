@@ -17,7 +17,7 @@
 
 Что перенесено из калиточного выгрузчика дословно, потому что куплено авариями:
 
-- **сторожа кормить внутри передачи** (`_heartbeat`): один клип уезжает минуты,
+- **сторожа кормить внутри передачи** (`feed_watchdog`): один клип уезжает минуты,
   и systemd убивал заливку посреди работы;
 - **отметка на каждый объект, а не в конце цикла**: догон идёт часами и может
   не дожить до конца — иначе всё поедет заново;
@@ -45,7 +45,6 @@ from sqlalchemy import select
 from src.cloud_backup.uploader import (
     _alert_sender,
     _attempt_entry,
-    _heartbeat,
     _load_state,
     _remember,
     _save_state_quietly,
@@ -60,7 +59,7 @@ from src.common.cloud_backup_config import (
     load_cloud_backup_config,
 )
 from src.common.database import Event, create_session_factory
-from src.common.sd_notify import Notifier
+from src.common.sd_notify import Notifier, feed_watchdog
 from src.common.settings import Settings
 
 logger = logging.getLogger("catdoor.cats-cloud-backup")
@@ -152,7 +151,7 @@ def _upload_event(
         # Сторож кормится нитью на время передачи: файл в полсотни мегабайт
         # едет десятки секунд, а при занятом канале и минуты, тогда как
         # `WatchdogSec` у службы — 900 секунд.
-        with _heartbeat(notifier):
+        with feed_watchdog(notifier):
             client.upload_file(str(source), bucket, key)
         sent += size
     return sent, missing

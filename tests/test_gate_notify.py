@@ -106,7 +106,7 @@ def test_only_interesting_labels_reach_the_phone(runtime_path: Path, monkeypatch
     monkeypatch.setattr("src.gate.notify.fetch_snapshot", lambda *args, **kwargs: False)
     monkeypatch.setattr(
         "src.common.telegram.TelegramClient.send_message",
-        lambda self, text: sent.append(text),
+        lambda self, text, buttons=(): sent.append(text),
     )
     gate = NotificationGate(roles=frozenset({GATE_ROLE}), cooldown_seconds=0.0)
 
@@ -134,7 +134,7 @@ def test_one_guest_gives_one_message(runtime_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("src.gate.notify.fetch_snapshot", lambda *args, **kwargs: False)
     monkeypatch.setattr(
         "src.common.telegram.TelegramClient.send_message",
-        lambda self, text: sent.append(text),
+        lambda self, text, buttons=(): sent.append(text),
     )
     gate = NotificationGate(roles=frozenset({GATE_ROLE}), cooldown_seconds=120.0)
 
@@ -166,7 +166,7 @@ def test_snapshot_goes_with_the_message_and_is_cleaned_up(
     monkeypatch.setattr("src.gate.notify.fetch_snapshot", fake_snapshot)
     monkeypatch.setattr(
         "src.common.telegram.TelegramClient.send_photo",
-        lambda self, photo, caption: photos.append(caption),
+        lambda self, photo, caption, buttons=(): photos.append(caption),
     )
     gate = NotificationGate(roles=frozenset({GATE_ROLE}), cooldown_seconds=0.0)
 
@@ -188,7 +188,7 @@ def test_snapshot_goes_with_the_message_and_is_cleaned_up(
 def test_a_silent_telegram_does_not_stop_the_batch(runtime_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("src.gate.notify.fetch_snapshot", lambda *args, **kwargs: False)
 
-    def refuse(self, text):
+    def refuse(self, text, buttons=()):
         raise TelegramError("Телеграм недоступен")
 
     monkeypatch.setattr("src.common.telegram.TelegramClient.send_message", refuse)
@@ -237,7 +237,7 @@ def test_only_recognised_faces_reach_the_phone(runtime_path: Path, monkeypatch) 
     monkeypatch.setattr("src.gate.notify.fetch_snapshot", lambda *args, **kwargs: False)
     monkeypatch.setattr(
         "src.common.telegram.TelegramClient.send_message",
-        lambda self, text: sent.append(text),
+        lambda self, text, buttons=(): sent.append(text),
     )
     gate = NotificationGate(roles=frozenset({GATE_ROLE}), cooldown_seconds=0.0)
 
@@ -262,7 +262,7 @@ def test_a_nameless_event_is_not_thrown_away_forever(runtime_path: Path, monkeyp
     monkeypatch.setattr("src.gate.notify.fetch_snapshot", lambda *args, **kwargs: False)
     monkeypatch.setattr(
         "src.common.telegram.TelegramClient.send_message",
-        lambda self, text: sent.append(text),
+        lambda self, text, buttons=(): sent.append(text),
     )
     gate = NotificationGate(roles=frozenset({GATE_ROLE}), cooldown_seconds=0.0)
     settings = _settings(gate_notify_faces_only=True)
@@ -292,7 +292,7 @@ def test_the_same_event_is_never_sent_twice(runtime_path: Path, monkeypatch) -> 
     monkeypatch.setattr("src.gate.notify.fetch_snapshot", lambda *args, **kwargs: False)
     monkeypatch.setattr(
         "src.common.telegram.TelegramClient.send_message",
-        lambda self, text: sent.append(text),
+        lambda self, text, buttons=(): sent.append(text),
     )
     gate = NotificationGate(roles=frozenset({GATE_ROLE}), cooldown_seconds=0.0)
     settings = _settings()
@@ -315,7 +315,7 @@ def test_a_stranger_gets_a_message_of_his_own(runtime_path: Path, monkeypatch) -
     monkeypatch.setattr("src.gate.notify.fetch_snapshot", lambda *args, **kwargs: False)
     monkeypatch.setattr(
         "src.common.telegram.TelegramClient.send_message",
-        lambda self, text: sent.append(text),
+        lambda self, text, buttons=(): sent.append(text),
     )
     known = NotificationGate(roles=frozenset({GATE_ROLE}), cooldown_seconds=0.0)
     unknown = NotificationGate(roles=frozenset({GATE_ROLE}), cooldown_seconds=0.0)
@@ -343,7 +343,7 @@ def test_a_stranger_waits_out_the_grace_period(runtime_path: Path, monkeypatch) 
     monkeypatch.setattr("src.gate.notify.fetch_snapshot", lambda *args, **kwargs: False)
     monkeypatch.setattr(
         "src.common.telegram.TelegramClient.send_message",
-        lambda self, text: sent.append(text),
+        lambda self, text, buttons=(): sent.append(text),
     )
     gate = NotificationGate(roles=frozenset({GATE_ROLE}), cooldown_seconds=0.0)
     settings = _settings(gate_notify_face_grace_seconds=20.0)
@@ -387,7 +387,7 @@ def test_only_the_gate_circuit_reaches_the_phone(runtime_path: Path, monkeypatch
     monkeypatch.setattr("src.gate.notify.fetch_snapshot", lambda *args, **kwargs: False)
     monkeypatch.setattr(
         "src.common.telegram.TelegramClient.send_message",
-        lambda self, text: sent.append(text),
+        lambda self, text, buttons=(): sent.append(text),
     )
     gate = NotificationGate(roles=frozenset({GATE_ROLE}), cooldown_seconds=0.0)
 
@@ -438,7 +438,7 @@ def test_a_skipped_event_is_forgotten_not_postponed(runtime_path: Path, monkeypa
     monkeypatch.setattr("src.gate.notify.fetch_snapshot", lambda *args, **kwargs: False)
     monkeypatch.setattr(
         "src.common.telegram.TelegramClient.send_message",
-        lambda self, text: sent.append(text),
+        lambda self, text, buttons=(): sent.append(text),
     )
     gate = NotificationGate(roles=frozenset({GATE_ROLE}), cooldown_seconds=120.0)
     gate.remember_sent(now=0.0)
@@ -477,7 +477,7 @@ def test_an_unreachable_telegram_stops_the_batch(runtime_path: Path, monkeypatch
     """
     attempts: list[str] = []
 
-    def refuse(self: TelegramClient, text: str) -> None:
+    def refuse(self: TelegramClient, text: str, buttons: object = ()) -> None:
         attempts.append(text)
         raise TelegramUnreachable("Телеграм недоступен: сеть недоступна")
 
@@ -504,7 +504,7 @@ def test_a_refused_message_does_not_stop_the_rest(runtime_path: Path, monkeypatc
     """Отказ по одному сообщению — частное дело этого сообщения."""
     attempts: list[str] = []
 
-    def refuse_first(self: TelegramClient, text: str) -> None:
+    def refuse_first(self: TelegramClient, text: str, buttons: object = ()) -> None:
         attempts.append(text)
         if len(attempts) == 1:
             raise TelegramError("Телеграм отказал (400): картинка не принята")
@@ -538,7 +538,7 @@ def test_the_watchdog_is_fed_on_every_event(runtime_path: Path, monkeypatch) -> 
     monkeypatch.setattr("src.gate.notify.fetch_snapshot", lambda *args, **kwargs: False)
     monkeypatch.setattr(
         "src.common.telegram.TelegramClient.send_message",
-        lambda self, text: None,
+        lambda self, text, buttons=(): None,
     )
     gate = NotificationGate(roles=frozenset({GATE_ROLE}), cooldown_seconds=0.0)
 

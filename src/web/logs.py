@@ -45,6 +45,9 @@ SOURCES: tuple[LogSource, ...] = (
     LogSource("gate-access", "Калитка — доступ", unit="catdoor-gate-access",
               hint="Решения по лицам и импульсы. Журнал проходов — на странице калитки, здесь — служебное."),
     LogSource("gate-notify", "Калитка — уведомления", unit="catdoor-gate-notify"),
+    LogSource("telegram-bot", "Кнопка «Видео» в Телеграме", unit="catdoor-telegram-bot",
+              hint="Нажатия кнопки под уведомлением и отдача роликов. «Conflict» здесь значит, "
+                   "что обновления того же бота читает кто-то ещё, и нажатия делятся пополам."),
     LogSource("gate-sync", "Примиритель Frigate", unit="catdoor-gate-sync",
               hint="Раз в две минуты по таймеру: «уже работает» — норма, «перезапущена» — конфигурация камер менялась."),
     LogSource("cloud-backup", "Облачная копия — калитка", unit="catdoor-cloud-backup"),
