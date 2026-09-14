@@ -1,0 +1,45 @@
+[Unit]
+Description=CatDoor — кнопка «Видео» в Телеграме
+Documentation=https://github.com/alexdeshov/cat_door/blob/main/docs/admin-mvp.md
+# Нужен только интернет до Телеграма: обновления бота забираются длинным
+# опросом, потому что вебхуку в домашнюю сеть не войти (три NAT).
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+# Ролики кошачьих проходов лежат на томе данных, и без него служба отдавала бы
+# «ролик удалён окном хранения» на каждое нажатие.
+RequiresMountsFor=/var/lib/catdoor
+
+[Service]
+Type=notify
+NotifyAccess=main
+# Круг опроса — двадцать пять секунд, и каждый кормит сторожа. Две минуты
+# оставляют запас на неспешный ответ Телеграма (ещё пятнадцать секунд сетевого
+# таймаута сверху) и на разбор пачки нажатий. Отдача самого ролика идёт
+# минутами и кормится изнутри, нитью: без неё systemd убивал бы отправку на
+# середине — ровно тем способом, каким 14 августа убивал облачную копию.
+WatchdogSec=120
+
+User=catdoor
+Group=catdoor
+WorkingDirectory=/opt/catdoor
+EnvironmentFile=/etc/catdoor/catdoor.env
+ExecStart=/opt/catdoor/.venv/bin/python -m src.telegram_bot.clips
+
+Restart=always
+RestartSec=5
+RestartSteps=5
+RestartMaxDelaySec=1800
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+ReadWritePaths=/var/lib/catdoor
+
+[Install]
+WantedBy=multi-user.target

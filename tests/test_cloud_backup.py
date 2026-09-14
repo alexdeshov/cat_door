@@ -911,14 +911,14 @@ def test_the_watchdog_is_fed_while_a_clip_is_uploading() -> None:
     работающей заливки — SIGABRT, потерянные отметки, повторно залитое окно.
     Кормить его надо изнутри передачи.
     """
-    from src.cloud_backup.uploader import _heartbeat
+    from src.common.sd_notify import feed_watchdog
 
     pings: list[int] = []
     notifier = SimpleNamespace(
         watchdog_interval_seconds=0.01, watchdog=lambda: pings.append(1)
     )
 
-    with _heartbeat(notifier):  # type: ignore[arg-type]  # хватает утиной совместимости
+    with feed_watchdog(notifier):  # type: ignore[arg-type]  # хватает утиной совместимости
         time.sleep(0.05)
 
     assert len(pings) >= 2
@@ -927,7 +927,7 @@ def test_the_watchdog_is_fed_while_a_clip_is_uploading() -> None:
     assert len(pings) == stopped  # нить не переживает выход из передачи
 
     # Без сторожа (служба запущена из оболочки) нить не заводится вовсе.
-    with _heartbeat(SimpleNamespace(watchdog_interval_seconds=None)):  # type: ignore[arg-type]
+    with feed_watchdog(SimpleNamespace(watchdog_interval_seconds=None)):  # type: ignore[arg-type]
         pass
 
 
@@ -1111,7 +1111,7 @@ def test_the_heartbeat_thread_does_not_feed_the_watchdog_forever() -> None:
     в сто секунд, держит put_object вечно — и бесконечный пинг делал бы это
     зависание невидимым для systemd навсегда.
     """
-    from src.cloud_backup.uploader import _heartbeat
+    from src.common.sd_notify import feed_watchdog
 
     pings: list[int] = []
     notifier = SimpleNamespace(
@@ -1119,15 +1119,15 @@ def test_the_heartbeat_thread_does_not_feed_the_watchdog_forever() -> None:
     )
     # Потолок пересчитывается от интервала: подменять константу не нужно —
     # хватает того, что нить считает прожитое как beats * interval.
-    import src.cloud_backup.uploader as uploader_module
+    import src.common.sd_notify as sd_notify_module
 
-    original = uploader_module.HEARTBEAT_LIFETIME_SECONDS
-    uploader_module.HEARTBEAT_LIFETIME_SECONDS = 0.03
+    original = sd_notify_module.HEARTBEAT_LIFETIME_SECONDS
+    sd_notify_module.HEARTBEAT_LIFETIME_SECONDS = 0.03
     try:
-        with _heartbeat(notifier):  # type: ignore[arg-type]
+        with feed_watchdog(notifier):  # type: ignore[arg-type]
             time.sleep(0.15)  # «передача» живёт дольше потолка
     finally:
-        uploader_module.HEARTBEAT_LIFETIME_SECONDS = original
+        sd_notify_module.HEARTBEAT_LIFETIME_SECONDS = original
 
     assert len(pings) <= 4  # ~3 пинга до потолка, дальше тишина
 

@@ -34,6 +34,7 @@ from src.common.cat_door_config import (
     load_cat_door_config,
 )
 from src.common.circuits import circuits_path, load_circuits
+from src.common.clip_button import pass_clip_buttons
 from src.common.database import Event, create_session_factory
 from src.common.detection_config import (
     CameraDetectionConfig,
@@ -1459,6 +1460,17 @@ def _notify_about_pass(
     )
     snapshot = notification_snapshot_path(settings.data_dir, f"pass-{event.id}")
     media = event.media_path or event.side_media_path
+    # Кнопка на каждый записанный ракурс: ролик уезжает по нажатию, а не с
+    # каждым проходом. Ловит нажатие `catdoor-telegram-bot`.
+    buttons = (
+        pass_clip_buttons(
+            str(event.id),
+            has_face=bool(event.media_path),
+            has_side=bool(event.side_media_path),
+        )
+        if settings.telegram_clip_button
+        else ()
+    )
     try:
         # Кадр с наибольшей уверенностью детектора запомнен ещё живым потоком.
         # Вырезать его из записи нечем: где именно в ней был кот, знает только
@@ -1471,9 +1483,9 @@ def _notify_about_pass(
                 snapshot,
             )
         if frame_taken:
-            client.send_photo(snapshot, caption)
+            client.send_photo(snapshot, caption, buttons)
         else:
-            client.send_message(caption)
+            client.send_message(caption, buttons)
     except (TelegramError, OSError) as exc:
         journal.write(
             "notification_failed",

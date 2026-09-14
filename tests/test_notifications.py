@@ -233,7 +233,7 @@ def test_recorder_sends_a_photo_after_publishing_a_pass(runtime_path: Path, monk
     monkeypatch.setattr("src.recorder.app.extract_frame", fake_extract)
     monkeypatch.setattr(
         "src.common.telegram.TelegramClient.send_photo",
-        lambda self, photo, caption: sent.append(("photo", caption)),
+        lambda self, photo, caption, buttons=(): sent.append(("photo", caption)),
     )
     journal = DetectionJournal(
         runtime_path / "runtime" / "detection.jsonl",
@@ -281,7 +281,7 @@ def test_recorder_survives_a_silent_telegram(runtime_path: Path, monkeypatch) ->
     event = type("StoredEvent", (), {"id": 8, "created_at": datetime(2026, 8, 8, 11, 32),  # noqa: DTZ001
                                      "media_path": None, "side_media_path": None})()
 
-    def refuse(self, text):
+    def refuse(self, text, buttons=()):
         raise TelegramError("Телеграм недоступен: сеть")
 
     monkeypatch.setattr("src.common.telegram.TelegramClient.send_message", refuse)
@@ -362,7 +362,7 @@ def test_notification_uses_the_frame_the_detector_was_surest_about(
     monkeypatch.setattr("src.recorder.app.extract_frame", refuse_extraction)
     monkeypatch.setattr(
         "src.common.telegram.TelegramClient.send_photo",
-        lambda self, photo, caption: photos.append(Path(photo)),
+        lambda self, photo, caption, buttons=(): photos.append(Path(photo)),
     )
     journal = DetectionJournal(
         runtime_path / "runtime" / "detection.jsonl",
@@ -447,7 +447,7 @@ def test_caption_takes_the_name_from_aggregated_decision(
     captions: list[str] = []
     monkeypatch.setattr(
         "src.common.telegram.TelegramClient.send_photo",
-        lambda self, photo, caption: captions.append(caption),
+        lambda self, photo, caption, buttons=(): captions.append(caption),
     )
     journal = DetectionJournal(
         runtime_path / "runtime" / "detection.jsonl",
@@ -536,7 +536,7 @@ def test_a_night_pass_that_reaches_the_door_is_notified(runtime_path: Path, monk
     monkeypatch.setattr("src.recorder.app.extract_frame", fake_extract)
     monkeypatch.setattr(
         "src.common.telegram.TelegramClient.send_photo",
-        lambda self, photo, caption: sent.append(caption),
+        lambda self, photo, caption, buttons=(): sent.append(caption),
     )
     journal = DetectionJournal(
         runtime_path / "runtime" / "detection.jsonl", max_bytes=100_000, backup_count=1

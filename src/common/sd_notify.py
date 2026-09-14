@@ -15,7 +15,8 @@ from __future__ import annotations
 import os
 import socket
 import threading
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 
 
 def _resolve_address(address: str) -> str:
@@ -125,3 +126,54 @@ class Notifier:
 def _single_line(text: str) -> str:
     """Collapse newlines: they separate fields in the protocol."""
     return " ".join(text.split())
+
+
+# Сколько нить-кормилец живёт максимум. Таймауты передач по-операционные:
+# полуживое TCP-соединение, отдающее байт раз в сто секунд, держит
+# `_fetch_bytes`/`put_object` вечно — и нить, пингующая без предела, делала бы
+# такое зависание невидимым НАВСЕГДА: сторож сыт, тревога живёт в том же
+# заблокированном потоке (находка ревью 15.08). Честная передача самого
+# крупного клипа (~150 МБ на 300 КБ/с в обе стороны) укладывается в
+# двадцать минут; после часа нить замолкает, и systemd перезапускает
+# застрявшую службу штатно.
+HEARTBEAT_LIFETIME_SECONDS = 3600.0
+
+
+@contextmanager
+def feed_watchdog(notifier: Notifier) -> Iterator[None]:
+    """Кормить сторожа во время передачи, а не только между событиями.
+
+    Клип в десять минут — это около 150 МБ, и один `put_object` идёт минутами.
+    (Число «300 КБ/с», стоявшее здесь до 31.08, было замером одного неудачного
+    вечера: настоящая полоса узла — около 20 Мбит/с, проверено на догоне
+    кошачьей копии. Порядок величин важнее точности: передача длиннее
+    `WatchdogSec` бывает при любой из них.) 14 августа сторож
+    (тогда 300 с) трижды убил выгрузчик посреди заливки, и каждый SIGABRT стоил
+    потерянных отметок и повторной заливки уже залитого окна — оплаченных
+    лишних версий в бакете.
+
+    Нить пингует от имени того же процесса, поэтому `NotifyAccess=main` не
+    против: проверка идёт по pid. Без сторожа (`watchdog_interval_seconds` —
+    `None`) нить не заводится вовсе. Жизнь нити ограничена
+    `HEARTBEAT_LIFETIME_SECONDS`: бесконечный пинг превращал бы зависшую
+    навсегда передачу в невидимую.
+    """
+    interval = notifier.watchdog_interval_seconds
+    if interval is None:
+        yield
+        return
+    done = threading.Event()
+
+    def beat() -> None:
+        beats = 0
+        while not done.wait(interval) and beats * interval < HEARTBEAT_LIFETIME_SECONDS:
+            notifier.watchdog()
+            beats += 1
+
+    thread = threading.Thread(target=beat, name="watchdog-heartbeat", daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        done.set()
+        thread.join(timeout=1.0)

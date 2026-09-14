@@ -27,6 +27,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from src.common.camera_registry import camera_registry_path, load_registry
+from src.common.clip_button import gate_clip_buttons
 from src.common.durable_write import publish_file_durably, write_text_durably
 from src.common.frigate_config import frigate_camera_name
 from src.common.notifications import NotificationGate, notification_snapshot_path
@@ -371,11 +372,15 @@ def notify_about_events(
             continue
         snapshot = notification_snapshot_path(data_dir, f"gate-{event.id}")
         caption = gate_caption(event, settings.display_timezone, allowed[event.camera])
+        # Кнопка «Видео» под сообщением: ролик едет по нажатию, а не каждым
+        # уведомлением. Нажатие ловит `catdoor-telegram-bot`; без него кнопка
+        # молчала бы, поэтому она и выключается тем же флагом.
+        buttons = gate_clip_buttons(event.id) if settings.telegram_clip_button else ()
         try:
             if fetch_snapshot(settings.gate_api_url, event, snapshot):
-                client.send_photo(snapshot, caption)
+                client.send_photo(snapshot, caption, buttons)
             else:
-                client.send_message(caption)
+                client.send_message(caption, buttons)
         except TelegramUnreachable as exc:
             # Разбор пачки прекращается целиком. Следующее событие уйдёт в тот
             # же обрыв и потратит те же пятнадцать секунд таймаута, а служба

@@ -30,8 +30,7 @@ import logging
 import threading
 import time
 import urllib.request
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -43,7 +42,7 @@ from src.common.cloud_backup_config import (
     load_cloud_backup_config,
 )
 from src.common.durable_write import write_text_durably
-from src.common.sd_notify import Notifier
+from src.common.sd_notify import Notifier, feed_watchdog
 from src.common.settings import Settings
 from src.common.telegram import TelegramClient, TelegramError
 
@@ -132,57 +131,6 @@ def deferred_ids(attempts: dict[str, Any], now: float) -> set[str]:
         if 0 <= since < retry_delay(int(entry["count"])):
             waiting.add(event_id)
     return waiting
-
-
-# Сколько нить-кормилец живёт максимум. Таймауты передач по-операционные:
-# полуживое TCP-соединение, отдающее байт раз в сто секунд, держит
-# `_fetch_bytes`/`put_object` вечно — и нить, пингующая без предела, делала бы
-# такое зависание невидимым НАВСЕГДА: сторож сыт, тревога живёт в том же
-# заблокированном потоке (находка ревью 15.08). Честная передача самого
-# крупного клипа (~150 МБ на 300 КБ/с в обе стороны) укладывается в
-# двадцать минут; после часа нить замолкает, и systemd перезапускает
-# застрявшую службу штатно.
-HEARTBEAT_LIFETIME_SECONDS = 3600.0
-
-
-@contextmanager
-def _heartbeat(notifier: Notifier) -> Iterator[None]:
-    """Кормить сторожа во время передачи, а не только между событиями.
-
-    Клип в десять минут — это около 150 МБ, и один `put_object` идёт минутами.
-    (Число «300 КБ/с», стоявшее здесь до 31.08, было замером одного неудачного
-    вечера: настоящая полоса узла — около 20 Мбит/с, проверено на догоне
-    кошачьей копии. Порядок величин важнее точности: передача длиннее
-    `WatchdogSec` бывает при любой из них.) 14 августа сторож
-    (тогда 300 с) трижды убил выгрузчик посреди заливки, и каждый SIGABRT стоил
-    потерянных отметок и повторной заливки уже залитого окна — оплаченных
-    лишних версий в бакете.
-
-    Нить пингует от имени того же процесса, поэтому `NotifyAccess=main` не
-    против: проверка идёт по pid. Без сторожа (`watchdog_interval_seconds` —
-    `None`) нить не заводится вовсе. Жизнь нити ограничена
-    `HEARTBEAT_LIFETIME_SECONDS`: бесконечный пинг превращал бы зависшую
-    навсегда передачу в невидимую.
-    """
-    interval = notifier.watchdog_interval_seconds
-    if interval is None:
-        yield
-        return
-    done = threading.Event()
-
-    def beat() -> None:
-        beats = 0
-        while not done.wait(interval) and beats * interval < HEARTBEAT_LIFETIME_SECONDS:
-            notifier.watchdog()
-            beats += 1
-
-    thread = threading.Thread(target=beat, name="cloud-backup-watchdog", daemon=True)
-    thread.start()
-    try:
-        yield
-    finally:
-        done.set()
-        thread.join(timeout=1.0)
 
 
 def _fetch_json(url: str, timeout: float = 15.0) -> Any:
@@ -769,7 +717,7 @@ def run(settings: Settings, *, once: bool = False) -> None:
                     # Клип длиннее потолка: берём только снимок и идём дальше,
                     # иначе одно такое событие держит очередь мёртвой хваткой.
                     try:
-                        with _heartbeat(notifier):
+                        with feed_watchdog(notifier):
                             snapshot = _fetch_bytes(
                                 f"{settings.gate_api_url.rstrip('/')}"
                                 f"/api/events/{event_id}/snapshot.jpg"
@@ -812,7 +760,7 @@ def run(settings: Settings, *, once: bool = False) -> None:
                     # уезжает восемь минут и дольше, а между событиями пинга
                     # он бы не дождался — 14 августа именно так systemd убил
                     # выгрузчик посреди работающей заливки.
-                    with _heartbeat(notifier):
+                    with feed_watchdog(notifier):
                         clip = _fetch_bytes(
                             f"{settings.gate_api_url.rstrip('/')}/api/events/{event_id}/clip.mp4"
                         )
@@ -870,7 +818,7 @@ def run(settings: Settings, *, once: bool = False) -> None:
                         f"осталось ~{human_size(remaining)}"
                     )
                 try:
-                    with _heartbeat(notifier):
+                    with feed_watchdog(notifier):
                         snapshot = _fetch_bytes(
                             f"{settings.gate_api_url.rstrip('/')}"
                             f"/api/events/{event_id}/snapshot.jpg"

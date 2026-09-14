@@ -62,6 +62,7 @@ chmod 640 "$CONFIG_FILE"
 for unit in catdoor-recorder.service catdoor-web.service \
         catdoor-gate-sync.service catdoor-gate-sync.path catdoor-gate-sync.timer \
         catdoor-gate-notify.service catdoor-gate-access.service \
+        catdoor-telegram-bot.service \
         catdoor-cloud-backup.service catdoor-cloud-backup-cats.service \
         catdoor-healthwatch.service \
         catdoor-cpu-thermal.service \
@@ -124,8 +125,15 @@ fi
 if grep -q '^CATDOOR_TELEGRAM_BOT_TOKEN=.\+' "$CONFIG_FILE" 2>/dev/null; then
     systemctl enable catdoor-gate-notify.service >/dev/null
     echo "уведомления о калитке включены (catdoor-gate-notify)"
+    # Тем же токеном живёт кнопка «Видео» под уведомлением: нажатие возвращается
+    # в бот длинным опросом, и читать обновления имеет право ровно один процесс.
+    # Без этой службы кнопка крутила бы часики и молчала — то есть выглядела бы
+    # сломанной.
+    systemctl enable catdoor-telegram-bot.service >/dev/null
+    echo "кнопка «Видео» включена (catdoor-telegram-bot)"
 else
     echo "уведомления о калитке не включены: в catdoor.env нет токена бота"
+    echo "кнопка «Видео» не включена: бот не настроен"
 fi
 
 # Резервное копирование включается только там, где есть куда копировать.
