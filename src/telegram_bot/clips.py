@@ -20,6 +20,12 @@
 - **проход кота** — строка нашей базы, ролик уже лежит файлом в каталоге данных.
 
 Общее у них одно: пока человек не нажал, наружу не уходит ни байта.
+
+Ролик тяжелее пятидесяти мегабайт Телеграм от бота не принимает — это
+предел Bot API. Такой ролик здесь не отвергается, а пережимается на узле
+(`src/telegram_bot/shrink.py`): событие калитки в несколько минут весит
+сотни мегабайт, и раньше кнопка отказывала ровно на том, ради чего её и
+нажимают. Любое уведомление обязано доезжать видео.
 """
 
 from __future__ import annotations
@@ -51,6 +57,7 @@ from src.common.telegram import (
     TelegramError,
     TelegramUnreachable,
 )
+from src.telegram_bot.shrink import ShrinkFailed, shrink_to_fit
 
 logger = logging.getLogger("catdoor.telegram-bot")
 
@@ -117,16 +124,43 @@ def sweep_abandoned_clips(data_dir: Path) -> None:
             leftover.unlink(missing_ok=True)
 
 
-def _reject_oversize(size: int) -> None:
-    if size > UPLOAD_LIMIT_BYTES:
+def _megabytes(size: int) -> str:
+    return f"{size / 1024 / 1024:.0f} МБ"
+
+
+def _reject_beyond_ceiling(size: int, ceiling: int) -> None:
+    """Потолок исходника — не предел Телеграма, а предел здравого смысла.
+
+    Пятьдесят мегабайт Bot API добираются сжатием, но тянуть ради этого с
+    Frigate гигабайтную склейку припаркованной машины бессмысленно вдвойне:
+    такой ролик и не сожмётся во что-то смотрибельное, а том данных и время
+    узла потратит целиком.
+    """
+    if size > ceiling:
         raise ClipUnavailable(
-            f"Ролик весит {size / 1024 / 1024:.0f} МБ — Телеграм принимает от бота "
-            f"не больше {UPLOAD_LIMIT_BYTES // 1024 // 1024} МБ. "
-            "Смотрите его в админке."
+            f"Ролик весит {_megabytes(size)} — это больше, чем узел берётся "
+            f"пережимать ({_megabytes(ceiling)}). Смотрите его в админке."
         )
 
 
-def fetch_gate_clip(api_url: str, event_id: str, destination: Path, *, timeout: float) -> Path:
+def _safe_name(event_id: str) -> str:
+    """Имя файла из идентификатора события.
+
+    Идентификатор приходит нажатием, а нажатие — строка снаружи. В имя файла
+    она попадает только буквами, цифрами и точками: путь наружу каталога
+    отправки не нужен ни одному настоящему событию.
+    """
+    return "".join(symbol if symbol.isalnum() or symbol in "._-" else "_" for symbol in event_id)
+
+
+def fetch_gate_clip(
+    api_url: str,
+    event_id: str,
+    destination: Path,
+    *,
+    timeout: float,
+    ceiling_bytes: int,
+) -> Path:
     """Скачать ролик события калитки у Frigate.
 
     Отказ `404` — это почти всегда «ещё не готов», а не «нет никогда»: Frigate
@@ -137,25 +171,21 @@ def fetch_gate_clip(api_url: str, event_id: str, destination: Path, *, timeout: 
     Размер проверяется дважды — по заголовку и по ходу чтения. Заголовка может
     не быть (Frigate отдаёт склейку потоком), а качать до конца гигабайтный
     клип припаркованной машины, чтобы потом сказать «не влезло», — значит
-    потратить память узла на заведомо бесполезное.
+    занять том данных заведомо бесполезным. Предел здесь — потолок исходника, а
+    не предел Телеграма: всё, что ниже потолка, доедет сжатым.
     """
     url = f"{api_url.rstrip('/')}/api/events/{event_id}/clip.mp4"
     try:
         with urllib.request.urlopen(url, timeout=timeout) as response:
             declared = response.headers.get("Content-Length")
             if declared is not None and declared.isdigit():
-                _reject_oversize(int(declared))
+                _reject_beyond_ceiling(int(declared), ceiling_bytes)
             destination.parent.mkdir(parents=True, exist_ok=True)
             size = 0
             with destination.open("wb") as target:
                 while chunk := response.read(1024 * 1024):
                     size += len(chunk)
-                    if size > UPLOAD_LIMIT_BYTES:
-                        raise ClipUnavailable(
-                            "Ролик длиннее того, что Телеграм принимает от бота "
-                            f"({UPLOAD_LIMIT_BYTES // 1024 // 1024} МБ). "
-                            "Смотрите его в админке."
-                        )
+                    _reject_beyond_ceiling(size, ceiling_bytes)
                     target.write(chunk)
     except urllib.error.HTTPError as exc:
         destination.unlink(missing_ok=True)
@@ -200,7 +230,6 @@ def pass_clip_path(factory: Any, data_dir: Path, event_id: str, view: str) -> tu
         # Окно хранения съедает старые записи, и это норма, а не поломка: в
         # чате строка живёт дольше, чем ролик на диске.
         raise ClipUnavailable("Ролик уже удалён окном хранения")
-    _reject_oversize(path.stat().st_size)
     when = moment.strftime("%d.%m %H:%M") if moment is not None else ""
     return path, f"Проход №{number} · {VIEW_TITLES[view]}{' · ' + when if when else ''}"
 
@@ -286,15 +315,39 @@ def _deliver(
     reply_to: int | None,
     notifier: Notifier | None,
 ) -> bool:
+    # Сторож кормится нитью на весь путь ролика, а не только на отправку:
+    # скачивание, сжатие и отдача идут минутами, и systemd убивал бы работу
+    # посреди неё — та же беда, что покупалась на облачной копии 14 августа.
+    # Сжатие добавило к этому пути самую долгую его часть.
+    with feed_watchdog(notifier) if notifier is not None else _nothing():
+        return _deliver_now(
+            settings, client, factory, request, chat_id=chat_id, reply_to=reply_to
+        )
+
+
+def _deliver_now(
+    settings: Settings,
+    client: TelegramClient,
+    factory: Any,
+    request: ClipRequest,
+    *,
+    chat_id: str,
+    reply_to: int | None,
+) -> bool:
     data_dir = settings.data_dir
-    downloaded: Path | None = None
+    name = _safe_name(request.event_id)
+    # Временные файлы этой отправки: их и только их убирает `finally`. Ролик
+    # прохода лежит на томе данных и принадлежит не нам.
+    temporary: list[Path] = []
     if request.kind == GATE_KIND:
-        downloaded = clip_directory(data_dir) / f"gate-{request.event_id}.mp4"
+        downloaded = clip_directory(data_dir) / f"gate-{name}.mp4"
+        temporary.append(downloaded)
         path = fetch_gate_clip(
             settings.gate_api_url,
             request.event_id,
             downloaded,
             timeout=settings.telegram_clip_timeout_seconds,
+            ceiling_bytes=settings.telegram_clip_source_limit_mb * 1024 * 1024,
         )
         caption = "Калитка · видео события"
     elif request.kind == PASS_KIND:
@@ -304,21 +357,68 @@ def _deliver(
             request.event_id,
             VIEW_NAMES[request.view],
         )
+        name = f"{name}-{request.view}"
     else:  # pragma: no cover — `parse_clip_callback` других видов не отдаёт
         return False
     try:
-        # Сторож кормится нитью: отдача ролика идёт минутами, и systemd убивал
-        # бы отправку посреди работы — та же беда, что покупалась на облачной
-        # копии 14 августа.
-        with feed_watchdog(notifier) if notifier is not None else _nothing():
-            client.send_video(path, caption, chat_id=chat_id, reply_to=reply_to)
+        shrunk = clip_directory(data_dir) / f"fit-{request.kind}-{name}.mp4"
+        path, caption = _fit_for_telegram(
+            settings, client, path, shrunk, caption=caption, chat_id=chat_id
+        )
+        if path == shrunk:
+            temporary.append(shrunk)
+        client.send_video(path, caption, chat_id=chat_id, reply_to=reply_to)
     except TelegramError as exc:
         raise ClipUnavailable(f"Телеграм не принял ролик: {exc}") from exc
     finally:
-        if downloaded is not None:
-            downloaded.unlink(missing_ok=True)
+        for leftover in temporary:
+            leftover.unlink(missing_ok=True)
     logger.info("Ролик %s отправлен в чат %s", request.event_id, chat_id)
     return True
+
+
+def _fit_for_telegram(
+    settings: Settings,
+    client: TelegramClient,
+    source: Path,
+    destination: Path,
+    *,
+    caption: str,
+    chat_id: str,
+) -> tuple[Path, str]:
+    """Ролик, который Телеграм примет: сам исходник или его сжатая копия.
+
+    Пятьдесят мегабайт — предел Bot API, и раньше тяжёлый ролик просто не
+    уезжал. Отказывал этот предел ровно на длинных событиях, то есть на тех,
+    ради которых кнопку и жмут, поэтому узел пережимает такой ролик сам.
+
+    О сжатии человеку говорят заранее: оно занимает минуты, а кнопка к этому
+    времени уже ответила «готовлю видео…» — молчащий чат неотличим от
+    сломанного. В подписи остаётся исходный вес: присланное хуже того, что
+    лежит в админке, и знать об этом полезно до того, как вглядываться в
+    номер машины.
+    """
+    size = source.stat().st_size
+    if size <= UPLOAD_LIMIT_BYTES:
+        return source, caption
+    _tell_quietly(
+        client,
+        chat_id,
+        f"Ролик весит {_megabytes(size)} — Телеграм столько от бота не принимает. "
+        "Сжимаю, это займёт минуту-другую.",
+    )
+    logger.info("Ролик %s весит %s — сжимаю", source.name, _megabytes(size))
+    try:
+        shrink_to_fit(
+            settings.ffmpeg_path,
+            source,
+            destination,
+            limit_bytes=UPLOAD_LIMIT_BYTES,
+        )
+    except ShrinkFailed as exc:
+        destination.unlink(missing_ok=True)
+        raise ClipUnavailable(str(exc)) from exc
+    return destination, f"{caption} · сжат с {_megabytes(size)}"
 
 
 class _nothing:

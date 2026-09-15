@@ -27,10 +27,11 @@ from src.common.clip_button import (
 from src.common.database import Event, apply_migrations, create_session_factory
 from src.common.notifications import NotificationGate
 from src.common.settings import Settings
-from src.common.telegram import UPLOAD_LIMIT_BYTES, TelegramClient, TelegramError
+from src.common.telegram import TelegramClient, TelegramError
 from src.gate.notify import GATE_ROLE, GateEvent, notify_about_events
 from src.telegram_bot.clips import (
     ClipUnavailable,
+    _fit_for_telegram,
     clip_directory,
     fetch_gate_clip,
     forget_old_presses,
@@ -41,6 +42,7 @@ from src.telegram_bot.clips import (
     save_offset,
     sweep_abandoned_clips,
 )
+from src.telegram_bot.shrink import ShrinkFailed
 
 EVENT_ID = "1786171119.126838-b1jywn"
 
@@ -354,15 +356,118 @@ def test_a_refusal_does_not_burn_the_press(runtime_path: Path, monkeypatch) -> N
     assert recent == {}
 
 
-def test_an_oversized_clip_is_named_not_uploaded(runtime_path: Path, monkeypatch) -> None:
-    """Телеграм принимает от бота 50 МБ — это предел Bot API, а не настройки.
+def test_a_heavy_clip_is_squeezed_instead_of_refused(runtime_path: Path, monkeypatch) -> None:
+    """Пятьдесят мегабайт Bot API — предел отправки, а не предел кнопки.
+
+    Отказывал он ровно на длинных событиях, то есть на тех единственных, ради
+    которых кнопку и жмут. Теперь узел пережимает ролик сам, и доезжает любое
+    уведомление.
+    """
+    monkeypatch.setattr("src.telegram_bot.clips.UPLOAD_LIMIT_BYTES", 4)
+    monkeypatch.setattr(
+        "src.telegram_bot.clips.urllib.request.urlopen",
+        lambda url, timeout: _Response(b"0123456789"),
+    )
+    squeezed: list[dict[str, Any]] = []
+
+    def fake_shrink(ffmpeg_path, source, destination, *, limit_bytes, duration_seconds=None):
+        squeezed.append({"source": Path(source), "limit": limit_bytes})
+        Path(destination).parent.mkdir(parents=True, exist_ok=True)
+        Path(destination).write_bytes(b"ab")
+        return Path(destination)
+
+    monkeypatch.setattr("src.telegram_bot.clips.shrink_to_fit", fake_shrink)
+    client = _Client()
+
+    delivered = handle_press(
+        _settings(runtime_path), client, None,
+        _press(f"clip:{GATE_KIND}:{EVENT_ID}"), now=100.0, recent={},
+    )
+
+    assert delivered
+    assert squeezed[0]["limit"] == 4
+    video = client.videos[0]  # type: ignore[attr-defined]
+    assert video["size"] == 2
+    # Присланное хуже того, что лежит в админке, и подпись об этом говорит.
+    assert "сжат" in video["caption"]
+    # Человеку сказали заранее: сжатие идёт минутами, а кнопка уже ответила.
+    assert "Сжимаю" in client.texts[0][1]  # type: ignore[attr-defined]
+
+
+def test_the_squeezed_copy_is_not_left_behind(runtime_path: Path, monkeypatch) -> None:
+    """Каталог отправки — не кладовая: на томе данных лежит запись, не копии."""
+    monkeypatch.setattr("src.telegram_bot.clips.UPLOAD_LIMIT_BYTES", 4)
+    monkeypatch.setattr(
+        "src.telegram_bot.clips.urllib.request.urlopen",
+        lambda url, timeout: _Response(b"0123456789"),
+    )
+    monkeypatch.setattr(
+        "src.telegram_bot.clips.shrink_to_fit",
+        lambda *args, **kwargs: Path(args[2]).write_bytes(b"ab") or Path(args[2]),
+    )
+
+    handle_press(
+        _settings(runtime_path), _Client(), None,
+        _press(f"clip:{GATE_KIND}:{EVENT_ID}"), now=100.0, recent={},
+    )
+
+    assert list(clip_directory(runtime_path).glob("*")) == []
+
+
+def test_a_clip_that_cannot_be_squeezed_says_so(runtime_path: Path, monkeypatch) -> None:
+    """Получасовая запись в пятьдесят мегабайт — уже граница читаемости.
+
+    Прислать полчаса серой мути хуже, чем сказать словами, где её посмотреть.
+    """
+    monkeypatch.setattr("src.telegram_bot.clips.UPLOAD_LIMIT_BYTES", 4)
+    monkeypatch.setattr(
+        "src.telegram_bot.clips.urllib.request.urlopen",
+        lambda url, timeout: _Response(b"0123456789"),
+    )
+
+    def refuse(*args, **kwargs):
+        raise ShrinkFailed("Ролик длиной 40 мин не ужать. Смотрите его в админке.")
+
+    monkeypatch.setattr("src.telegram_bot.clips.shrink_to_fit", refuse)
+    client = _Client()
+
+    delivered = handle_press(
+        _settings(runtime_path), client, None,
+        _press(f"clip:{GATE_KIND}:{EVENT_ID}"), now=100.0, recent={},
+    )
+
+    assert not delivered
+    assert client.videos == []  # type: ignore[attr-defined]
+    assert "админке" in client.texts[-1][1]  # type: ignore[attr-defined]
+    assert list(clip_directory(runtime_path).glob("*")) == []
+
+
+def test_a_clip_that_fits_is_sent_untouched(runtime_path: Path, monkeypatch) -> None:
+    """Сжатие — лекарство, а не привычка: лишняя перекодировка портит кадр."""
+    def explode(*args, **kwargs):
+        raise AssertionError("ролик влезает, сжимать его незачем")
+
+    monkeypatch.setattr("src.telegram_bot.clips.shrink_to_fit", explode)
+    source = runtime_path / "small.mp4"
+    source.write_bytes(b"cat")
+
+    path, caption = _fit_for_telegram(
+        _settings(runtime_path), _Client(), source,
+        runtime_path / "fit.mp4", caption="Проход", chat_id="12345",
+    )
+
+    assert (path, caption) == (source, "Проход")
+
+
+def test_a_clip_beyond_the_ceiling_is_named_not_pulled(runtime_path: Path, monkeypatch) -> None:
+    """Потолок исходника — не предел Телеграма, а предел здравого смысла.
 
     Припаркованная машина когда-то дала гигабайтный клип и повесила облачную
-    очередь; здесь тот же клип не должен ни уехать, ни съесть память узла.
+    очередь; такой клип и сжатием не спасти, а том данных он съест целиком.
     """
     monkeypatch.setattr(
         "src.telegram_bot.clips.urllib.request.urlopen",
-        lambda url, timeout: _Response(b"x", declared=UPLOAD_LIMIT_BYTES + 1),
+        lambda url, timeout: _Response(b"x", declared=600 * 1024 * 1024),
     )
     client = _Client()
 
@@ -375,13 +480,12 @@ def test_an_oversized_clip_is_named_not_uploaded(runtime_path: Path, monkeypatch
     assert "МБ" in client.texts[0][1]  # type: ignore[attr-defined]
 
 
-def test_a_clip_that_grows_past_the_limit_is_dropped(runtime_path: Path, monkeypatch) -> None:
+def test_a_clip_that_grows_past_the_ceiling_is_dropped(runtime_path: Path, monkeypatch) -> None:
     """Заголовка может не быть: Frigate отдаёт склейку потоком.
 
-    Тогда предел ловится по ходу чтения — иначе гигабайт уехал бы в память
-    узла, чтобы там же и умереть.
+    Тогда потолок ловится по ходу чтения — иначе гигабайт лёг бы на том данных
+    целиком, чтобы там же и умереть.
     """
-    monkeypatch.setattr("src.telegram_bot.clips.UPLOAD_LIMIT_BYTES", 4)
     monkeypatch.setattr(
         "src.telegram_bot.clips.urllib.request.urlopen",
         lambda url, timeout: _Response(b"0123456789"),
@@ -389,7 +493,9 @@ def test_a_clip_that_grows_past_the_limit_is_dropped(runtime_path: Path, monkeyp
     destination = clip_directory(runtime_path) / "gate.mp4"
 
     with pytest.raises(ClipUnavailable):
-        fetch_gate_clip("http://127.0.0.1:5000", EVENT_ID, destination, timeout=5.0)
+        fetch_gate_clip(
+            "http://127.0.0.1:5000", EVENT_ID, destination, timeout=5.0, ceiling_bytes=4
+        )
 
     assert not destination.exists()
 
