@@ -29,6 +29,7 @@ import json
 import logging
 import threading
 import time
+import urllib.error
 import urllib.request
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -86,6 +87,14 @@ CLIP_READY_SECONDS = 10.0
 # позже, не уезжал уже никогда (находка ревью 15.08). Две минуты — с большим
 # запасом к любой сборке.
 HAS_CLIP_GRACE_SECONDS = 120.0
+# Когда «записи нет» у Frigate — приговор, а не гонка. Сразу после конца
+# события тот же ответ означает «сегменты ещё в кеше» (см. CLIP_READY_SECONDS),
+# а через десять минут — что их не будет никогда: `has_clip` Frigate ставит по
+# событию, а сегменты без движения выбрасывает (машина встала у калитки ночью).
+# 27 сентября такое событие сутки получало `HTTP 400` раз в час и трижды будило
+# владельца тревогой «не заливаются». Машины у калитки владелец разрешил терять
+# (27.09), поэтому от такого события уезжает снимок, и оно закрывается.
+RECORDINGS_GONE_AFTER_SECONDS = 600.0
 # Бэкофф повторов вместо списания. Списание при однонаправленном ключе
 # необратимо (чтения нет — проверить, залито ли, нельзя), а оба его сигнала
 # оказались ложными: попытки копились в мёртвых циклах, «живость» канала
@@ -141,6 +150,24 @@ def _fetch_json(url: str, timeout: float = 15.0) -> Any:
 def _fetch_bytes(url: str, timeout: float = 120.0) -> bytes:
     with urllib.request.urlopen(url, timeout=timeout) as response:
         return response.read()
+
+
+def recordings_gone(exc: BaseException, event: dict[str, Any], *, now: float) -> bool:
+    """Отказ Frigate означает, что записи этого события нет и не будет.
+
+    Любой другой отказ — повод для повтора: признаётся только прямой ответ
+    Frigate `400 No recordings found` у давно закончившегося события.
+    """
+    if not isinstance(exc, urllib.error.HTTPError) or exc.code != 400:
+        return False
+    end = _as_optional_float(event.get("end_time"))
+    if end is None or now - end < RECORDINGS_GONE_AFTER_SECONDS:
+        return False
+    try:
+        body = exc.read()
+    except Exception:  # noqa: BLE001 — тело не прочиталось, значит не доказано
+        return False
+    return b"No recordings found" in body
 
 
 def eligible_events(
@@ -674,7 +701,17 @@ def run(settings: Settings, *, once: bool = False) -> None:
             clip_bytes = 0
             sent_events = 0
             failed = 0
-            batch = eligible_events(events, config, uploaded, now=now, deferred=waiting)
+            # События, у которых Frigate не нашёл записи (`recordings_gone`):
+            # от них берётся только снимок, как от неподъёмно длинных.
+            no_recordings = {str(key) for key in state.get("no_recordings") or []}
+            batch = [
+                {**event, "_snapshot_only": True, "_no_recordings": True}
+                if str(event.get("id")) in no_recordings and not event.get("_skip")
+                else event
+                for event in eligible_events(
+                    events, config, uploaded, now=now, deferred=waiting
+                )
+            ]
             if config.cameras and events and not batch and not waiting:
                 cameras_seen = sorted({str(e.get("camera") or "?") for e in events})
                 if not set(cameras_seen) & set(config.cameras):
@@ -739,10 +776,16 @@ def run(settings: Settings, *, once: bool = False) -> None:
                         state["uploaded"] = uploaded_order[-remember_cap:]
                         state["attempts"] = attempts
                         _save_state_quietly(state_path, state)
-                        logger.info(
-                            "Событие %s длиннее %.0f мин: залит только снимок",
-                            event_id, MAX_CLIP_SECONDS / 60,
-                        )
+                        if event.get("_no_recordings"):
+                            logger.info(
+                                "У события %s нет записи во Frigate: залит только снимок",
+                                event_id,
+                            )
+                        else:
+                            logger.info(
+                                "Событие %s длиннее %.0f мин: залит только снимок",
+                                event_id, MAX_CLIP_SECONDS / 60,
+                            )
                     except Exception as exc:  # noqa: BLE001
                         entry = attempts.get(event_id) or _attempt_entry(None)
                         entry = {"count": entry["count"] + 1, "last_at": time.time()}
@@ -771,6 +814,18 @@ def run(settings: Settings, *, once: bool = False) -> None:
                             ContentType="video/mp4",
                         )
                 except Exception as exc:  # noqa: BLE001 — пропуск, не крушение
+                    if recordings_gone(exc, event, now=time.time()):
+                        # Не неудача: следующий круг возьмёт от события снимок.
+                        # Попытка не пишется — иначе бэкофф отложил бы снимок.
+                        no_recordings.add(event_id)
+                        attempts.pop(event_id, None)
+                        state["no_recordings"] = sorted(no_recordings)
+                        _save_state_quietly(state_path, state)
+                        logger.info(
+                            "У события %s нет записи во Frigate — возьму снимок", event_id
+                        )
+                        notifier.watchdog()
+                        continue
                     entry = attempts.get(event_id) or _attempt_entry(None)
                     entry = {"count": entry["count"] + 1, "last_at": time.time()}
                     attempts[event_id] = entry
@@ -864,6 +919,13 @@ def run(settings: Settings, *, once: bool = False) -> None:
             # и вечно «непустая» очередь глушила отметку здоровья — первая же
             # тихая ночь будила человека ложной тревогой (15.08).
             window_ids = {str(e.get("id") or "") for e in events}
+            no_recordings = {
+                key for key in no_recordings if key in window_ids and key not in uploaded
+            }
+            if no_recordings:
+                state["no_recordings"] = sorted(no_recordings)
+            else:
+                state.pop("no_recordings", None)
             attempts = {
                 key: value
                 for key, value in attempts.items()
