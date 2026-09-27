@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+import io
 import json
 import sys
 import time
 import urllib.request
 from collections import Counter
 from collections.abc import Callable
+from email.message import Message
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Self
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 
 import pytest
 
@@ -1243,3 +1245,91 @@ def test_own_cats_bucket_gets_its_own_command(runtime_path: Path, monkeypatch) -
     assert "--bucket b1-cats " in cats and "catdoor-events-retention" not in cats
     assert '"Prefix":"cat-events/"' in cats
     assert "verysecret" not in gate and "verysecret" not in cats
+
+
+# ---------------------------------------------------------------------------
+# Событие без записи: `has_clip` у Frigate есть, сегментов нет (27.09).
+# ---------------------------------------------------------------------------
+
+
+class _FrigateWithoutRecordings(_Frigate):
+    """Frigate, у которого для части событий записи нет: клип отвечает 400."""
+
+    def __init__(
+        self,
+        events: list[dict[str, Any]],
+        missing: set[str],
+        body: bytes = b'{"success":false,"message":"No recordings found for the specified time range"}',
+    ) -> None:
+        super().__init__(events)
+        self.missing = missing
+        self.body = body
+
+    def urlopen(self, url: str, timeout: float = 0.0) -> _Response:
+        if url.endswith("/clip.mp4") and any(f"/{m}/" in url for m in self.missing):
+            self.urls.append(url)
+            raise HTTPError(url, 400, "Bad Request", Message(), io.BytesIO(self.body))
+        return super().urlopen(url, timeout)
+
+
+def test_an_event_without_recordings_leaves_a_snapshot_instead_of_an_alarm(
+    runtime_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """27.09 машина встала у калитки ночью, и Frigate выбросил её сегменты без
+    движения. Событие сутки получало 400 раз в час и трижды будило владельца
+    «не заливаются». Давно закончившееся событие без записи — не беда канала:
+    от него уезжает снимок, и очередь закрывается."""
+    now = time.time()
+    events = [_event("машина", now - 1800), _event("человек", now - 900)]
+    frigate = _FrigateWithoutRecordings(events, {"машина"})
+    s3 = _FakeS3()
+    settings = _install(monkeypatch, runtime_path, frigate, s3)
+
+    run(settings, once=True)
+
+    state = _state(runtime_path)
+    assert "машина" not in state.get("attempts", {})
+    assert state["no_recordings"] == ["машина"]
+    assert "oldest_pending_at" not in state
+
+    run(settings, once=True)
+
+    state = _state(runtime_path)
+    assert "машина" in state["uploaded"]
+    assert "no_recordings" not in state
+    assert not any("машина" in key and key.endswith(".mp4") for key in s3.stored)
+    assert any("машина" in key and key.endswith(".jpg") for key in s3.stored)
+
+
+def test_a_fresh_event_without_recordings_is_still_retried(
+    runtime_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Сразу после конца события тот же ответ значит «сегменты ещё в кеше»
+    (14.08): приговор ему выносить рано — клип появится следующим кругом."""
+    now = time.time()
+    events = [_event("свежее", now - 60)]
+    frigate = _FrigateWithoutRecordings(events, {"свежее"})
+    settings = _install(monkeypatch, runtime_path, frigate, _FakeS3())
+
+    run(settings, once=True)
+
+    state = _state(runtime_path)
+    assert "свежее" in state["attempts"]
+    assert "no_recordings" not in state
+
+
+def test_another_bad_request_is_not_a_missing_recording(
+    runtime_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Приговор выносит только прямой ответ Frigate «записей нет»: любой другой
+    отказ — повод для повтора, а не для того, чтобы остаться без клипа."""
+    now = time.time()
+    events = [_event("старое", now - 1800)]
+    frigate = _FrigateWithoutRecordings(events, {"старое"}, body=b"Internal oops")
+    settings = _install(monkeypatch, runtime_path, frigate, _FakeS3())
+
+    run(settings, once=True)
+
+    state = _state(runtime_path)
+    assert "старое" in state["attempts"]
+    assert "no_recordings" not in state
