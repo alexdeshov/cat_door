@@ -191,6 +191,29 @@ def test_time_is_served_only_to_the_camera_segment() -> None:
     assert any(line.startswith("local stratum") for line in directives)
 
 
+def test_the_clock_never_goes_offline_on_a_wifi_reconnect() -> None:
+    """Хук chrony «offline» перекрыт заглушкой, которая ничего не делает.
+
+    2026-09-27 пакетный хук застал Wi-Fi routable без IPv4-маршрута, увёл все
+    источники в offline, и сами они оттуда не вернулись. networkd-dispatcher
+    берёт файл из /etc вместо одноимённого из /usr/lib, только если тот
+    исполняемый, — поэтому проверяется и бит, и то, что это именно пустышка.
+    """
+    hook = INSTALL_DIR / "chrony-onoffline-noop"
+    body = [
+        line.strip()
+        for line in hook.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.startswith("#")
+    ]
+    installer = (INSTALL_DIR / "install.sh").read_text(encoding="utf-8")
+
+    assert hook.stat().st_mode & stat.S_IXUSR
+    assert body == ["exit 0"]
+    assert "for state in routable off; do" in installer
+    assert '"/etc/networkd-dispatcher/$state.d/chrony-onoffline"' in installer
+    subprocess.run(["bash", "-n", str(INSTALL_DIR / "install.sh")], check=True)
+
+
 def test_dhcp_pool_avoids_the_factory_addresses() -> None:
     """Пул не должен накрывать адреса, на которые камеры встают после сброса.
 

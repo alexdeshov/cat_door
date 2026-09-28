@@ -119,6 +119,19 @@ if systemctl is-enabled --quiet wifi-keepalive.service 2>/dev/null \
     systemctl enable --now wifi-keepalive.service >/dev/null
     echo "заплатка Wi-Fi включена (wifi-keepalive)"
 fi
+# Хук chrony «offline/online» гоняется с DHCP на переподключении Wi-Fi и может
+# навсегда оставить часы без источников (2026-09-27) — подробности в самой
+# заглушке. Она перекрывает пакетный хук одноимённым файлом из /etc;
+# networkd-dispatcher требует у файла и каталога 755 root:root.
+if [ -d /usr/lib/networkd-dispatcher ]; then
+    for state in routable off; do
+        install -d -m 755 -o root -g root "/etc/networkd-dispatcher/$state.d"
+        install -m 755 -o root -g root "$REPO_DIR/install/chrony-onoffline-noop" \
+            "/etc/networkd-dispatcher/$state.d/chrony-onoffline"
+    done
+    chronyc online >/dev/null 2>&1 || true
+    echo "хук chrony «offline» заглушён; источники времени переведены в online"
+fi
 
 # Уведомления о калитке включаются только там, где настроен бот: без токена
 # служба падала бы каждые пять секунд и засыпала журнал одной и той же жалобой.
