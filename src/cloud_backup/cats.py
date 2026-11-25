@@ -89,6 +89,61 @@ ALERT_AT_ATTEMPT = 5
 ALERT_REPEAT_SECONDS = 6 * 3600.0
 
 
+# Пауза всей заливки, когда бакет упёрся в предел размера. Это не отказ
+# прохода, а состояние бакета: повторять чаще бессмысленно — место само не
+# появится, пока владелец не поднимет предел или lifecycle не подчистит старое,
+# а каждая попытка multipart — платные POST/DELETE и гигабайты зря по каналу.
+BUCKET_FULL_PAUSE_SECONDS = 3600.0
+# Код отказа Object Storage при упоре в предел. boto3 `upload_file` заворачивает
+# его в `S3UploadFailedError` текстом, поэтому ищется по строке всей цепочки.
+BUCKET_FULL_CODE = "BucketMaxSizeExceeded"
+
+
+def is_bucket_full(exc: BaseException) -> bool:
+    """Отказ — переполненный бакет (а не связь, права или файл)."""
+    seen: BaseException | None = exc
+    for _ in range(5):
+        if seen is None:
+            return False
+        if BUCKET_FULL_CODE in str(seen):
+            return True
+        seen = seen.__cause__ or seen.__context__
+    return False
+
+
+def bucket_full_wait(state: dict[str, Any], now: float) -> float:
+    """Сколько ещё молчать из-за полного бакета; 0 — пора пробовать.
+
+    Отметка дальше полной паузы в будущем значит, что часы прыгнули назад
+    (обрыв питания) — тогда пробуем сразу, а не замораживаем заливку.
+    """
+    until = float(state.get("bucket_full_until") or 0.0)
+    left = until - now
+    if left <= 0 or left > BUCKET_FULL_PAUSE_SECONDS:
+        return 0.0
+    return left
+
+
+def note_bucket_full(state: dict[str, Any], now: float) -> bool:
+    """Поставить заливку на паузу; True — пора сказать об этом в Телеграм
+    (первый упор или прошло `ALERT_REPEAT_SECONDS` с прошлого напоминания)."""
+    state["bucket_full_until"] = now + BUCKET_FULL_PAUSE_SECONDS
+    state.setdefault("bucket_full_since", now)
+    last = state.get("bucket_full_alert_at")
+    if last is not None and 0 <= now - float(last) < ALERT_REPEAT_SECONDS:
+        return False
+    state["bucket_full_alert_at"] = now
+    return True
+
+
+def note_bucket_free(state: dict[str, Any]) -> bool:
+    """Заливка прошла; True — бакет до этого был полон (сказать «снова пишет»)."""
+    was_full = state.pop("bucket_full_since", None) is not None
+    state.pop("bucket_full_until", None)
+    state.pop("bucket_full_alert_at", None)
+    return was_full
+
+
 def record_failure(attempts: dict[str, dict[str, float]], key: str, now: float) -> int:
     """Учесть отказ прохода; возвращает номер попытки.
 
@@ -223,6 +278,22 @@ def run(settings: Settings, *, once: bool = False) -> None:
             time.sleep(POLL_SECONDS)
             continue
 
+        wait = bucket_full_wait(state, time.time())
+        if wait > 0:
+            # Бакет полон — не стучимся вовсе до конца паузы. Круг всё равно
+            # крутится раз в минуту: сторож кормится, а смена настроек в
+            # админке (другой бакет) подхватывается.
+            state["status"] = "fail"
+            state["message"] = (
+                f"Бакет полон: заливка на паузе, проверка через {wait / 60:.0f} мин. "
+                "Поднимите предел размера бакета или проверьте его lifecycle"
+            )
+            _save_state_quietly(state_path, state)
+            if once:
+                return
+            time.sleep(POLL_SECONDS)
+            continue
+
         uploaded = set(state.get("uploaded", []))
         order = list(state.get("order", []))
         attempts = {str(k): _attempt_entry(v) for k, v in state.get("attempts", {}).items()}
@@ -231,6 +302,7 @@ def run(settings: Settings, *, once: bool = False) -> None:
         # Заливки этого круга: от них зависит, спать ли после него. Ноль и при
         # упавшем круге — тогда пауза обязательна.
         done = 0
+        full = False
 
         try:
             import boto3  # type: ignore[import-not-found]  # ставится на узле, в dev-среде не нужен
@@ -279,6 +351,24 @@ def run(settings: Settings, *, once: bool = False) -> None:
                         client, bucket, config.cats_prefix, settings.data_dir, event, notifier
                     )
                 except Exception as exc:  # noqa: BLE001 — botocore не наследует OSError
+                    if is_bucket_full(exc):
+                        # Проход ни при чём: попытку ему не засчитываем, иначе
+                        # после пополнения бакета он ждал бы часового бэкоффа.
+                        full = True
+                        logger.warning(
+                            "Бакет %s полон (%s) — заливка на паузе на %.0f мин",
+                            bucket,
+                            BUCKET_FULL_CODE,
+                            BUCKET_FULL_PAUSE_SECONDS / 60,
+                        )
+                        if note_bucket_full(state, time.time()) and alert is not None:
+                            alert(
+                                f"Кошачья облачная копия: бакет {bucket} полон, заливка "
+                                "на паузе, проверка раз в час. Поднимите предел размера "
+                                "бакета или проверьте его lifecycle."
+                            )
+                        _save_state_quietly(state_path, state)
+                        break
                     count = record_failure(attempts, key, time.time())
                     logger.warning(
                         "Проход %s не уехал (%s), повтор через %.0f с",
@@ -306,6 +396,10 @@ def run(settings: Settings, *, once: bool = False) -> None:
                         ", ".join(missing),
                     )
                 attempts.pop(key, None)
+                if note_bucket_free(state):
+                    logger.info("Бакет %s снова принимает — заливка продолжается", bucket)
+                    if alert is not None:
+                        alert(f"Кошачья облачная копия: бакет {bucket} снова принимает")
                 _remember(uploaded, order, key)
                 sent_bytes += size
                 done += 1
@@ -318,7 +412,13 @@ def run(settings: Settings, *, once: bool = False) -> None:
 
             spent = max(0.001, time.monotonic() - started)
             remaining = max(0, len(queue) - done)
-            if done:
+            if full:
+                state["status"] = "fail"
+                state["message"] = (
+                    "Бакет полон: заливка на паузе на час. "
+                    "Поднимите предел размера бакета или проверьте его lifecycle"
+                )
+            elif done:
                 rate = sent_bytes / spent
                 logger.info(
                     "Залито проходов: %d, %s, темп %s/с",

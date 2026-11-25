@@ -196,3 +196,54 @@ def test_round_without_uploads_sleeps_even_with_a_queue() -> None:
     assert pause_after_round(done=3, remaining=40) == 0.0
     assert pause_after_round(done=0, remaining=40) == POLL_SECONDS
     assert pause_after_round(done=3, remaining=0) == POLL_SECONDS
+
+
+def test_full_bucket_is_recognised_through_the_boto_wrapper() -> None:
+    """`upload_file` заворачивает отказ в свою ошибку — код ищется по цепочке."""
+    from src.cloud_backup.cats import is_bucket_full
+
+    inner = RuntimeError(
+        "An error occurred (BucketMaxSizeExceeded) when calling the UploadPart operation"
+    )
+    try:
+        try:
+            raise inner
+        except RuntimeError as exc:
+            raise ValueError("Failed to upload face.mp4") from exc
+    except ValueError as wrapped:
+        assert is_bucket_full(wrapped)
+    assert not is_bucket_full(RuntimeError("AccessDenied"))
+
+
+def test_full_bucket_pauses_for_an_hour_and_alerts_sparingly() -> None:
+    """Полный бакет — час тишины без единого запроса; тревога при первом упоре
+    и раз в шесть часов, «снова принимает» — один раз."""
+    from src.cloud_backup.cats import (
+        BUCKET_FULL_PAUSE_SECONDS,
+        bucket_full_wait,
+        note_bucket_free,
+        note_bucket_full,
+    )
+
+    state: dict[str, Any] = {}
+    assert bucket_full_wait(state, 1000.0) == 0.0
+
+    assert note_bucket_full(state, 1000.0) is True
+    assert bucket_full_wait(state, 1000.0 + 60) == BUCKET_FULL_PAUSE_SECONDS - 60
+    assert bucket_full_wait(state, 1000.0 + BUCKET_FULL_PAUSE_SECONDS) == 0.0
+
+    # Через час проверка снова упёрлась — молча, до шести часов с тревоги.
+    assert note_bucket_full(state, 1000.0 + 3600) is False
+    assert note_bucket_full(state, 1000.0 + 6 * 3600) is True
+
+    assert note_bucket_free(state) is True
+    assert note_bucket_free(state) is False
+    assert bucket_full_wait(state, 1000.0) == 0.0
+
+
+def test_clock_jump_back_does_not_freeze_the_upload() -> None:
+    """После обрыва питания часы идут назад: отметка «до» уезжает далеко в
+    будущее. Пауза длиннее часа невозможна — значит, пробовать сразу."""
+    from src.cloud_backup.cats import bucket_full_wait
+
+    assert bucket_full_wait({"bucket_full_until": 1_000_000.0}, 100.0) == 0.0
