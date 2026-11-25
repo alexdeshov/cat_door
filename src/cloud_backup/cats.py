@@ -48,8 +48,12 @@ from src.cloud_backup.uploader import (
     _load_state,
     _remember,
     _save_state_quietly,
+    bucket_full_wait,
     deferred_ids,
     human_size,
+    is_bucket_full,
+    report_bucket_accepts,
+    report_bucket_full,
     retry_delay,
 )
 from src.common.cloud_backup_config import (
@@ -87,61 +91,6 @@ USABLE_STATUSES = ("ready", "partial")
 ALERT_AT_ATTEMPT = 5
 # Как часто повторять тревогу о застрявших проходах.
 ALERT_REPEAT_SECONDS = 6 * 3600.0
-
-
-# Пауза всей заливки, когда бакет упёрся в предел размера. Это не отказ
-# прохода, а состояние бакета: повторять чаще бессмысленно — место само не
-# появится, пока владелец не поднимет предел или lifecycle не подчистит старое,
-# а каждая попытка multipart — платные POST/DELETE и гигабайты зря по каналу.
-BUCKET_FULL_PAUSE_SECONDS = 3600.0
-# Код отказа Object Storage при упоре в предел. boto3 `upload_file` заворачивает
-# его в `S3UploadFailedError` текстом, поэтому ищется по строке всей цепочки.
-BUCKET_FULL_CODE = "BucketMaxSizeExceeded"
-
-
-def is_bucket_full(exc: BaseException) -> bool:
-    """Отказ — переполненный бакет (а не связь, права или файл)."""
-    seen: BaseException | None = exc
-    for _ in range(5):
-        if seen is None:
-            return False
-        if BUCKET_FULL_CODE in str(seen):
-            return True
-        seen = seen.__cause__ or seen.__context__
-    return False
-
-
-def bucket_full_wait(state: dict[str, Any], now: float) -> float:
-    """Сколько ещё молчать из-за полного бакета; 0 — пора пробовать.
-
-    Отметка дальше полной паузы в будущем значит, что часы прыгнули назад
-    (обрыв питания) — тогда пробуем сразу, а не замораживаем заливку.
-    """
-    until = float(state.get("bucket_full_until") or 0.0)
-    left = until - now
-    if left <= 0 or left > BUCKET_FULL_PAUSE_SECONDS:
-        return 0.0
-    return left
-
-
-def note_bucket_full(state: dict[str, Any], now: float) -> bool:
-    """Поставить заливку на паузу; True — пора сказать об этом в Телеграм
-    (первый упор или прошло `ALERT_REPEAT_SECONDS` с прошлого напоминания)."""
-    state["bucket_full_until"] = now + BUCKET_FULL_PAUSE_SECONDS
-    state.setdefault("bucket_full_since", now)
-    last = state.get("bucket_full_alert_at")
-    if last is not None and 0 <= now - float(last) < ALERT_REPEAT_SECONDS:
-        return False
-    state["bucket_full_alert_at"] = now
-    return True
-
-
-def note_bucket_free(state: dict[str, Any]) -> bool:
-    """Заливка прошла; True — бакет до этого был полон (сказать «снова пишет»)."""
-    was_full = state.pop("bucket_full_since", None) is not None
-    state.pop("bucket_full_until", None)
-    state.pop("bucket_full_alert_at", None)
-    return was_full
 
 
 def record_failure(attempts: dict[str, dict[str, float]], key: str, now: float) -> int:
@@ -355,18 +304,7 @@ def run(settings: Settings, *, once: bool = False) -> None:
                         # Проход ни при чём: попытку ему не засчитываем, иначе
                         # после пополнения бакета он ждал бы часового бэкоффа.
                         full = True
-                        logger.warning(
-                            "Бакет %s полон (%s) — заливка на паузе на %.0f мин",
-                            bucket,
-                            BUCKET_FULL_CODE,
-                            BUCKET_FULL_PAUSE_SECONDS / 60,
-                        )
-                        if note_bucket_full(state, time.time()) and alert is not None:
-                            alert(
-                                f"Кошачья облачная копия: бакет {bucket} полон, заливка "
-                                "на паузе, проверка раз в час. Поднимите предел размера "
-                                "бакета или проверьте его lifecycle."
-                            )
+                        report_bucket_full(state, bucket, alert, "Кошачья облачная копия")
                         _save_state_quietly(state_path, state)
                         break
                     count = record_failure(attempts, key, time.time())
@@ -396,10 +334,7 @@ def run(settings: Settings, *, once: bool = False) -> None:
                         ", ".join(missing),
                     )
                 attempts.pop(key, None)
-                if note_bucket_free(state):
-                    logger.info("Бакет %s снова принимает — заливка продолжается", bucket)
-                    if alert is not None:
-                        alert(f"Кошачья облачная копия: бакет {bucket} снова принимает")
+                report_bucket_accepts(state, bucket, alert, "Кошачья облачная копия")
                 _remember(uploaded, order, key)
                 sent_bytes += size
                 done += 1

@@ -142,6 +142,93 @@ def deferred_ids(attempts: dict[str, Any], now: float) -> set[str]:
     return waiting
 
 
+# Пауза всей заливки, когда бакет упёрся в предел размера (общая для калитки
+# и котов; кошачий бакет упирался 18–25 ноября). Это не отказ
+# прохода, а состояние бакета: повторять чаще бессмысленно — место само не
+# появится, пока владелец не поднимет предел или lifecycle не подчистит старое,
+# а каждая попытка multipart — платные POST/DELETE и гигабайты зря по каналу.
+BUCKET_FULL_PAUSE_SECONDS = 3600.0
+# Код отказа Object Storage при упоре в предел. boto3 `upload_file` заворачивает
+# его в `S3UploadFailedError` текстом, поэтому ищется по строке всей цепочки.
+BUCKET_FULL_CODE = "BucketMaxSizeExceeded"
+
+
+def is_bucket_full(exc: BaseException) -> bool:
+    """Отказ — переполненный бакет (а не связь, права или файл)."""
+    seen: BaseException | None = exc
+    for _ in range(5):
+        if seen is None:
+            return False
+        if BUCKET_FULL_CODE in str(seen):
+            return True
+        seen = seen.__cause__ or seen.__context__
+    return False
+
+
+def bucket_full_wait(state: dict[str, Any], now: float) -> float:
+    """Сколько ещё молчать из-за полного бакета; 0 — пора пробовать.
+
+    Отметка дальше полной паузы в будущем значит, что часы прыгнули назад
+    (обрыв питания) — тогда пробуем сразу, а не замораживаем заливку.
+    """
+    until = float(state.get("bucket_full_until") or 0.0)
+    left = until - now
+    if left <= 0 or left > BUCKET_FULL_PAUSE_SECONDS:
+        return 0.0
+    return left
+
+
+def note_bucket_full(state: dict[str, Any], now: float) -> bool:
+    """Поставить заливку на паузу; True — пора сказать об этом в Телеграм
+    (первый упор или прошло `ALERT_REPEAT_SECONDS` с прошлого напоминания)."""
+    state["bucket_full_until"] = now + BUCKET_FULL_PAUSE_SECONDS
+    state.setdefault("bucket_full_since", now)
+    last = state.get("bucket_full_alert_at")
+    if last is not None and 0 <= now - float(last) < ALERT_REPEAT_SECONDS:
+        return False
+    state["bucket_full_alert_at"] = now
+    return True
+
+
+def note_bucket_free(state: dict[str, Any]) -> bool:
+    """Заливка прошла; True — бакет до этого был полон (сказать «снова пишет»)."""
+    was_full = state.pop("bucket_full_since", None) is not None
+    state.pop("bucket_full_until", None)
+    state.pop("bucket_full_alert_at", None)
+    return was_full
+
+
+def report_bucket_full(
+    state: dict[str, Any],
+    bucket: str,
+    alert: Callable[[str], None] | None,
+    who: str,
+) -> None:
+    """Поставить заливку на паузу, записать в журнал и, когда пора, в Телеграм."""
+    logger.warning(
+        "Бакет %s полон (%s) — заливка на паузе на %.0f мин",
+        bucket, BUCKET_FULL_CODE, BUCKET_FULL_PAUSE_SECONDS / 60,
+    )
+    if note_bucket_full(state, time.time()) and alert is not None:
+        alert(
+            f"{who}: бакет {bucket} полон, заливка на паузе, проверка раз в час. "
+            "Поднимите предел размера бакета или проверьте его lifecycle."
+        )
+
+
+def report_bucket_accepts(
+    state: dict[str, Any],
+    bucket: str,
+    alert: Callable[[str], None] | None,
+    who: str,
+) -> None:
+    """Заливка прошла: если бакет был полон — снять паузу и сказать один раз."""
+    if note_bucket_free(state):
+        logger.info("Бакет %s снова принимает", bucket)
+        if alert is not None:
+            alert(f"{who}: бакет {bucket} снова принимает")
+
+
 def _fetch_json(url: str, timeout: float = 15.0) -> Any:
     with urllib.request.urlopen(url, timeout=timeout) as response:
         return json.loads(response.read().decode("utf-8", "replace"))
@@ -633,6 +720,22 @@ def run(settings: Settings, *, once: bool = False) -> None:
             trigger.wait(POLL_SECONDS)
             continue
         state.setdefault("watching_since", time.time())
+        wait = bucket_full_wait(state, time.time())
+        if wait > 0:
+            # Бакет полон — до конца паузы ни одного запроса в него. Общая
+            # тревога молчит: о полном бакете сказано отдельным, точным
+            # сообщением, а «застряли N событий» с причиной из журнала только
+            # путало бы.
+            state["status"] = "error"
+            state["message"] = (
+                f"Бакет полон: заливка на паузе, проверка через {wait / 60:.0f} мин. "
+                "Поднимите предел размера бакета или проверьте его lifecycle"
+            )
+            _save_state_quietly(state_path, state)
+            if once:
+                return
+            trigger.wait(POLL_SECONDS)
+            continue
         try:
             import boto3  # type: ignore[import-not-found]  # ставится на узле, в dev-среде не нужен
 
@@ -701,6 +804,8 @@ def run(settings: Settings, *, once: bool = False) -> None:
             clip_bytes = 0
             sent_events = 0
             failed = 0
+            full = False
+
             # События, у которых Frigate не нашёл записи (`recordings_gone`):
             # от них берётся только снимок, как от неподъёмно длинных.
             no_recordings = {str(key) for key in state.get("no_recordings") or []}
@@ -766,6 +871,7 @@ def run(settings: Settings, *, once: bool = False) -> None:
                                 ContentType="image/jpeg",
                             )
                         sent_bytes += len(snapshot)
+                        report_bucket_accepts(state, config.bucket, alert, "Облачная копия калитки")
                         _remember(uploaded, uploaded_order, event_id)
                         attempts.pop(event_id, None)
                         state["last_success_at"] = time.time()
@@ -787,6 +893,12 @@ def run(settings: Settings, *, once: bool = False) -> None:
                                 event_id, MAX_CLIP_SECONDS / 60,
                             )
                     except Exception as exc:  # noqa: BLE001
+                        if is_bucket_full(exc):
+                            # Состояние бакета, не события: попытку не пишем,
+                            # остальную очередь не трогаем до конца паузы.
+                            full = True
+                            report_bucket_full(state, config.bucket, alert, "Облачная копия калитки")
+                            break
                         entry = attempts.get(event_id) or _attempt_entry(None)
                         entry = {"count": entry["count"] + 1, "last_at": time.time()}
                         attempts[event_id] = entry
@@ -814,6 +926,13 @@ def run(settings: Settings, *, once: bool = False) -> None:
                             ContentType="video/mp4",
                         )
                 except Exception as exc:  # noqa: BLE001 — пропуск, не крушение
+                    if is_bucket_full(exc):
+                        # Перебирать очередь дальше бессмысленно: каждое
+                        # событие получит тот же отказ, а каждая попытка —
+                        # платный запрос и клип зря по каналу.
+                        full = True
+                        report_bucket_full(state, config.bucket, alert, "Облачная копия калитки")
+                        break
                     if recordings_gone(exc, event, now=time.time()):
                         # Не неудача: следующий круг возьмёт от события снимок.
                         # Попытка не пишется — иначе бэкофф отложил бы снимок.
@@ -843,6 +962,7 @@ def run(settings: Settings, *, once: bool = False) -> None:
                     notifier.watchdog()
                     continue
                 attempts.pop(event_id, None)
+                report_bucket_accepts(state, config.bucket, alert, "Облачная копия калитки")
                 sent_bytes += len(clip)
                 clip_bytes += len(clip)
                 done_seconds += max(
@@ -957,7 +1077,13 @@ def run(settings: Settings, *, once: bool = False) -> None:
             # Отложенных считаем вместе: и упавших в этом цикле, и отдыхающих
             # по бэкоффу — для панели это одна очередь «ещё не в облаке».
             state["pending"] = len(attempts)
-            if failed and not sent_events:
+            if full:
+                state["status"] = "error"
+                state["message"] = (
+                    "Бакет полон: заливка на паузе на час. "
+                    "Поднимите предел размера бакета или проверьте его lifecycle"
+                )
+            elif failed and not sent_events:
                 # Ни одного доставленного при непустой очереди — это не успех.
                 # Зелёная строка со свежим «последний успех» врала бы неделю,
                 # пока в облаке пусто (находка ревью 14.08).
@@ -1013,7 +1139,9 @@ def run(settings: Settings, *, once: bool = False) -> None:
             state["last_error"] = str(exc)[:300]
             state["message"] = f"Ошибка выгрузки: {str(exc)[:120]}"
             logger.warning("Цикл выгрузки не удался: %s", exc)
-        _notify_about_trouble(state, alert, now=time.time())
+        if "bucket_full_since" not in state:
+            # При полном бакете общая тревога молчит — см. паузу в начале круга.
+            _notify_about_trouble(state, alert, now=time.time())
         _save_state_quietly(state_path, state)
         if once:
             return
