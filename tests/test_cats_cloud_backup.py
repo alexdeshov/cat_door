@@ -200,7 +200,7 @@ def test_round_without_uploads_sleeps_even_with_a_queue() -> None:
 
 def test_full_bucket_is_recognised_through_the_boto_wrapper() -> None:
     """`upload_file` заворачивает отказ в свою ошибку — код ищется по цепочке."""
-    from src.cloud_backup.cats import is_bucket_full
+    from src.cloud_backup.uploader import is_bucket_full
 
     inner = RuntimeError(
         "An error occurred (BucketMaxSizeExceeded) when calling the UploadPart operation"
@@ -218,7 +218,7 @@ def test_full_bucket_is_recognised_through_the_boto_wrapper() -> None:
 def test_full_bucket_pauses_for_an_hour_and_alerts_sparingly() -> None:
     """Полный бакет — час тишины без единого запроса; тревога при первом упоре
     и раз в шесть часов, «снова принимает» — один раз."""
-    from src.cloud_backup.cats import (
+    from src.cloud_backup.uploader import (
         BUCKET_FULL_PAUSE_SECONDS,
         bucket_full_wait,
         note_bucket_free,
@@ -244,6 +244,6 @@ def test_full_bucket_pauses_for_an_hour_and_alerts_sparingly() -> None:
 def test_clock_jump_back_does_not_freeze_the_upload() -> None:
     """После обрыва питания часы идут назад: отметка «до» уезжает далеко в
     будущее. Пауза длиннее часа невозможна — значит, пробовать сразу."""
-    from src.cloud_backup.cats import bucket_full_wait
+    from src.cloud_backup.uploader import bucket_full_wait
 
     assert bucket_full_wait({"bucket_full_until": 1_000_000.0}, 100.0) == 0.0

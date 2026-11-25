@@ -1333,3 +1333,65 @@ def test_another_bad_request_is_not_a_missing_recording(
     state = _state(runtime_path)
     assert "старое" in state["attempts"]
     assert "no_recordings" not in state
+
+
+class BucketFull(Exception):
+    """Отказ Object Storage при упоре бакета в предел размера."""
+
+
+def test_a_full_bucket_pauses_the_whole_queue_for_an_hour(
+    runtime_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Полный бакет — не беда отдельного события, а состояние бакета.
+
+    Кошачья копия 18–25 ноября перебирала очередь в полный бакет десять раз в
+    секунду: ~780 тысяч платных POST. Калитка теперь при первом же
+    `BucketMaxSizeExceeded` останавливает круг и час не шлёт в бакет ничего;
+    событиям попытки не засчитываются — после пополнения бакета они едут сразу.
+    Тревога — одна на упор и одна на «снова принимает»; общая «застряли»
+    при этом молчит.
+    """
+    from src.cloud_backup import uploader
+
+    now = time.time()
+    frigate = _Frigate([_event("a", now - 600), _event("b", now - 500), _event("c", now - 400)])
+    full = {"on": True}
+    s3 = _FakeS3()
+
+    def put_object(*, Bucket: str, Key: str, Body: bytes, ContentType: str) -> None:
+        s3.attempted.append(Key)
+        if full["on"]:
+            raise BucketFull(
+                "An error occurred (BucketMaxSizeExceeded) when calling the PutObject operation"
+            )
+        s3.stored.append(Key)
+
+    s3.put_object = put_object  # type: ignore[method-assign]
+    alerts: list[str] = []
+    monkeypatch.setattr(uploader, "_alert_sender", lambda settings: alerts.append)
+    settings = _install(monkeypatch, runtime_path, frigate, s3)
+
+    run(settings, once=True)
+    assert len(s3.attempted) == 1  # одна попытка, а не вся очередь
+    state = _state(runtime_path)
+    assert state["attempts"] == {}
+    assert state["status"] == "error"
+    assert "Бакет полон" in state["message"]
+    assert len(alerts) == 1 and "полон" in alerts[0]
+
+    run(settings, once=True)  # пауза: ни одного запроса в бакет
+    assert len(s3.attempted) == 1
+    assert "проверка через" in _state(runtime_path)["message"]
+
+    # Час прошёл, владелец поднял предел.
+    path = cloud_backup_state_path(runtime_path)
+    state = _state(runtime_path)
+    state["bucket_full_until"] = now - 1
+    path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+    full["on"] = False
+    run(settings, once=True)
+
+    state = _state(runtime_path)
+    assert set(state["uploaded"]) == {"a", "b", "c"}
+    assert "bucket_full_since" not in state
+    assert len(alerts) == 2 and "снова принимает" in alerts[1]
