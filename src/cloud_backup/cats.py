@@ -80,6 +80,37 @@ VIEWS = (("face", "media_path"), ("side", "side_media_path"))
 # Статусы, при которых клип считается пригодным. `partial` — это проход, где
 # один ракурс не записался; второй заливать всё равно надо.
 USABLE_STATUSES = ("ready", "partial")
+# Сколько отказов подряд у одного прохода терпеть молча. Пятый отказ — это
+# уже четверть часа бэкоффа (1+2+4+8 мин), то есть не мигание связи, а беда:
+# с 18 по 25 ноября бакет упёрся в предел размера, и неделю об этом знал только
+# журнал службы.
+ALERT_AT_ATTEMPT = 5
+# Как часто повторять тревогу о застрявших проходах.
+ALERT_REPEAT_SECONDS = 6 * 3600.0
+
+
+def record_failure(attempts: dict[str, dict[str, float]], key: str, now: float) -> int:
+    """Учесть отказ прохода; возвращает номер попытки.
+
+    Поле — `last_at`, как его читает `deferred_ids`. До 25 ноября здесь писалось
+    `at`: отсрочка всегда считалась от нуля, проход повторялся без паузы, и
+    неделя упора в предел бакета стоила ~780 тысяч платных POST-запросов.
+    """
+    entry = attempts.setdefault(key, {"count": 0, "last_at": 0.0})
+    entry["count"] = int(entry.get("count") or 0) + 1
+    entry["last_at"] = now
+    entry.pop("at", None)
+    return int(entry["count"])
+
+
+def pause_after_round(done: int, remaining: int) -> float:
+    """Сколько спать после круга.
+
+    Без паузы — только если круг что-то залил и очередь не пуста: догон должен
+    идти подряд. Круг без единой заливки (отказ, всё отложено) спит обычную
+    паузу — иначе отказ превращается в цикл по десять запросов в секунду.
+    """
+    return 0.0 if done and remaining else POLL_SECONDS
 
 
 def object_key(prefix: str, event_id: int, created_at: Any, view: str) -> str:
@@ -197,6 +228,9 @@ def run(settings: Settings, *, once: bool = False) -> None:
         attempts = {str(k): _attempt_entry(v) for k, v in state.get("attempts", {}).items()}
         now = time.time()
         deferred = deferred_ids(attempts, now)
+        # Заливки этого круга: от них зависит, спать ли после него. Ноль и при
+        # упавшем круге — тогда пауза обязательна.
+        done = 0
 
         try:
             import boto3  # type: ignore[import-not-found]  # ставится на узле, в dev-среде не нужен
@@ -237,7 +271,6 @@ def run(settings: Settings, *, once: bool = False) -> None:
             batch = queue[:BATCH]
             bucket = config.cats_target_bucket
             sent_bytes = 0
-            done = 0
             started = time.monotonic()
             for event in batch:
                 key = str(event["id"])
@@ -246,15 +279,25 @@ def run(settings: Settings, *, once: bool = False) -> None:
                         client, bucket, config.cats_prefix, settings.data_dir, event, notifier
                     )
                 except Exception as exc:  # noqa: BLE001 — botocore не наследует OSError
-                    entry = attempts.setdefault(key, {"count": 0, "at": 0.0})
-                    entry["count"] = int(entry["count"]) + 1
-                    entry["at"] = time.time()
+                    count = record_failure(attempts, key, time.time())
                     logger.warning(
                         "Проход %s не уехал (%s), повтор через %.0f с",
                         key,
                         str(exc)[:200],
-                        retry_delay(int(entry["count"])),
+                        retry_delay(count),
                     )
+                    # Попытки — в состояние сразу: круг перечитывает его с
+                    # диска, и несохранённый счётчик обнулялся бы каждый раз.
+                    state["attempts"] = attempts
+                    if count >= ALERT_AT_ATTEMPT and alert is not None:
+                        last = float(state.get("stuck_alert_at") or 0.0)
+                        if not 0 <= time.time() - last < ALERT_REPEAT_SECONDS:
+                            state["stuck_alert_at"] = time.time()
+                            alert(
+                                f"Кошачья облачная копия: проход {key} не уезжает "
+                                f"{count} попыток подряд: {str(exc)[:150]}"
+                            )
+                    _save_state_quietly(state_path, state)
                     break
                 if missing:
                     logger.info(
@@ -309,8 +352,9 @@ def run(settings: Settings, *, once: bool = False) -> None:
 
         if once:
             return
-        # При непустой очереди спать незачем — догон должен идти без пауз.
-        time.sleep(0.0 if state.get("pending") else POLL_SECONDS)
+        time.sleep(
+            pause_after_round(done, int(state.get("pending") or 0))
+        )
 
 
 def main() -> None:

@@ -162,3 +162,37 @@ def test_missing_file_is_reported_as_a_skip_not_a_failure(tmp_path: Path) -> Non
     assert size == 10
     assert missing == ["side"]
     assert sent == [("peski26-cats", "cat-events/2026-08-30/00000007/face.mp4")]
+
+
+def test_failure_defers_the_pass_instead_of_retrying_at_once() -> None:
+    """Отказ откладывает проход: `deferred_ids` читает `last_at`.
+
+    До 25 ноября отказ писал поле `at`, отсрочка считалась от нуля, и упёршийся
+    в предел бакет повторялся десять раз в секунду — ~780 тысяч платных POST.
+    """
+    from src.cloud_backup.cats import record_failure
+    from src.cloud_backup.uploader import _attempt_entry, deferred_ids
+
+    attempts: dict[str, dict[str, float]] = {}
+    assert record_failure(attempts, "4665", 1000.0) == 1
+    assert deferred_ids(attempts, 1001.0) == {"4665"}
+    assert deferred_ids(attempts, 1000.0 + 61) == set()
+
+    assert record_failure(attempts, "4665", 1100.0) == 2
+    assert deferred_ids(attempts, 1100.0 + 100) == {"4665"}
+
+    # Запись прежнего формата чинится на ходу, а не остаётся вечно без отсрочки.
+    legacy: dict[str, dict[str, float]] = {"7": {"count": 3, "at": 500.0}}
+    legacy = {k: _attempt_entry(v) for k, v in legacy.items()}
+    assert record_failure(legacy, "7", 2000.0) == 4
+    assert deferred_ids(legacy, 2001.0) == {"7"}
+
+
+def test_round_without_uploads_sleeps_even_with_a_queue() -> None:
+    """Подряд крутится только догон, который что-то заливает. Круг с отказом
+    при непустой очереди обязан спать — иначе он и есть горячий цикл."""
+    from src.cloud_backup.cats import POLL_SECONDS, pause_after_round
+
+    assert pause_after_round(done=3, remaining=40) == 0.0
+    assert pause_after_round(done=0, remaining=40) == POLL_SECONDS
+    assert pause_after_round(done=3, remaining=0) == POLL_SECONDS
